@@ -7,13 +7,10 @@ const OFFSETS: [u32; 8] = [1, 7, 11, 13, 17, 19, 23, 29];
 const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
 // ── Segment sizing ───────────────────────────────────────────────────────────
-const MAX_SEG_BYTES: usize = 512 * 1024;
-const MIN_SEG_BYTES: usize = 16 * 1024; // Small segs for load balancing on small ranges
+const MAX_SEG_BYTES: usize = 768 * 1024;
+const MIN_SEG_BYTES: usize = 16 * 1024;
 
 // ── Pre-sieve pattern ────────────────────────────────────────────────────────
-// For small primes 7, 11, 13: the sieve pattern repeats every 7*11*13 = 1001 bytes.
-// Pre-computing this pattern and tiling it into each segment avoids
-// ~3 primes × 8 residues of inner-loop work per segment.
 const PRESIEVE_PRIMES: [u64; 3] = [7, 11, 13];
 const PRESIEVE_PERIOD: usize = 7 * 11 * 13; // 1001 bytes
 
@@ -26,10 +23,6 @@ const fn mod_inv_30(a: u32) -> u32 {
     }
 }
 
-// Precomputed table: TARGET_K_MOD[p_residue_index][offset_index]
-// For prime with p%30 = OFFSETS[pri], hitting residue OFFSETS[oi],
-// k must satisfy k ≡ TARGET_K_MOD[pri][oi] (mod 30).
-// Computed as (OFFSETS[oi] * mod_inv_30(OFFSETS[pri])) % 30.
 const TARGET_K_MOD: [[u64; 8]; 8] = precompute_target_k_mod();
 
 const fn precompute_target_k_mod() -> [[u64; 8]; 8] {
@@ -48,7 +41,6 @@ const fn precompute_target_k_mod() -> [[u64; 8]; 8] {
     table
 }
 
-// Map p%30 to index into OFFSETS (for primes > 5, p%30 is always one of these)
 const P_MOD_TO_IDX: [u8; 30] = {
     let mut t = [0u8; 30];
     t[1] = 0; t[7] = 1; t[11] = 2; t[13] = 3;
@@ -56,16 +48,42 @@ const P_MOD_TO_IDX: [u8; 30] = {
     t
 };
 
-/// Build the pre-sieve pattern for primes 7, 11, 13.
-/// Marks ALL multiples including k=1 (the prime itself) since the
-/// primes 7/11/13 never appear in sieve segments (which start > sqrt_n).
+/// Precomputed sieving prime with wheel30 metadata and reciprocal for fast division.
+struct SievePrime {
+    p: u32,
+    p_idx: u8,
+    // Reciprocal for Barrett reduction: floor(2^64 / p) + 1
+    // Allows replacing `n / p` with `mulhi(n, recip) >> shift`
+    recip: u64,
+}
+
+fn precompute_sieve_primes(primes: &[u32]) -> Vec<SievePrime> {
+    primes.iter().map(|&p| {
+        let p_idx = P_MOD_TO_IDX[(p % 30) as usize];
+        // Barrett reciprocal: ceil(2^64 / p)
+        let recip = if p > 1 {
+            u64::MAX / (p as u64) + 1
+        } else {
+            u64::MAX
+        };
+        SievePrime { p, p_idx, recip }
+    }).collect()
+}
+
+/// Fast approximate division: floor(n / p) using precomputed reciprocal.
+/// Uses the identity: floor(n / p) = mulhi(n, ceil(2^64/p))
+/// This is exact for n < 2^63 and p < 2^32.
+#[inline(always)]
+fn fast_div(n: u64, recip: u64) -> u64 {
+    ((n as u128 * recip as u128) >> 64) as u64
+}
+
 fn build_presieve() -> Vec<u8> {
     let mut pattern = vec![0u8; PRESIEVE_PERIOD];
     for &p in &PRESIEVE_PRIMES {
         let p_idx = P_MOD_TO_IDX[(p % 30) as usize] as usize;
         for i in 0..8 {
             let target = TARGET_K_MOD[p_idx][i];
-            // Start from k=target (don't skip k<2, mark ALL multiples)
             let mut byte_idx = ((target * p) / 30) as usize;
             let step = p as usize;
             while byte_idx < PRESIEVE_PERIOD {
@@ -77,45 +95,41 @@ fn build_presieve() -> Vec<u8> {
     pattern
 }
 
-/// Tile the pre-sieve pattern into a segment, correctly aligned.
 #[inline]
 fn apply_presieve(sieve: &mut [u8], seg_byte_offset: usize, presieve: &[u8]) {
     let offset_in_pattern = seg_byte_offset % PRESIEVE_PERIOD;
     let len = sieve.len();
     let mut dst = 0;
 
-    // First partial chunk
     let first_chunk = (PRESIEVE_PERIOD - offset_in_pattern).min(len);
     sieve[..first_chunk].copy_from_slice(&presieve[offset_in_pattern..offset_in_pattern + first_chunk]);
     dst += first_chunk;
 
-    // Full chunks
     while dst + PRESIEVE_PERIOD <= len {
         sieve[dst..dst + PRESIEVE_PERIOD].copy_from_slice(presieve);
         dst += PRESIEVE_PERIOD;
     }
 
-    // Last partial chunk
     if dst < len {
         let remaining = len - dst;
         sieve[dst..].copy_from_slice(&presieve[..remaining]);
     }
 }
 
-/// Compute starting byte indices for each wheel residue.
-/// Hoists common computation out of the per-residue loop.
+/// Compute start byte positions for a sieving prime in a segment.
+/// Uses Barrett reciprocal to replace u64 division with multiplication.
 #[inline]
-fn compute_starts(p: u64, seg_start: u64, seg_bytes_len: usize) -> [usize; 8] {
-    let p_idx = P_MOD_TO_IDX[(p % 30) as usize] as usize;
+fn compute_starts(sp: &SievePrime, seg_start: u64, seg_bytes_len: usize) -> [usize; 8] {
+    let p = sp.p as u64;
     let seg_end_num = seg_start + (seg_bytes_len as u64) * 30;
     let mut starts = [usize::MAX; 8];
 
-    // Hoist: k_min and k_rem are the same for all residues
-    let k_min = (seg_start + p - 1) / p;
+    // k_min = ceil(seg_start / p) using Barrett reciprocal
+    let k_min = fast_div(seg_start + p - 1, sp.recip);
     let k_rem = k_min % 30;
 
     for i in 0..8 {
-        let target = TARGET_K_MOD[p_idx][i];
+        let target = TARGET_K_MOD[sp.p_idx as usize][i];
         let mut k = if k_rem <= target {
             k_min + (target - k_rem)
         } else {
@@ -126,21 +140,15 @@ fn compute_starts(p: u64, seg_start: u64, seg_bytes_len: usize) -> [usize; 8] {
         let m = k * p;
         if m >= seg_end_num { continue; }
 
-        // (m - seg_start) is guaranteed to be a multiple of 30
-        // because seg_start is aligned to 30 and m ≡ OFFSETS[i] (mod 30),
-        // wait — m = k*p where m%30 = OFFSETS[i], and seg_start%30 = 0,
-        // so (m - seg_start) % 30 = OFFSETS[i], not 0.
-        // We need byte_idx = (m - seg_start) / 30.
-        // Use the fact that division by 30 can be done as multiply+shift:
-        // x/30 = (x * 2290649225) >> 36 for x < 2^36 (68B range, fine for segments)
         let diff = m - seg_start;
         starts[i] = (diff / 30) as usize;
     }
     starts
 }
 
+/// Sieve marking for small primes (many hits per segment): 4× unrolled.
 #[inline]
-unsafe fn sieve_with_starts(sieve: &mut [u8], starts: &[usize; 8], p: usize) {
+unsafe fn sieve_small(sieve: &mut [u8], starts: &[usize; 8], p: usize) {
     let len = sieve.len();
 
     for i in 0..8 {
@@ -162,7 +170,18 @@ unsafe fn sieve_with_starts(sieve: &mut [u8], starts: &[usize; 8], p: usize) {
     }
 }
 
-/// Count prime candidates (zero bits) in the sieve.
+/// Sieve marking for large primes (≤1 hit per residue per segment): no unrolling.
+#[inline]
+unsafe fn sieve_large(sieve: &mut [u8], starts: &[usize; 8]) {
+    let len = sieve.len();
+    for i in 0..8 {
+        let idx = starts[i];
+        if idx < len {
+            *sieve.get_unchecked_mut(idx) |= BITS[i];
+        }
+    }
+}
+
 #[inline]
 fn count_primes_in_sieve(sieve: &[u8], seg_start: u64, limit: u64) -> u64 {
     let valid_bytes = sieve.len();
@@ -210,12 +229,13 @@ fn count_primes(limit: u64) -> u64 {
         return small_sieve.prime_pi(limit as usize) as u64;
     }
 
-    // Skip presieve primes (7, 11, 13) from the main sieve loop
-    let sieving_primes: Vec<u64> = small_sieve
+    let sieving_primes_raw: Vec<u32> = small_sieve
         .primes_from(7)
-        .map(|p| p as u64)
-        .filter(|&p| !PRESIEVE_PRIMES.contains(&p))
+        .map(|p| p as u32)
+        .filter(|&p| !PRESIEVE_PRIMES.contains(&(p as u64)))
         .collect();
+
+    let sieving_primes = precompute_sieve_primes(&sieving_primes_raw);
 
     let base_prime_count = small_sieve.prime_pi(sqrt_n) as u64;
 
@@ -237,11 +257,10 @@ fn count_primes(limit: u64) -> u64 {
         let r = (n % 30) as usize;
         if matches!(r, 1|7|11|13|17|19|23|29) {
             let mut is_p = true;
-            for &sp in &sieving_primes {
-                if sp * sp > n { break; }
-                if n % sp == 0 { is_p = false; break; }
+            for sp in &sieving_primes {
+                if (sp.p as u64) * (sp.p as u64) > n { break; }
+                if n % (sp.p as u64) == 0 { is_p = false; break; }
             }
-            // Also check presieve primes
             if is_p {
                 for &pp in &PRESIEVE_PRIMES {
                     if pp * pp > n { break; }
@@ -252,10 +271,7 @@ fn count_primes(limit: u64) -> u64 {
         }
     }
 
-    // Build presieve pattern once (shared across all threads)
     let presieve = build_presieve();
-    // The presieve pattern starts from number 0; sieve_start's offset in the
-    // pattern is (sieve_start / 30) % PRESIEVE_PERIOD bytes.
     let presieve_base_offset = ((sieve_start / 30) as usize) % PRESIEVE_PERIOD;
 
     let total_numbers = limit - sieve_start + 1;
@@ -273,6 +289,12 @@ fn count_primes(limit: u64) -> u64 {
 
     let num_segs = (total_bytes + seg_bytes - 1) / seg_bytes;
 
+    // Split primes: small primes get unrolled loop, large primes get single-write
+    let large_threshold = seg_bytes as u32;
+    let split_idx = sieving_primes.partition_point(|sp| sp.p < large_threshold);
+    let small_primes = &sieving_primes[..split_idx];
+    let large_primes = &sieving_primes[split_idx..];
+
     let upper_count: u64 = (0..num_segs)
         .into_par_iter()
         .map_init(
@@ -285,14 +307,17 @@ fn count_primes(limit: u64) -> u64 {
 
             let sieve = &mut sieve_buf[..seg_byte_count];
 
-            // Initialize from presieve pattern instead of zeroing
             let pattern_offset = (presieve_base_offset + byte_offset) % PRESIEVE_PERIOD;
             apply_presieve(sieve, pattern_offset, &presieve);
 
-            // Sieve remaining primes (17, 19, 23, 29, 31, ...)
-            for &p in &sieving_primes {
-                let starts = compute_starts(p, seg_start_num, seg_byte_count);
-                unsafe { sieve_with_starts(sieve, &starts, p as usize); }
+            for sp in small_primes {
+                let starts = compute_starts(sp, seg_start_num, seg_byte_count);
+                unsafe { sieve_small(sieve, &starts, sp.p as usize); }
+            }
+
+            for sp in large_primes {
+                let starts = compute_starts(sp, seg_start_num, seg_byte_count);
+                unsafe { sieve_large(sieve, &starts); }
             }
 
             count_primes_in_sieve(sieve, seg_start_num, limit)
