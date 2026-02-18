@@ -8,7 +8,7 @@ const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
 // ── Segment sizing ───────────────────────────────────────────────────────────
 const MAX_SEG_BYTES: usize = 512 * 1024;
-const MIN_SEG_BYTES: usize = 64 * 1024;
+const MIN_SEG_BYTES: usize = 16 * 1024; // Small segs for load balancing on small ranges
 
 // ── Pre-sieve pattern ────────────────────────────────────────────────────────
 // For small primes 7, 11, 13: the sieve pattern repeats every 7*11*13 = 1001 bytes.
