@@ -1,5 +1,6 @@
 use primal::Sieve;
 use rayon::prelude::*;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 // ── Wheel mod 30 ─────────────────────────────────────────────────────────────
@@ -8,11 +9,11 @@ const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
 // ── Segment sizing ───────────────────────────────────────────────────────────
 const MAX_SEG_BYTES: usize = 768 * 1024;
-const MIN_SEG_BYTES: usize = 16 * 1024;
+const MIN_SEG_BYTES: usize = 8 * 1024;
 
 // ── Pre-sieve pattern ────────────────────────────────────────────────────────
-const PRESIEVE_PRIMES: [u64; 3] = [7, 11, 13];
-const PRESIEVE_PERIOD: usize = 7 * 11 * 13; // 1001 bytes
+const PRESIEVE_PRIMES: [u64; 5] = [7, 11, 13, 17, 19];
+const PRESIEVE_PERIOD: usize = 7 * 11 * 13 * 17 * 19; // 323323 bytes
 
 #[inline(always)]
 const fn mod_inv_30(a: u32) -> u32 {
@@ -78,6 +79,8 @@ fn fast_div(n: u64, recip: u64) -> u64 {
     ((n as u128 * recip as u128) >> 64) as u64
 }
 
+static PRESIEVE_PATTERN: OnceLock<Vec<u8>> = OnceLock::new();
+
 fn build_presieve() -> Vec<u8> {
     let mut pattern = vec![0u8; PRESIEVE_PERIOD];
     for &p in &PRESIEVE_PRIMES {
@@ -93,6 +96,10 @@ fn build_presieve() -> Vec<u8> {
         }
     }
     pattern
+}
+
+fn get_presieve() -> &'static [u8] {
+    PRESIEVE_PATTERN.get_or_init(build_presieve)
 }
 
 #[inline]
@@ -163,6 +170,21 @@ unsafe fn sieve_small(sieve: &mut [u8], starts: &[usize; 8], p: usize) {
             *sieve.get_unchecked_mut(idx + 3 * p) |= bit;
             idx += 4 * p;
         }
+        while idx < len {
+            *sieve.get_unchecked_mut(idx) |= bit;
+            idx += p;
+        }
+    }
+}
+
+/// Sieve marking for medium primes (a few hits per segment): no unrolling.
+#[inline]
+unsafe fn sieve_medium(sieve: &mut [u8], starts: &[usize; 8], p: usize) {
+    let len = sieve.len();
+    for i in 0..8 {
+        let mut idx = starts[i];
+        if idx >= len { continue; }
+        let bit = BITS[i];
         while idx < len {
             *sieve.get_unchecked_mut(idx) |= bit;
             idx += p;
@@ -271,7 +293,7 @@ fn count_primes(limit: u64) -> u64 {
         }
     }
 
-    let presieve = build_presieve();
+    let presieve = get_presieve();
     let presieve_base_offset = ((sieve_start / 30) as usize) % PRESIEVE_PERIOD;
 
     let total_numbers = limit - sieve_start + 1;
@@ -289,11 +311,14 @@ fn count_primes(limit: u64) -> u64 {
 
     let num_segs = (total_bytes + seg_bytes - 1) / seg_bytes;
 
-    // Split primes: small primes get unrolled loop, large primes get single-write
+    // Split primes into 3 tiers by hit frequency per segment
+    let medium_threshold = (seg_bytes / 8) as u32;
     let large_threshold = seg_bytes as u32;
-    let split_idx = sieving_primes.partition_point(|sp| sp.p < large_threshold);
-    let small_primes = &sieving_primes[..split_idx];
-    let large_primes = &sieving_primes[split_idx..];
+    let small_split = sieving_primes.partition_point(|sp| sp.p < medium_threshold);
+    let large_split = sieving_primes.partition_point(|sp| sp.p < large_threshold);
+    let small_primes = &sieving_primes[..small_split];
+    let medium_primes = &sieving_primes[small_split..large_split];
+    let large_primes = &sieving_primes[large_split..];
 
     let upper_count: u64 = (0..num_segs)
         .into_par_iter()
@@ -313,6 +338,11 @@ fn count_primes(limit: u64) -> u64 {
             for sp in small_primes {
                 let starts = compute_starts(sp, seg_start_num, seg_byte_count);
                 unsafe { sieve_small(sieve, &starts, sp.p as usize); }
+            }
+
+            for sp in medium_primes {
+                let starts = compute_starts(sp, seg_start_num, seg_byte_count);
+                unsafe { sieve_medium(sieve, &starts, sp.p as usize); }
             }
 
             for sp in large_primes {
