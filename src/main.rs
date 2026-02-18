@@ -319,14 +319,11 @@ fn count_primes(limit: u64) -> u64 {
 
     // Split primes into tiers
     let tiny_threshold = (L1_SEG_BYTES / 4) as u32;
-    let medium_threshold = (seg_bytes / 8) as u32;
     let large_threshold = seg_bytes as u32;
     let tiny_split = sieving_primes.partition_point(|sp| sp.p < tiny_threshold);
-    let small_split = sieving_primes.partition_point(|sp| sp.p < medium_threshold);
     let large_split = sieving_primes.partition_point(|sp| sp.p < large_threshold);
     let tiny_primes = &sieving_primes[..tiny_split];
-    let small_primes = &sieving_primes[tiny_split..small_split];
-    let medium_primes = &sieving_primes[small_split..large_split];
+    let small_primes = &sieving_primes[tiny_split..large_split];
     let large_primes = &sieving_primes[large_split..];
 
     let upper_count: u64 = (0..num_segs)
@@ -360,14 +357,8 @@ fn count_primes(limit: u64) -> u64 {
                 }
             }
 
-            // Small primes: full segment (fits in L2), 4x unrolled
+            // Small primes: full segment, simple loop
             for sp in small_primes {
-                let starts = compute_starts(sp, seg_start_num, seg_byte_count);
-                unsafe { sieve_small(sieve, &starts, sp.p as usize); }
-            }
-
-            // Medium primes: simple loop (few hits per segment)
-            for sp in medium_primes {
                 let starts = compute_starts(sp, seg_start_num, seg_byte_count);
                 unsafe { sieve_medium(sieve, &starts, sp.p as usize); }
             }
