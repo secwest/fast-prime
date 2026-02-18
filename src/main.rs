@@ -11,6 +11,11 @@ const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 const MAX_SEG_BYTES: usize = 768 * 1024;
 const MIN_SEG_BYTES: usize = 8 * 1024;
 
+// L1-fitting threshold: primes with p < L1_SEG do extremely well in L1.
+// Segments are 768KB (L2), but tiny primes walk through all of it repeatedly.
+// For these tiny primes, the inner loop is limited by L1 miss rate.
+const L1_SEG_BYTES: usize = 24 * 1024;
+
 // ── Pre-sieve pattern ────────────────────────────────────────────────────────
 const PRESIEVE_PRIMES: [u64; 5] = [7, 11, 13, 17, 19];
 const PRESIEVE_PERIOD: usize = 7 * 11 * 13 * 17 * 19; // 323323 bytes
@@ -163,7 +168,8 @@ unsafe fn sieve_small(sieve: &mut [u8], starts: &[usize; 8], p: usize) {
         if idx >= len { continue; }
         let bit = BITS[i];
 
-        while idx + 3 * p < len {
+        let end4 = len.saturating_sub(3 * p);
+        while idx < end4 {
             *sieve.get_unchecked_mut(idx) |= bit;
             *sieve.get_unchecked_mut(idx + p) |= bit;
             *sieve.get_unchecked_mut(idx + 2 * p) |= bit;
@@ -311,12 +317,15 @@ fn count_primes(limit: u64) -> u64 {
 
     let num_segs = (total_bytes + seg_bytes - 1) / seg_bytes;
 
-    // Split primes into 3 tiers by hit frequency per segment
+    // Split primes into tiers
     let medium_threshold = (seg_bytes / 8) as u32;
     let large_threshold = seg_bytes as u32;
+    let tiny_threshold = (L1_SEG_BYTES / 4) as u32;
+    let tiny_split = sieving_primes.partition_point(|sp| sp.p < tiny_threshold);
     let small_split = sieving_primes.partition_point(|sp| sp.p < medium_threshold);
     let large_split = sieving_primes.partition_point(|sp| sp.p < large_threshold);
-    let small_primes = &sieving_primes[..small_split];
+    let tiny_primes = &sieving_primes[..tiny_split];
+    let small_primes = &sieving_primes[tiny_split..small_split];
     let medium_primes = &sieving_primes[small_split..large_split];
     let large_primes = &sieving_primes[large_split..];
 
@@ -335,6 +344,23 @@ fn count_primes(limit: u64) -> u64 {
             let pattern_offset = (presieve_base_offset + byte_offset) % PRESIEVE_PERIOD;
             apply_presieve(sieve, pattern_offset, &presieve);
 
+            // Tiny primes: process in L1-sized sub-segments for cache locality
+            if !tiny_primes.is_empty() {
+                let mut sub_offset = 0usize;
+                while sub_offset < seg_byte_count {
+                    let sub_len = L1_SEG_BYTES.min(seg_byte_count - sub_offset);
+                    let sub_start = seg_start_num + (sub_offset as u64) * 30;
+                    let sub_sieve = &mut sieve[sub_offset..sub_offset + sub_len];
+
+                    for sp in tiny_primes {
+                        let starts = compute_starts(sp, sub_start, sub_len);
+                        unsafe { sieve_small(sub_sieve, &starts, sp.p as usize); }
+                    }
+                    sub_offset += L1_SEG_BYTES;
+                }
+            }
+
+            // Small/medium primes: full segment (fits in L2)
             for sp in small_primes {
                 let starts = compute_starts(sp, seg_start_num, seg_byte_count);
                 unsafe { sieve_small(sieve, &starts, sp.p as usize); }
