@@ -10,12 +10,12 @@ Counts all primes up to N using a segmented Sieve of Eratosthenes with wheel mod
 ┌─────────────┬──────────────┬──────────────────┐
 │ Range       │ Time         │ Primes Found     │
 ├─────────────┼──────────────┼──────────────────┤
-│ 1 Thousand  │    0.00001s  │              168 │
-│ 1 Million   │    0.00008s  │           78,498 │
-│ 1 Billion   │    0.01385s  │       50,847,534 │
-│ 10 Billion  │    0.15344s  │      455,052,511 │
-│ 100 Billion │    1.66201s  │    4,118,054,813 │
-│ 1 Trillion  │   20.42455s  │   37,607,912,018 │
+│ 1 Thousand  │    0.00002s  │              168 │
+│ 1 Million   │    0.00007s  │           78,498 │
+│ 1 Billion   │    0.01311s  │       50,847,534 │
+│ 10 Billion  │    0.14593s  │      455,052,511 │
+│ 100 Billion │    1.59081s  │    4,118,054,813 │
+│ 1 Trillion  │   19.26516s  │   37,607,912,018 │
 └─────────────┴──────────────┴──────────────────┘
 ```
 
@@ -23,7 +23,9 @@ Counts all primes up to N using a segmented Sieve of Eratosthenes with wheel mod
 
 - **Wheel mod 30** — Only sieves 8 residues per 30 numbers (those coprime to 2, 3, 5), reducing candidate count by ~73% vs odds-only
 - **1 byte = 30 numbers** — Each byte encodes 8 wheel residues as individual bits, providing excellent cache utilization
-- **Adaptive segment sizing** — Segments scale between 64KB–512KB to ensure enough parallel work units for effective work-stealing across heterogeneous P-cores and E-cores
+- **Adaptive segment sizing** — Segments scale between 16KB–512KB to ensure enough parallel work units for effective work-stealing across heterogeneous P-cores and E-cores
+- **Pre-sieve pattern** — Composites of primes 7, 11, 13 are pre-computed in a 1001-byte repeating pattern and tiled via memcpy, eliminating inner-loop work for the three most frequent small primes
+- **Precomputed wheel tables** — `TARGET_K_MOD` lookup table eliminates per-residue modular inverse computation; common subexpressions hoisted out of the per-residue loop
 - **Unrolled inner loop** — 4× unrolled sieve marking for small primes that hit many times per segment
 - **Thread-local sieve buffers** — Reused via `map_init` to avoid repeated allocation
 - **`target-cpu=native`** — Compiled with native CPU instructions via `.cargo/config.toml`
