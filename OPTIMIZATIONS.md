@@ -336,9 +336,81 @@ L1/4 was optimal — primes with ≥4 hits per sub-segment benefit from L1 local
 
 | Range | Ref. Baseline | Final | Total Speedup |
 |---|---|---|---|
-| 1 Billion | 0.107s | 0.007s | **15.3×** |
-| 10 Billion | 1.119s | 0.064s | **17.5×** |
-| 100 Billion | 11.609s | 0.721s | **16.1×** |
-| 1 Trillion | 119.618s | 9.300s | **12.9×** |
+| 1 Billion | 0.107s | 0.006s | **17.8×** |
+| 10 Billion | 1.119s | 0.069s | **16.2×** |
+| 100 Billion | 11.609s | 0.757s | **15.3×** |
+| 1 Trillion | 119.618s | 9.07s | **13.2×** |
 
 The single biggest optimization was L1 sub-segmentation (#14), providing ~2× speedup. Wheel mod 30 (#1) provided the foundational ~6× improvement over the odds-only baseline.
+
+---
+
+## ✅ Optimization 16: 1MB L2 Segments
+
+**What:** Increase MAX_SEG_BYTES from 768KB to 1MB, now that L1 sub-segmentation handles tiny primes.
+
+**Why it helps:** Larger segments reduce per-segment overhead (compute_starts calls for medium/large primes). Tiny primes are unaffected since they operate within L1 sub-segments.
+
+**Result:** 1T improved from 9.30s to 9.07s (~2.5%).
+
+---
+
+## ✅ Optimization 17: Simplified 3-Tier Architecture
+
+**What:** Reduce from complex 4-tier split (tiny/small/medium/large) to 3 tiers: tiny (L1 sub-segmented, 4× unrolled), small (full segment, simple loop), large (single-write).
+
+**Why it helps:** The old "medium" tier (seg/8 to seg threshold) with 4× unrolled code was slower for primes with few hits per segment. A simple non-unrolled loop is better for 8-170 hits.
+
+**Result:** Marginal improvement, cleaner code.
+
+---
+
+## ❌ Failed Optimization: Reverse Small Prime Order
+
+**What:** Process small primes from largest to smallest, hypothesizing that large primes would warm cache lines that smaller primes reuse.
+
+**Why it failed:** Smaller primes touch more cache lines more frequently — processing them first is better for temporal locality.
+
+**Result:** 1T went from 9.1s to 9.9s. ~9% slower.
+
+---
+
+## ❌ Failed Optimization: Wheel Mod 210 (2×3×5×7)
+
+**What:** Major rewrite to wheel mod 210 with 48 coprime residues per 210-number block (vs 8 per 30 for wheel-30). Reduces candidate count by 14.3%. Tried multiple data layouts:
+
+1. **Interleaved (6 bytes per 210-block):** Inner loop stride = 6×p bytes, killing cache locality.
+2. **Planar (6 separate byte-planes):** Each plane has stride p (like wheel-30), but 6× more plane iterations.
+3. **Merged starts + planar:** Compute starts once, apply to 6 planes.
+
+**Why it failed:** The 14.3% reduction in candidates is vastly outweighed by:
+- **6× more inner loop iterations** (48 residues vs 8)
+- **6× more compute_starts work** (48 residues per call)
+- **Interleaved layout:** 6× stride kills L1/L2 spatial locality
+- **Planar layout:** 6× more loop dispatches per prime
+
+The total number of sieve writes is nearly identical (8.35M/p for wheel-210 vs 8M/p for wheel-30 per segment), but the loop overhead dominates.
+
+**Result:**
+
+| Variant | 1B | 10B | 100B | 1T |
+|---|---|---|---|---|
+| **Wheel-30 (current)** | **0.006s** | **0.069s** | **0.757s** | **9.07s** |
+| Wheel-210 interleaved | 0.012s | 0.091s | 1.270s | 26.2s |
+| Wheel-210 planar | 0.015s | 0.090s | 1.204s | 25.0s |
+| Wheel-210 no-L1-sub | 0.016s | 0.132s | 1.565s | 26.8s |
+
+**2.8–3× slower across all layouts.** Wheel-210 is a fundamental architectural mismatch for this sieve style — the per-residue loop overhead dominates over the memory savings.
+
+---
+
+## Current Best Results (Ultra 9 285K, 24 threads)
+
+| Range | Time | Expected | Status |
+|---|---|---|---|
+| 1 Thousand | 0.0004s | 168 | ✓ |
+| 1 Million | 0.0001s | 78,498 | ✓ |
+| 1 Billion | 0.006s | 50,847,534 | ✓ |
+| 10 Billion | 0.069s | 455,052,511 | ✓ |
+| 100 Billion | 0.757s | 4,118,054,813 | ✓ |
+| 1 Trillion | 9.07s | 37,607,912,018 | ✓ |
