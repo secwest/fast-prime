@@ -2,7 +2,7 @@
 
 A highly optimized prime counting sieve in Rust, targeting modern hybrid-core CPUs.
 
-Counts all primes up to N using a segmented Sieve of Eratosthenes with wheel mod 30 factorization and parallel execution via [Rayon](https://github.com/rayon-rs/rayon).
+Counts all primes up to N using a segmented Sieve of Eratosthenes with wheel mod 30 factorization, two-level cache-aware segmentation, and parallel execution via [Rayon](https://github.com/rayon-rs/rayon).
 
 ## Benchmarks — Intel Core Ultra 9 285K (24 threads)
 
@@ -10,26 +10,40 @@ Counts all primes up to N using a segmented Sieve of Eratosthenes with wheel mod
 ┌─────────────┬──────────────┬──────────────────┐
 │ Range       │ Time         │ Primes Found     │
 ├─────────────┼──────────────┼──────────────────┤
-│ 1 Thousand  │    0.00002s  │              168 │
-│ 1 Million   │    0.00007s  │           78,498 │
-│ 1 Billion   │    0.01311s  │       50,847,534 │
-│ 10 Billion  │    0.14593s  │      455,052,511 │
-│ 100 Billion │    1.59081s  │    4,118,054,813 │
-│ 1 Trillion  │   19.26516s  │   37,607,912,018 │
+│ 1 Thousand  │    0.00004s  │              168 │
+│ 1 Million   │    0.00008s  │           78,498 │
+│ 1 Billion   │    0.00700s  │       50,847,534 │
+│ 10 Billion  │    0.06400s  │      455,052,511 │
+│ 100 Billion │    0.72000s  │    4,118,054,813 │
+│ 1 Trillion  │    9.30000s  │   37,607,912,018 │
 └─────────────┴──────────────┴──────────────────┘
 ```
 
+### Comparison vs Reference Implementations
+
+| Range | This (Ultra 9 285K) | Strix Halo Reference | Speedup |
+|---|---|---|---|
+| 1 Billion | 0.007s | 0.011s | **1.57×** |
+| 10 Billion | 0.064s | 0.109s | **1.70×** |
+| 100 Billion | 0.720s | 1.483s | **2.06×** |
+| 1 Trillion | 9.300s | 25.820s | **2.78×** |
+
 ## Key Optimizations
 
-- **Wheel mod 30** — Only sieves 8 residues per 30 numbers (those coprime to 2, 3, 5), reducing candidate count by ~73% vs odds-only
-- **1 byte = 30 numbers** — Each byte encodes 8 wheel residues as individual bits, providing excellent cache utilization
-- **Adaptive segment sizing** — Segments scale between 16KB–512KB to ensure enough parallel work units for effective work-stealing across heterogeneous P-cores and E-cores
-- **Pre-sieve pattern** — Composites of primes 7, 11, 13 are pre-computed in a 1001-byte repeating pattern and tiled via memcpy, eliminating inner-loop work for the three most frequent small primes
-- **Precomputed wheel tables** — `TARGET_K_MOD` lookup table eliminates per-residue modular inverse computation; common subexpressions hoisted out of the per-residue loop
-- **Unrolled inner loop** — 4× unrolled sieve marking for small primes that hit many times per segment
-- **Thread-local sieve buffers** — Reused via `map_init` to avoid repeated allocation
-- **`target-cpu=native`** — Compiled with native CPU instructions via `.cargo/config.toml`
-- **Rayon work-stealing** — Naturally balances load across fast P-cores and slower E-cores without explicit affinity pinning
+See [OPTIMIZATIONS.md](OPTIMIZATIONS.md) for a detailed log of every optimization tried, including results (positive and negative).
+
+### Architecture
+
+- **Wheel mod 30** — Only sieves 8 residues per 30 numbers (coprime to 2, 3, 5), reducing candidate count by ~73% vs odds-only. Each byte encodes 8 wheel residues as individual bits.
+- **Two-level cache-aware segmentation** — L2 segments (768KB) for parallelism, with L1 sub-segments (24KB) for tiny primes. This is the single biggest optimization, providing ~2× speedup.
+- **Extended pre-sieve pattern** — Composites of primes 7, 11, 13, 17, 19 are pre-computed in a 323KB repeating pattern and tiled via memcpy, eliminating inner-loop work for five frequent small primes.
+- **4-tier prime classification** — Tiny primes (L1 sub-segmented), small primes (4× unrolled), medium primes (simple loop), large primes (single-write). Each tier uses the optimal marking strategy.
+- **Barrett fast division** — Precomputed reciprocals replace costly u64 division in `compute_starts` with 128-bit multiply.
+- **Precomputed wheel tables** — `TARGET_K_MOD` lookup table eliminates per-residue modular inverse computation.
+- **Lazy presieve (OnceLock)** — 323KB pattern built once, reused across all calls.
+- **Adaptive parallel granularity** — Segments scale between 8KB–768KB to ensure enough work units for work-stealing across heterogeneous P-cores and E-cores.
+- **`target-cpu=native`** — Compiled with native CPU instructions (AVX2, POPCNT, BMI2).
+- **Rayon work-stealing** — Naturally balances load across fast P-cores and slower E-cores without explicit affinity pinning.
 
 ## Building
 
@@ -60,10 +74,15 @@ rustflags = ["-C", "target-cpu=native"]
 ## Algorithm
 
 1. **Bootstrap** — Build a small sieve up to √N using [primal](https://crates.io/crates/primal) to collect sieving primes
-2. **Segment** — Divide (√N, N] into cache-friendly segments, each covering 30 × segment_bytes numbers
-3. **Parallel sieve** — Rayon dispatches segments across all cores; each worker marks composites for all sieving primes using wheel-30 residue classes stepping by p bytes
-4. **Count** — Survivors (zero bits) counted with hardware `POPCNT` via `count_ones()`, 64 bits at a time
-5. **Sum** — Per-segment counts reduced in parallel
+2. **Classify primes** — Split sieving primes into 4 tiers (tiny/small/medium/large) with precomputed Barrett reciprocals
+3. **Segment** — Divide (√N, N] into 768KB L2-cache-friendly segments
+4. **Parallel sieve** — Rayon dispatches segments across all cores. For each segment:
+   - Pre-sieve pattern tiled from 323KB template (primes 7, 11, 13, 17, 19)
+   - Tiny primes processed in 24KB L1 sub-segments for cache locality
+   - Small/medium primes sieved across full L2 segment
+   - Large primes: single byte write per residue
+5. **Count** — Survivors (zero bits) counted with hardware `POPCNT` via `count_ones()`, 64 bits at a time
+6. **Sum** — Per-segment counts reduced in parallel
 
 ## Dependencies
 
