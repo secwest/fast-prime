@@ -8,7 +8,7 @@ const OFFSETS: [u32; 8] = [1, 7, 11, 13, 17, 19, 23, 29];
 const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
 // ── Segment sizing ───────────────────────────────────────────────────────────
-const MAX_SEG_BYTES: usize = 768 * 1024;
+const MAX_SEG_BYTES: usize = 1024 * 1024;
 const MIN_SEG_BYTES: usize = 8 * 1024;
 
 // L1-fitting threshold: primes with p < L1_SEG do extremely well in L1.
@@ -318,9 +318,9 @@ fn count_primes(limit: u64) -> u64 {
     let num_segs = (total_bytes + seg_bytes - 1) / seg_bytes;
 
     // Split primes into tiers
+    let tiny_threshold = (L1_SEG_BYTES / 4) as u32;
     let medium_threshold = (seg_bytes / 8) as u32;
     let large_threshold = seg_bytes as u32;
-    let tiny_threshold = (L1_SEG_BYTES / 4) as u32;
     let tiny_split = sieving_primes.partition_point(|sp| sp.p < tiny_threshold);
     let small_split = sieving_primes.partition_point(|sp| sp.p < medium_threshold);
     let large_split = sieving_primes.partition_point(|sp| sp.p < large_threshold);
@@ -360,17 +360,19 @@ fn count_primes(limit: u64) -> u64 {
                 }
             }
 
-            // Small/medium primes: full segment (fits in L2)
+            // Small primes: full segment (fits in L2), 4x unrolled
             for sp in small_primes {
                 let starts = compute_starts(sp, seg_start_num, seg_byte_count);
                 unsafe { sieve_small(sieve, &starts, sp.p as usize); }
             }
 
+            // Medium primes: simple loop (few hits per segment)
             for sp in medium_primes {
                 let starts = compute_starts(sp, seg_start_num, seg_byte_count);
                 unsafe { sieve_medium(sieve, &starts, sp.p as usize); }
             }
 
+            // Large primes: single write per residue
             for sp in large_primes {
                 let starts = compute_starts(sp, seg_start_num, seg_byte_count);
                 unsafe { sieve_large(sieve, &starts); }
