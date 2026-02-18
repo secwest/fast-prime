@@ -58,15 +58,12 @@ const P_MOD_TO_IDX: [u8; 30] = {
 struct SievePrime {
     p: u32,
     p_idx: u8,
-    // Reciprocal for Barrett reduction: floor(2^64 / p) + 1
-    // Allows replacing `n / p` with `mulhi(n, recip) >> shift`
     recip: u64,
 }
 
 fn precompute_sieve_primes(primes: &[u32]) -> Vec<SievePrime> {
     primes.iter().map(|&p| {
         let p_idx = P_MOD_TO_IDX[(p % 30) as usize];
-        // Barrett reciprocal: ceil(2^64 / p)
         let recip = if p > 1 {
             u64::MAX / (p as u64) + 1
         } else {
@@ -128,32 +125,50 @@ fn apply_presieve(sieve: &mut [u8], seg_byte_offset: usize, presieve: &[u8]) {
     }
 }
 
+// Precomputed delta-k table: DK_TABLE[p_idx][k_rem][i] = dk such that
+// (k_min + dk) ≡ TARGET_K_MOD[p_idx][i] (mod 30), dk in [0, 29]
+const DK_TABLE: [[[u8; 8]; 30]; 8] = precompute_dk_table();
+
+const fn precompute_dk_table() -> [[[u8; 8]; 30]; 8] {
+    let mut table = [[[0u8; 8]; 30]; 8];
+    let mut pi = 0;
+    while pi < 8 {
+        let mut kr = 0;
+        while kr < 30 {
+            let mut i = 0;
+            while i < 8 {
+                let target = TARGET_K_MOD[pi][i];
+                let dk = if kr <= target {
+                    target - kr
+                } else {
+                    30 - kr + target
+                };
+                table[pi][kr as usize][i] = dk as u8;
+                i += 1;
+            }
+            kr += 1;
+        }
+        pi += 1;
+    }
+    table
+}
+
 /// Compute start byte positions for a sieving prime in a segment.
-/// Uses Barrett reciprocal to replace u64 division with multiplication.
 #[inline]
 fn compute_starts(sp: &SievePrime, seg_start: u64, seg_bytes_len: usize) -> [usize; 8] {
     let p = sp.p as u64;
-    let seg_end_num = seg_start + (seg_bytes_len as u64) * 30;
     let mut starts = [usize::MAX; 8];
 
-    // k_min = ceil(seg_start / p) using Barrett reciprocal
     let k_min = fast_div(seg_start + p - 1, sp.recip);
-    let k_rem = k_min % 30;
+    let k_rem = (k_min % 30) as usize;
+    let base_diff = k_min * p - seg_start;
+    let dks = &DK_TABLE[sp.p_idx as usize][k_rem];
 
     for i in 0..8 {
-        let target = TARGET_K_MOD[sp.p_idx as usize][i];
-        let mut k = if k_rem <= target {
-            k_min + (target - k_rem)
-        } else {
-            k_min + (30 - k_rem + target)
-        };
-        if k < 2 { k += 30; }
-
-        let m = k * p;
-        if m >= seg_end_num { continue; }
-
-        let diff = m - seg_start;
-        starts[i] = (diff / 30) as usize;
+        let dk = dks[i] as u64;
+        let byte = ((base_diff + dk * p) / 30) as usize;
+        if byte >= seg_bytes_len { continue; }
+        starts[i] = byte;
     }
     starts
 }
