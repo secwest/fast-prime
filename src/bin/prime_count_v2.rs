@@ -37,6 +37,13 @@ fn count_primes(n: u64) -> u64 {
         large[j] = (n / j as u64) as i64 - 1;
     }
 
+    // Precompute reciprocal table: recip[j] = ceil(2^64 / j) for fast division
+    // n_div_p / j = (n_div_p as u128 * recip[j] as u128) >> 64, exact for n_div_p < 2^40
+    let mut recip = vec![0u64; v + 1];
+    for j in 1..=v {
+        recip[j] = ((1u128 << 64) / j as u128 + 1) as u64;
+    }
+
     // Sieve: for each prime p, update S values
     let prime_sieve = Sieve::new(v);
     for p in prime_sieve.primes_from(2) {
@@ -61,12 +68,12 @@ fn count_primes(n: u64) -> u64 {
         if crossover < j_end {
             let sqrt_x = isqrt(n_div_p) as usize;
 
-            // Phase A: j ≤ √(n/p), each j maps to a unique q — 1 division per j
+            // Phase A: j ≤ √(n/p), each j maps to a unique q — reciprocal multiply
             let phase_a_end = std::cmp::min(sqrt_x, j_end);
             if crossover < phase_a_end {
                 unsafe {
                     for j in (crossover + 1)..=phase_a_end {
-                        let q = (n_div_p / j as u64) as usize;
+                        let q = ((n_div_p as u128 * *recip.get_unchecked(j) as u128) >> 64) as usize;
                         *large.get_unchecked_mut(j) -= *small.get_unchecked(q) as i64 - pcnt;
                     }
                 }
@@ -81,16 +88,44 @@ fn count_primes(n: u64) -> u64 {
                 };
                 let q_end = (n_div_p / j_end as u64) as usize;
                 let mut first_j = phase_a_end + 1;
-                unsafe {
-                    for q in (q_end..=q_start).rev() {
-                        let last_j = std::cmp::min((n_div_p / q as u64) as usize, j_end);
-                        if first_j > last_j { continue; }
-                        let delta = *small.get_unchecked(q) as i64 - pcnt;
-                        for jj in first_j..=last_j {
-                            *large.get_unchecked_mut(jj) -= delta;
+
+                if p <= 7 {
+                    // Small primes: carry-forward last_j (avg ~1.5 increments/step)
+                    let mut last_j = std::cmp::min((n_div_p / q_start as u64) as usize, j_end);
+                    unsafe {
+                        for q in (q_end..=q_start).rev() {
+                            if first_j <= last_j {
+                                let delta = *small.get_unchecked(q) as i64 - pcnt;
+                                for jj in first_j..=last_j {
+                                    *large.get_unchecked_mut(jj) -= delta;
+                                }
+                            }
+                            first_j = last_j + 1;
+                            if first_j > j_end { break; }
+                            if q > q_end {
+                                let qm1 = (q - 1) as u64;
+                                while (last_j as u64 + 1) * qm1 <= n_div_p {
+                                    last_j += 1;
+                                }
+                                if last_j > j_end { last_j = j_end; }
+                            }
                         }
-                        first_j = last_j + 1;
-                        if first_j > j_end { break; }
+                    }
+                } else {
+                    // Larger primes: use reciprocal table for division
+                    unsafe {
+                        for q in (q_end..=q_start).rev() {
+                            let last_j = std::cmp::min(
+                                ((n_div_p as u128 * *recip.get_unchecked(q) as u128) >> 64) as usize,
+                                j_end);
+                            if first_j > last_j { continue; }
+                            let delta = *small.get_unchecked(q) as i64 - pcnt;
+                            for jj in first_j..=last_j {
+                                *large.get_unchecked_mut(jj) -= delta;
+                            }
+                            first_j = last_j + 1;
+                            if first_j > j_end { break; }
+                        }
                     }
                 }
             }

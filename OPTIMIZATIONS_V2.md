@@ -89,12 +89,70 @@ to iterate only over primes in the outer loop. Eliminates composite-skipping bra
 
 ---
 
+## Optimization #6: Two-Phase Harmonic Iteration
+
+Split branch 2 at √(N/p): Phase A iterates j with singleton blocks (1 division per j),
+Phase B iterates q downward with multi-element blocks (1 division per q, carry first_j
+forward). Halves the total number of integer divisions.
+
+| Range | Before | After | Speedup |
+|---|---|---|---|
+| 100 Billion | 0.104s | 0.055s | 47% |
+| 1 Trillion | 0.469s | 0.275s | **41%** |
+| 10 Trillion | 2.52s | 1.67s | **34%** |
+
+---
+
+## Optimization #7: p=2 Shift in Small Update
+
+Special-case the p=2 iteration of the small[] reverse update: `j/2` becomes `j >> 1`
+(single instruction vs Barrett multiply+shift).
+
+| Range | Before | After | Speedup |
+|---|---|---|---|
+| 1 Trillion | 0.275s | 0.270s | 2% |
+
+---
+
+## Optimization #8: Reciprocal Table for Division Elimination
+
+Precompute `recip[j] = ceil(2^64 / j)` for all j ≤ √N. Then `n_div_p / j` becomes
+`(n_div_p as u128 * recip[j] as u128) >> 64` — a multiplication (~4 cycles) instead of
+integer DIVQ (~25 cycles). Applied to both Phase A and Phase B inner loops.
+
+Table cost: O(√N) one-time build (u128 divisions), 8MB memory.
+Exact for all n_div_p < 2^64 (always true for our range).
+
+Also added hybrid carry-forward in Phase B for primes p ≤ 7 (where the average
+increment per q-step is ≤ 2, making multiply+compare cheaper than division).
+
+| Range | Before | After | Speedup |
+|---|---|---|---|
+| 100 Billion | 0.055s | 0.048s | 13% |
+| 1 Trillion | 0.270s | 0.232s | **14%** |
+| 10 Trillion | 1.67s | 1.48s | **11%** |
+
+---
+
+## Failed Attempts
+
+- **Skip delta==0 blocks in branch 2**: Extra branch misprediction outweighed savings.
+- **Software prefetch in branch 1**: Hardware prefetcher already effective on Arrow Lake.
+- **Pre-sieve p=2 in initialization**: Correct but .max(0) in init offset savings. Neutral.
+- **Pointer-based branch 1**: LLVM already generates same code. No change.
+- **f64 division in Phase A/B**: DIVSD similar throughput to DIVQ on Arrow Lake. No gain.
+- **Magic number for p=3 small update**: Barrett already equivalent. No gain.
+- **Carry-forward last_j for ALL Phase B primes**: Too many increments per step for larger primes. 14% slower.
+- **Reciprocal table for setup divisions**: Only 2 divisions per prime; u128 overhead > savings.
+
+---
+
 ## Current Best (V2)
 
 | Range | Time | vs Sieve V1 (24 threads) |
 |---|---|---|
-| 1 Billion | 0.005s | 1.2× faster |
-| 10 Billion | 0.022s | 3.0× faster |
-| 100 Billion | 0.104s | 6.9× faster |
-| 1 Trillion | 0.469s | **18.3× faster** |
-| 10 Trillion | 2.52s | N/A (V1 untested) |
+| 1 Billion | 0.002s | 3.0× faster |
+| 10 Billion | 0.010s | 6.6× faster |
+| 100 Billion | 0.048s | 15.0× faster |
+| 1 Trillion | 0.232s | **37.2× faster** |
+| 10 Trillion | 1.48s | **85.9× faster** |

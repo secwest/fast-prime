@@ -18,11 +18,11 @@ Computes π(N) exactly using the Lucy_Hedgehog combinatorial method. O(N^{3/4} /
 ┌─────────────┬──────────────────────────┬──────────────────────────┬──────────────────┐
 │ Range       │ V1 Sieve (24 threads)    │ V2 Combinatorial (1 thr) │ Primes Found     │
 ├─────────────┼──────────────────────────┼──────────────────────────┼──────────────────┤
-│ 1 Billion   │    0.00600s              │    0.00240s              │       50,847,534 │
-│ 10 Billion  │    0.06570s              │    0.01080s              │      455,052,511 │
-│ 100 Billion │    0.72087s              │    0.05464s              │    4,118,054,813 │
-│ 1 Trillion  │    8.64000s              │    0.26790s              │   37,607,912,018 │
-│ 10 Trillion │  127.13000s              │    1.65119s              │  346,065,536,839 │
+│ 1 Billion   │    0.00600s              │    0.00214s              │       50,847,534 │
+│ 10 Billion  │    0.06570s              │    0.01020s              │      455,052,511 │
+│ 100 Billion │    0.72087s              │    0.04750s              │    4,118,054,813 │
+│ 1 Trillion  │    8.64000s              │    0.23200s              │   37,607,912,018 │
+│ 10 Trillion │  127.13000s              │    1.47800s              │  346,065,536,839 │
 └─────────────┴──────────────────────────┴──────────────────────────┴──────────────────┘
 ```
 
@@ -30,20 +30,20 @@ Computes π(N) exactly using the Lucy_Hedgehog combinatorial method. O(N^{3/4} /
 
 | Range | V1 (24 threads) | V2 (1 thread) | V2 Speedup |
 |---|---|---|---|
-| 1 Billion | 0.006s | 0.0024s | **2.5×** |
-| 10 Billion | 0.066s | 0.011s | **6.1×** |
-| 100 Billion | 0.721s | 0.055s | **13.2×** |
-| 1 Trillion | 8.640s | 0.268s | **32.2×** |
-| 10 Trillion | 127.13s | 1.651s | **77.0×** |
+| 1 Billion | 0.006s | 0.0021s | **2.8×** |
+| 10 Billion | 0.066s | 0.010s | **6.4×** |
+| 100 Billion | 0.721s | 0.048s | **15.0×** |
+| 1 Trillion | 8.640s | 0.232s | **37.2×** |
+| 10 Trillion | 127.13s | 1.478s | **86.0×** |
 
 ### Comparison vs Strix Halo Reference
 
 | Range | V2 (Ultra 9 285K) | Strix Halo Reference | Speedup |
 |---|---|---|---|
-| 1 Billion | 0.0024s | 0.011s | **4.6×** |
-| 10 Billion | 0.011s | 0.109s | **9.9×** |
-| 100 Billion | 0.055s | 1.483s | **27.0×** |
-| 1 Trillion | 0.268s | 25.820s | **96.3×** |
+| 1 Billion | 0.0021s | 0.011s | **5.2×** |
+| 10 Billion | 0.010s | 0.109s | **10.9×** |
+| 100 Billion | 0.048s | 1.483s | **30.9×** |
+| 1 Trillion | 0.232s | 25.820s | **111.3×** |
 
 ## Key Optimizations
 
@@ -64,6 +64,7 @@ See [OPTIMIZATIONS_V2.md](OPTIMIZATIONS_V2.md) for the full optimization log.
 
 - **Lucy_Hedgehog algorithm** — Computes π(N) in O(N^{3/4} / ln N) time using O(√N) space. No full sieve needed.
 - **Two-phase harmonic iteration** — Splits the inner loop at √(N/p): Phase A iterates j with singleton blocks (1 div/j), Phase B iterates q downward with multi-element blocks (1 div/q, carry first_j). Halves total divisions (**41% speedup**).
+- **Reciprocal table** — Precomputes `ceil(2^64/j)` for all j ≤ √N. Replaces integer DIVQ (~25 cycles) with u128 multiply+shift (~4 cycles) in Phase A and Phase B inner loops (**14% speedup**).
 - **Barrett fast division** — Replaces integer DIV (~21 cycles) with multiply+shift (~4 cycles) in the small[] update loop.
 - **i32 small array** — Values ≤ √N fit in i32, halving memory footprint for better cache utilization.
 - **Unsafe indexing** — Bounds checks eliminated in hot loops where indices are mathematically guaranteed in-bounds.
