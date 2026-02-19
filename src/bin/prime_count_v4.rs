@@ -378,18 +378,42 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                 if rem == 0 { 0 } else { p - rem }
             };
             let mut k = start;
-            // Unrolled cross-off for hard leaves
+            let bits = sieve.bits.as_mut_ptr();
+            let mut delta = 0i64;
             while k + p * 3 < seg_len {
-                sieve.cross_off(k);
-                sieve.cross_off(k + p);
-                sieve.cross_off(k + p * 2);
-                sieve.cross_off(k + p * 3);
+                unsafe {
+                    let w0 = k >> 6; let b0 = k & 63;
+                    let old0 = *bits.add(w0);
+                    delta += ((old0 >> b0) & 1) as i64;
+                    *bits.add(w0) = old0 & !(1u64 << b0);
+
+                    let k1 = k + p; let w1 = k1 >> 6; let b1 = k1 & 63;
+                    let old1 = *bits.add(w1);
+                    delta += ((old1 >> b1) & 1) as i64;
+                    *bits.add(w1) = old1 & !(1u64 << b1);
+
+                    let k2 = k + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
+                    let old2 = *bits.add(w2);
+                    delta += ((old2 >> b2) & 1) as i64;
+                    *bits.add(w2) = old2 & !(1u64 << b2);
+
+                    let k3 = k + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
+                    let old3 = *bits.add(w3);
+                    delta += ((old3 >> b3) & 1) as i64;
+                    *bits.add(w3) = old3 & !(1u64 << b3);
+                }
                 k += p * 4;
             }
             while k < seg_len {
-                sieve.cross_off(k);
+                unsafe {
+                    let w = k >> 6; let b = k & 63;
+                    let old = *bits.add(w);
+                    delta += ((old >> b) & 1) as i64;
+                    *bits.add(w) = old & !(1u64 << b);
+                }
                 k += p;
             }
+            sieve.total -= delta;
             next[b] = low + k;
             b += 1;
         }
@@ -441,18 +465,42 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                 if rem == 0 { 0 } else { p - rem }
             };
             let mut k = start;
-            // Unrolled cross-off for easy leaves
+            let bits = sieve.bits.as_mut_ptr();
+            let mut delta = 0i64;
             while k + p * 3 < seg_len {
-                sieve.cross_off(k);
-                sieve.cross_off(k + p);
-                sieve.cross_off(k + p * 2);
-                sieve.cross_off(k + p * 3);
+                unsafe {
+                    let w0 = k >> 6; let b0 = k & 63;
+                    let old0 = *bits.add(w0);
+                    delta += ((old0 >> b0) & 1) as i64;
+                    *bits.add(w0) = old0 & !(1u64 << b0);
+
+                    let k1 = k + p; let w1 = k1 >> 6; let b1 = k1 & 63;
+                    let old1 = *bits.add(w1);
+                    delta += ((old1 >> b1) & 1) as i64;
+                    *bits.add(w1) = old1 & !(1u64 << b1);
+
+                    let k2 = k + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
+                    let old2 = *bits.add(w2);
+                    delta += ((old2 >> b2) & 1) as i64;
+                    *bits.add(w2) = old2 & !(1u64 << b2);
+
+                    let k3 = k + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
+                    let old3 = *bits.add(w3);
+                    delta += ((old3 >> b3) & 1) as i64;
+                    *bits.add(w3) = old3 & !(1u64 << b3);
+                }
                 k += p * 4;
             }
             while k < seg_len {
-                sieve.cross_off(k);
+                unsafe {
+                    let w = k >> 6; let b = k & 63;
+                    let old = *bits.add(w);
+                    delta += ((old >> b) & 1) as i64;
+                    *bits.add(w) = old & !(1u64 << b);
+                }
                 k += p;
             }
+            sieve.total -= delta;
             next[b] = low + k;
             b += 1;
         }
