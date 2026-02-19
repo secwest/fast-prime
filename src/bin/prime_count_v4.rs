@@ -202,7 +202,6 @@ impl BitSieve {
         let w = pos / 64;
         let b = pos % 64;
         let old = unsafe { *self.bits.get_unchecked(w) };
-        // Branchless: extract bit value and subtract from total
         let was_set = ((old >> b) & 1) as i64;
         unsafe { *self.bits.get_unchecked_mut(w) = old & !(1u64 << b); }
         self.total -= was_set;
@@ -355,7 +354,6 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             }
 
             phi[b] += sieve.count_total();
-            // Cross off multiples of prime
             let p = prime as usize;
             let start = if next[b] >= low { next[b] - low } else {
                 let rem = (low - next[b]) % p;
