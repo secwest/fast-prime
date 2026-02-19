@@ -209,6 +209,72 @@ impl BitSieve {
     }
 }
 
+/// Pre-sieve template for first c primes. Period = lcm(p_1..p_c).
+struct PreSieveTemplate {
+    // Template stored as 2× period bits to avoid wrapping edge cases
+    bits: Vec<u64>,
+    period: usize,
+}
+
+impl PreSieveTemplate {
+    fn new(primes: &[u32], c: usize) -> Self {
+        let mut period: usize = 1;
+        for b in 1..=c {
+            period *= primes[b] as usize;
+        }
+        // Build one period of the template
+        let mut tpl = vec![true; period];
+        for b in 1..=c {
+            let p = primes[b] as usize;
+            let mut k = 0;
+            while k < period {
+                tpl[k] = false;
+                k += p;
+            }
+        }
+        // Store 2 periods as packed u64 words
+        let double_period = period * 2;
+        let nwords = (double_period + 63) / 64;
+        let mut bits = vec![0u64; nwords];
+        for i in 0..double_period {
+            if tpl[i % period] {
+                bits[i / 64] |= 1u64 << (i % 64);
+            }
+        }
+        PreSieveTemplate { bits, period }
+    }
+
+    /// Get 64 aligned template bits starting at template position `start`.
+    /// Caller must ensure start < period.
+    #[inline]
+    fn get_word(&self, start: usize) -> u64 {
+        let w = start / 64;
+        let bit_off = start % 64;
+        if bit_off == 0 {
+            unsafe { *self.bits.get_unchecked(w) }
+        } else {
+            let lo = unsafe { *self.bits.get_unchecked(w) } >> bit_off;
+            let hi = unsafe { *self.bits.get_unchecked(w + 1) } << (64 - bit_off);
+            lo | hi
+        }
+    }
+
+    /// Apply template to sieve segment starting at `low`.
+    fn apply(&self, sieve: &mut BitSieve, low: usize) {
+        let nwords = (sieve.len + 63) / 64;
+        let mut tpl_pos = low % self.period;
+        for w in 0..nwords {
+            let tpl_word = self.get_word(tpl_pos);
+            let old = unsafe { *sieve.bits.get_unchecked(w) };
+            let new = old & tpl_word;
+            sieve.total -= (old.count_ones() as i64) - (new.count_ones() as i64);
+            unsafe { *sieve.bits.get_unchecked_mut(w) = new; }
+            tpl_pos += 64;
+            if tpl_pos >= self.period { tpl_pos -= self.period; }
+        }
+    }
+}
+
 /// Compute S2 using segmented sieve (matches pi_lmo_parallel structure).
 fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
               lpf: &[i32], mu: &[i8], pi: &[u32]) -> i64 {
@@ -220,11 +286,11 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     // Segment size ≈ √z, at least 256
     let segment_size = std::cmp::max(isqrt(z as u64) as usize, 256).next_power_of_two();
 
-    // phi[b] accumulates φ(low, b-1) across segments
-    // Initialize: φ(0, b-1) = 0 for all b
-    let mut phi: Vec<i64> = vec![0i64; primes.len()];
+    // Pre-sieve template for first c primes
+    let template = PreSieveTemplate::new(primes, std::cmp::min(c, primes.len() - 1));
 
-    // next[b] = smallest multiple of primes[b] not yet crossed off
+    // phi[b] accumulates φ(low, b-1) across segments
+    let mut phi: Vec<i64> = vec![0i64; primes.len()];
     let mut next: Vec<usize> = (0..primes.len()).map(|b| primes[b] as usize).collect();
 
     let mut sieve = BitSieve::new(segment_size);
@@ -237,23 +303,10 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
         let low1 = std::cmp::max(low, 1);
 
         sieve.reset(seg_len);
-        // Position 0 in first segment represents the integer 0, which is not in [1, x]
         if low == 0 { sieve.cross_off(0); }
 
-        // Pre-sieve: cross off multiples of first c primes
-        for b in 1..=std::cmp::min(c, primes.len() - 1) {
-            let p = primes[b] as usize;
-            let start = if next[b] >= low { next[b] - low } else {
-                let rem = (low - next[b]) % p;
-                if rem == 0 { 0 } else { p - rem }
-            };
-            let mut k = start;
-            while k < seg_len {
-                sieve.cross_off(k);
-                k += p;
-            }
-            next[b] = low + k;
-        }
+        // Apply pre-sieve template (replaces individual cross-off loops for first c primes)
+        template.apply(&mut sieve, low);
 
         // Determine which b values have special leaves in this segment
         let max_b = if low1 > 0 {

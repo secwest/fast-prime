@@ -237,19 +237,48 @@ attractive because the increased P2 cost is absorbed by multiple threads.
 
 ---
 
-## Current Best Performance
+## Optimization 7: Pre-sieve Template ✅ (MASSIVE WIN)
+
+**Hypothesis**: The 6 pre-sieve cross-off loops (primes 2,3,5,7,11,13) perform
+~21K individual cross_off() calls per 16K segment. Replace with a precomputed
+template of period LCM(2,3,5,7,11,13) = 30,030 bits, stored doubled for wrapping.
+Template is AND'd into the sieve in one pass over ~256 words.
+
+**Change**: New `PreSieveTemplate` struct builds a 2×30030-bit pattern at init.
+Each segment applies the template with a single word-aligned AND loop plus
+POPCNT-based total adjustment. Replaces 6 separate cross-off loops entirely.
+
+**Bug**: First version used single-period storage with manual wrapping — produced
+small errors at period boundaries. Fixed by storing 2 full periods of template bits,
+making the splice always access valid contiguous data.
+
+**Result** (α = 2.5, with all prior optimizations):
+
+| Range      | Before  | After   | Speedup |
+|------------|---------|---------|---------|
+| 10 Billion | 0.005s  | 0.004s  | 1.3×    |
+| 100 Billion| 0.019s  | 0.012s  | **1.6×** |
+| 1 Trillion | 0.078s  | 0.042s  | **1.9×** |
+| 10 Trillion| 0.340s  | 0.175s  | **1.9×** |
+
+The pre-sieve was consuming ~50% of S2 time: 21K scalar cross_off operations
+replaced by ~256 word-level AND + POPCNT operations (80× fewer operations).
+
+---
+
+##Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
-| 1 Billion   | 0.0012s  | 0.002s   | 1.7×           |
-| 10 Billion  | 0.005s   | 0.007s   | 1.4×           |
-| 100 Billion | 0.019s   | 0.034s   | 1.8×           |
-| 1 Trillion  | 0.078s   | 0.168s   | **2.2×**       |
-| 10 Trillion | 0.340s   | 1.190s   | **3.5×**       |
+| 1 Billion   | 0.0018s  | 0.002s   | 1.1×           |
+| 10 Billion  | 0.004s   | 0.007s   | 1.8×           |
+| 100 Billion | 0.012s   | 0.034s   | **2.8×**       |
+| 1 Trillion  | 0.042s   | 0.168s   | **4.0×**       |
+| 10 Trillion | 0.175s   | 1.190s   | **6.8×**       |
 
 ### Remaining Optimization Opportunities
 
 1. **Parallel S2**: Split segments across rayon threads with phi_vector initialization
-2. **Wheel-30 sieve**: Skip multiples of 2/3/5 in the sieve (8 bits per 30 numbers)
+2. **Pre-sieve more primes**: Extend template to include prime 17 (period 510510)
 3. **Batch sieve for cross-off**: Process multiple primes in combined passes
-4. **Batch cross_off_count**: Combined sieve+counter update for large segments
+4. **Re-tune alpha**: With faster pre-sieve, optimal alpha may have shifted
