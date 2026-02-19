@@ -885,7 +885,16 @@ fn generate_pi(limit: usize, sieve: &Sieve) -> Vec<u32> {
 fn count_primes(x: u64) -> u64 {
     if x < 2 { return 0; }
 
-    let alpha = 2.2;
+    // Adaptive alpha: larger inputs benefit from higher alpha because the S2 inner loops
+    // have more work per prime, amortizing per-prime overhead better.
+    let log_x = (x as f64).log10();
+    let alpha = if log_x <= 13.0 {
+        2.2
+    } else if log_x <= 14.0 {
+        2.2 + 0.2 * (log_x - 13.0)
+    } else {
+        2.4 + 3.6 * (log_x - 14.0)
+    };
     let y = std::cmp::max((icbrt(x) as f64 * alpha) as usize, 1);
 
     // For small x, use primal directly
