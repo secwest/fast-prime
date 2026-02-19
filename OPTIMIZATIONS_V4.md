@@ -602,6 +602,42 @@ fewer chunks. More chunks add correction overhead without improving peak perform
 
 **Result**: 10T 0.029s → 0.028s (best), correction pass ~3× faster.
 
+## Optimization 24: p³ Full Batch for Large Easy Primes ✅
+
+When `primes[b]³ ≥ x`, ALL easy leaves of prime b have `phi = 1` (because
+`xpq < primes[b-1]` for all q). This lets us count all leaves in O(1) per prime
+without threshold computation or individual pi lookups.
+
+**Result**: Marginal improvement (eliminates ~2500 individual lookups at 10T).
+
+## Optimization 25: Parallel P2 Sieve ✅ (MAJOR WIN)
+
+**Profiling discovery**: P2 was the **actual bottleneck**, not S2!
+- At 10T: P2 took 27ms (single-threaded `primal::Sieve::new(211M)`)
+- S2 par_iter took only 17ms
+- `thread::scope(max(S2, P2))` = 27ms, dominated by P2
+
+**Solution**: Replace `primal::Sieve` with custom `ParallelPiSieve`:
+- Odd-number bitmap (bit i = is_prime(2i+1)), parallel sieve via `par_chunks_mut`
+- Prefix-sum array for O(1) π(n) queries using popcount
+- Runs concurrently with S2 via `thread::scope`, sharing rayon's thread pool
+
+**Why it works**: primal's `Sieve::new()` is completely single-threaded. Our
+`ParallelPiSieve` distributes the cross-off work across all available threads.
+Even when competing with S2 for rayon threads, the work-stealing scheduler
+naturally balances the load.
+
+**P2 standalone**: 27ms → 13ms (with full rayon access)
+**P2 concurrent with S2**: ~20ms (sharing threads), but total improves because
+both finish faster than the old primal bottleneck.
+
+**Result**:
+
+| Range       | Before  | After   | Speedup |
+|-------------|---------|---------|---------|
+| 1 Trillion  | 0.007s  | 0.006s  | **17%** |
+| 10 Trillion | 0.028s  | 0.022s  | **21%** |
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
@@ -609,12 +645,12 @@ fewer chunks. More chunks add correction overhead without improving peak perform
 | 1 Billion   | 0.0009s  | 0.002s   | 2.2×           |
 | 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
 | 100 Billion | 0.003s   | 0.034s   | **11.3×**      |
-| 1 Trillion  | 0.007s   | 0.168s   | **24.0×**      |
-| 10 Trillion | 0.028s   | 1.190s   | **42.5×**      |
+| 1 Trillion  | 0.006s   | 0.168s   | **28.0×**      |
+| 10 Trillion | 0.022s   | 1.190s   | **54.1×**      |
 
 ### Remaining Optimization Opportunities
 
-1. **Extend pi-formula to more segments**: Currently only segment 0
-2. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
-3. **Correction pass vectorization**: SIMD dot-product for the sequential correction loop
-4. **Thread count tuning**: P-core vs all-core configuration
+1. **Further P2 sieve optimization**: Wheel-30 sieve for P2 bitmap, pre-sieve template
+2. **Extend pi-formula to more segments**: Currently only segment 0
+3. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
+4. **Correction pass vectorization**: SIMD dot-product for the sequential correction loop

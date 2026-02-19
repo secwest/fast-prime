@@ -18,7 +18,7 @@ Extension of V2: sieve primes only up to N^{1/3} (not N^{1/2}), then compute the
 
 ### V4 — Lagarias-Miller-Odlyzko (`src/bin/prime_count_v4.rs`)
 
-Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Parallel S2 via delta-phi correction, concurrent P2 via rayon. Currently the fastest implementation, beating V3 by 42× at 10T.
+Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Parallel S2 via delta-phi correction, parallel P2 via custom multi-threaded sieve. Currently the fastest implementation, beating V3 by 54× at 10T.
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -30,8 +30,8 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 │ 1 Billion   │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │       50,847,534 │
 │ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │      455,052,511 │
 │ 100 Billion │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    4,118,054,813 │
-│ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.00700s  │   37,607,912,018 │
-│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.02800s  │  346,065,536,839 │
+│ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │   37,607,912,018 │
+│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.02200s  │  346,065,536,839 │
 └─────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────────┘
 ```
 
@@ -42,8 +42,8 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 | 1 Billion | 0.006s | 0.0009s | **6.7×** |
 | 10 Billion | 0.066s | 0.002s | **33.0×** |
 | 100 Billion | 0.721s | 0.003s | **240.3×** |
-| 1 Trillion | 8.640s | 0.007s | **1234.3×** |
-| 10 Trillion | 127.13s | 0.028s | **4540.4×** |
+| 1 Trillion | 8.640s | 0.006s | **1440.0×** |
+| 10 Trillion | 127.13s | 0.022s | **5778.6×** |
 ### Comparison vs Strix Halo Reference
 
 | Range | V4 (Ultra 9 285K) | Strix Halo Reference | Speedup |
@@ -51,7 +51,7 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 | 1 Billion | 0.0009s | 0.011s | **12.2×** |
 | 10 Billion | 0.002s | 0.109s | **54.5×** |
 | 100 Billion | 0.003s | 1.483s | **494.3×** |
-| 1 Trillion | 0.007s | 25.820s | **3688.6×** |
+| 1 Trillion | 0.006s | 25.820s | **4303.3×** |
 
 ## Key Optimizations
 
@@ -96,7 +96,7 @@ See [OPTIMIZATIONS_V4.md](OPTIMIZATIONS_V4.md) for the full optimization log.
 - **Concurrent S2+P2** — P2 runs in a background thread overlapping with S2 via `thread::scope`. Makes P2 essentially free (**18% speedup**).
 - **Parallel S2 via delta-phi correction** — Segments split across threads, each tracking local phi + correction coefficients. True phi reconstructed via prefix-sum after join. Exact correction, no approximation (**1.8× speedup**).
 - **Pre-sieve template** — 30030-bit precomputed pattern for primes 2,3,5,7,11,13 applied via word-aligned AND, replacing 6 individual cross-off loops (**1.9× speedup**).
-- **Parallel P2** — P2 computation parallelized via rayon. Each π(x/p) lookup is independent (**18% speedup**).
+- **Parallel P2 sieve** — Custom `ParallelPiSieve` replaces single-threaded `primal::Sieve`. Bitmap built in parallel via `par_chunks_mut`, with popcount prefix sums for O(1) π(n) queries (**21% speedup at 10T**).
 - **Incremental count** — Positions in special leaf loops are monotonically increasing. `count_delta(prev, pos)` scans only the gap between consecutive positions instead of from 0 each time (**20% speedup at 10T**).
 - **PhiTiny cache** — Precomputed wheel for φ(x, c) with c ≤ 6, giving O(1) ordinary leaf evaluation.
 - **Larger segment size** — 128K-bit minimum (16KB) fits L1 cache while reducing per-segment overhead (**5% speedup**).
