@@ -398,6 +398,28 @@ Primes-only table (37KB) fits in L1 with no pressure.
 
 ---
 
+## Optimization 15: Inline Cross-off with Deferred Total ✅
+
+**Hypothesis**: The `sieve.total -= was_set` in each cross_off creates a sequential 
+dependency chain. Manually inlining the cross-off with 4× unrolling and accumulating 
+delta in a local variable breaks this chain, allowing the CPU to parallelize independent 
+word updates.
+
+**Also tried and FAILED**: Word-level batching (build per-word mask for small primes p<64, 
+apply via AND+XOR+POPCNT) — 10% SLOWER. Inner loop overhead (`while (k>>6)==w`) and 
+XOR+POPCNT per word exceeded store-forwarding savings.
+
+**Result**:
+
+| Range       | Before   | After    | Speedup |
+|-------------|----------|----------|---------|
+| 1 Trillion  | 0.027s   | 0.026s   | ~same   |
+| 10 Trillion | 0.110s   | 0.109s   | ~same   |
+
+Marginal improvement from breaking the total dependency chain.
+
+---
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
@@ -405,8 +427,8 @@ Primes-only table (37KB) fits in L1 with no pressure.
 | 1 Billion   | 0.0010s  | 0.002s   | 2.0×           |
 | 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
 | 100 Billion | 0.007s   | 0.034s   | **4.9×**       |
-| 1 Trillion  | 0.027s   | 0.168s   | **6.2×**       |
-| 10 Trillion | 0.110s   | 1.190s   | **10.8×**      |
+| 1 Trillion  | 0.026s   | 0.168s   | **6.5×**       |
+| 10 Trillion | 0.109s   | 1.190s   | **10.9×**      |
 
 ### Remaining Optimization Opportunities
 
