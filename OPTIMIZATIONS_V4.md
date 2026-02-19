@@ -560,6 +560,28 @@ pi-formula handles the increased easy leaf load efficiently.
 
 **Result**: 10T 0.036s → 0.031s (~14% improvement)
 
+## Optimization 22: Adaptive Segment Size ✅
+
+**Hypothesis**: Larger segments reduce per-segment overhead (fewer template inits, fewer
+correction entries), but too-large segments reduce parallelism for smaller inputs. An
+adaptive formula scales with problem size.
+
+**Formula**: `segment_size = max(z / (num_threads * 32), 2^17).next_power_of_two()`
+
+This gives: 2^17 (131K) for inputs up to ~1T, 2^19 (524K) for 10T. Ensures at least
+768 segments for parallelism while using larger segments when z is large enough.
+
+**Sweep showed** (10T): 2^17=0.031s, 2^18=0.029s, 2^19=0.028s, 2^20=0.029s, 2^21=0.034s.
+
+**Result**: 10T improved from fixed 2^17 (0.031s) to adaptive (0.029s), without regressing
+smaller ranges.
+
+| Range       | Before  | After   | Change |
+|-------------|---------|---------|--------|
+| 100 Billion | 0.003s  | 0.003s  | same   |
+| 1 Trillion  | 0.007s  | 0.007s  | same   |
+| 10 Trillion | 0.031s  | 0.029s  | -6%    |
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
@@ -568,12 +590,11 @@ pi-formula handles the increased easy leaf load efficiently.
 | 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
 | 100 Billion | 0.003s   | 0.034s   | **11.3×**      |
 | 1 Trillion  | 0.007s   | 0.168s   | **24.0×**      |
-| 10 Trillion | 0.031s   | 1.190s   | **38.4×**      |
+| 10 Trillion | 0.029s   | 1.190s   | **41.0×**      |
 
 ### Remaining Optimization Opportunities
 
-1. **Extend pi-formula to more segments**: Currently only segment 0; extending to segments where
-   a local pi table can be computed cheaply could help
+1. **Extend pi-formula to more segments**: Currently only segment 0
 2. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
-3. **Position-group iteration**: Iterate easy leaves by floor(X/q) groups instead of individual primes
-4. **Thread count tuning**: Currently using all rayon threads; may benefit from P-core-only configuration
+3. **Correction pass optimization**: Currently O(nchunks × max_b), ~2ms serial
+4. **Thread count tuning**: P-core vs all-core configuration

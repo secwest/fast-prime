@@ -284,7 +284,9 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     let pi_sqrty = pi[std::cmp::min(sqrt_y, y)] as usize;
     let pi_y = pi[y] as usize;
 
-    let segment_size = std::cmp::max(isqrt(z as u64) as usize, 1 << 17).next_power_of_two();
+    // Adaptive segment size: larger for big z (less overhead), smaller for small z (more parallelism)
+    let target_segs = rayon::current_num_threads() * 32;
+    let segment_size = std::cmp::max(z / target_segs, 1 << 17).next_power_of_two();
 
     let template = PreSieveTemplate::new(primes, std::cmp::min(c, primes.len() - 1));
 
