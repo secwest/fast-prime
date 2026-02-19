@@ -290,26 +290,6 @@ impl BitSieve {
     fn count_total(&self) -> i64 {
         self.total
     }
-
-    /// Build prefix-sum array for O(1) count queries when sieve is frozen.
-    /// prefix[w] = total set bits in words [0, w).
-    fn build_prefix(&self) -> Vec<u32> {
-        let nwords = (self.len + 63) / 64;
-        let mut prefix = vec![0u32; nwords + 1];
-        for i in 0..nwords {
-            prefix[i + 1] = prefix[i] + unsafe { *self.bits.get_unchecked(i) }.count_ones();
-        }
-        prefix
-    }
-
-    /// O(1) count using prefix-sum table. Returns number of set bits in [0, pos].
-    #[inline]
-    fn count_prefix(&self, pos: usize, prefix: &[u32]) -> i64 {
-        let word = pos / 64;
-        let bit = pos % 64;
-        let mask = (2u64 << bit) - 1;
-        prefix[word] as i64 + (unsafe { *self.bits.get_unchecked(word) } & mask).count_ones() as i64
-    }
 }
 
 /// Pre-sieve template for first c primes, odd-number space.
