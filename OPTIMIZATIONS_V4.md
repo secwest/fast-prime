@@ -517,19 +517,42 @@ Overall S2 parallel time improved from ~42ms to ~35-40ms.
 | 1 Trillion  | 0.010s  | 0.010s  | same   |
 | 10 Trillion | 0.042s  | 0.040s  | -5%    |
 
+## Optimization 20: Pi-Formula for Segment 0 Easy Leaves ✅
+
+**Insight**: Profiling showed segment 0 has 4.7M easy leaf iterations taking 19.5ms.
+For these leaves, when primes[b-1]² ≥ high, the identity phi(n, b-1) = 1 + max(pi(n) - (b-1), 0)
+allows replacing sieve counting with a simple pi table lookup.
+
+**Change**: Build a small pi lookup table covering [0, segment_size] (131KB, negligible cost).
+For qualifying easy leaves in segment 0:
+- Leaves where b-1 > pi(xpq): phi=1, batch-counted in O(1) per prime (no Barrett division)
+- Remaining leaves: use pi_table[xpq] lookup instead of sieve.count()/count_delta()
+
+This eliminates all sieve scanning (572-word count() per prime, 5-cycle count_delta() per leaf)
+for segment 0's easy leaves. The batch-counting path also eliminates Barrett divisions for the
+majority of leaves.
+
+**Result**: 10T improved from 0.040s to 0.036s (~10% improvement).
+
+| Range       | Before  | After   | Change |
+|-------------|---------|---------|--------|
+| 1 Trillion  | 0.010s  | 0.008s  | -20%   |
+| 10 Trillion | 0.040s  | 0.036s  | -10%   |
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
 | 1 Billion   | 0.0009s  | 0.002s   | 2.2×           |
 | 10 Billion  | 0.001s   | 0.007s   | 7.0×           |
-| 100 Billion | 0.004s   | 0.034s   | **8.5×**       |
-| 1 Trillion  | 0.010s   | 0.168s   | **16.8×**      |
-| 10 Trillion | 0.040s   | 1.190s   | **29.8×**      |
+| 100 Billion | 0.003s   | 0.034s   | **11.3×**      |
+| 1 Trillion  | 0.008s   | 0.168s   | **21.0×**      |
+| 10 Trillion | 0.036s   | 1.190s   | **33.1×**      |
 
 ### Remaining Optimization Opportunities
 
-1. **Max chunk bottleneck**: Heaviest chunk takes ~23ms, limiting parallel S2 to ~35ms wall time
+1. **Extend pi-formula to more segments**: Currently only segment 0; extending to segments where
+   a local pi table can be computed cheaply could help
 2. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
 3. **Position-group iteration**: Iterate easy leaves by floor(X/q) groups instead of individual primes
 4. **Thread count tuning**: Currently using all rayon threads; may benefit from P-core-only configuration

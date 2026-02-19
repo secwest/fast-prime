@@ -308,6 +308,24 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     }
 
     let nprimes = primes.len();
+
+    // Build pi lookup table for segment 0: phi(n,b-1) = pi(n) - b + 2 when primes[b-1]² > n
+    let seg0_pi: Vec<u32> = {
+        let n = segment_size;
+        let mut is_p = vec![true; n + 1];
+        is_p[0] = false;
+        if n > 0 { is_p[1] = false; }
+        let sqrtn = isqrt(n as u64) as usize;
+        for p in 2..=sqrtn {
+            if is_p[p] {
+                for k in (p * p..=n).step_by(p) { is_p[k] = false; }
+            }
+        }
+        let mut tab = vec![0u32; n + 1];
+        for i in 1..=n { tab[i] = tab[i - 1] + is_p[i] as u32; }
+        tab
+    };
+
     // Use more chunks than threads for better load balancing via work-stealing.
     // Early segments (near low=0) do 100× more work than late segments.
     let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 32);
@@ -420,6 +438,8 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             }
 
             // Easy special leaves
+            // For segment 0: use pi formula phi(n,b-1) = pi(n) - b + 2 when primes[b-1]² ≥ high
+            let use_pi_formula = low == 0 && seg_idx == seg_start;
             while b <= max_b && b < nprimes {
                 let prime = primes[b] as u64;
                 let x_div_prime = x / prime;
@@ -433,28 +453,61 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
 
                 if l < nprimes && prime as usize >= primes[l] as usize { break; }
 
-                let mut prev_pos: Option<usize> = None;
-                let mut running_count: i64 = 0;
-                while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
-                    let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
-                    if xpq >= low && xpq < high {
-                        let pos = xpq - low;
-                        let count = match prev_pos {
-                            Some(pp) if pos == pp => running_count,
-                            Some(pp) if pos > pp => {
-                                running_count += sieve.count_delta(pp, pos);
-                                running_count
-                            }
-                            _ => {
-                                running_count = sieve.count(pos);
-                                running_count
-                            }
-                        };
-                        s2_local += phi[b] + count;
-                        coeff[b] += 1;
-                        prev_pos = Some(pos);
+                if use_pi_formula && b > 1 && (primes[b - 1] as u64) * (primes[b - 1] as u64) >= high as u64 {
+                    // Pi-formula fast path: phi(n, b-1) = 1 + max(pi(n) - (b-1), 0)
+                    let bm1 = b as i64 - 1;
+                    // When xpq < primes[b-1], pi(xpq) < b-1, so phi = 1.
+                    // xpq < primes[b-1] ↔ primes[l] > x_div_prime / primes[b-1]
+                    let threshold_q = (x_div_prime / primes[b - 1] as u64) as usize;
+                    let l_phi1_bound = if threshold_q <= y {
+                        pi[threshold_q] as usize
+                    } else {
+                        pi_y // no phi=1 leaves
+                    };
+                    // Batch phi=1 leaves: l from current l down to max(l_phi1_bound, l_end) + 1
+                    let l_end_bound = if min_m <= y { pi[min_m] as usize } else { pi_y };
+                    let l_batch_stop = std::cmp::max(l_phi1_bound, l_end_bound);
+                    if l > l_batch_stop && l_batch_stop > 0 {
+                        // All these leaves contribute phi=1, and are in [low, high)
+                        let batch = (l - l_batch_stop) as i64;
+                        s2_local += batch;
+                        coeff[b] += batch;
+                        l = l_batch_stop;
                     }
-                    l -= 1;
+                    // Remaining leaves need individual pi lookup
+                    while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
+                        let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
+                        if xpq < high {
+                            let pi_n = seg0_pi[xpq] as i64;
+                            s2_local += 1 + std::cmp::max(pi_n - bm1, 0);
+                            coeff[b] += 1;
+                        }
+                        l -= 1;
+                    }
+                } else {
+                    let mut prev_pos: Option<usize> = None;
+                    let mut running_count: i64 = 0;
+                    while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
+                        let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
+                        if xpq >= low && xpq < high {
+                            let pos = xpq - low;
+                            let count = match prev_pos {
+                                Some(pp) if pos == pp => running_count,
+                                Some(pp) if pos > pp => {
+                                    running_count += sieve.count_delta(pp, pos);
+                                    running_count
+                                }
+                                _ => {
+                                    running_count = sieve.count(pos);
+                                    running_count
+                                }
+                            };
+                            s2_local += phi[b] + count;
+                            coeff[b] += 1;
+                            prev_pos = Some(pos);
+                        }
+                        l -= 1;
+                    }
                 }
 
                 phi[b] += sieve.count_total();

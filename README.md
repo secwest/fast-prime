@@ -18,7 +18,7 @@ Extension of V2: sieve primes only up to N^{1/3} (not N^{1/2}), then compute the
 
 ### V4 — Lagarias-Miller-Odlyzko (`src/bin/prime_count_v4.rs`)
 
-Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Parallel S2 via delta-phi correction, concurrent P2 via rayon. Currently the fastest implementation, beating V3 by 28.3× at 10T.
+Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Parallel S2 via delta-phi correction, concurrent P2 via rayon. Currently the fastest implementation, beating V3 by 33× at 10T.
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -29,9 +29,9 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 ├─────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────────┤
 │ 1 Billion   │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │       50,847,534 │
 │ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00100s  │      455,052,511 │
-│ 100 Billion │    0.72087s  │    0.03500s  │    0.03400s  │    0.00360s  │    4,118,054,813 │
-│ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.01000s  │   37,607,912,018 │
-│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.04000s  │  346,065,536,839 │
+│ 100 Billion │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    4,118,054,813 │
+│ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.00800s  │   37,607,912,018 │
+│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.03600s  │  346,065,536,839 │
 └─────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────────┘
 ```
 
@@ -41,17 +41,17 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 |---|---|---|---|
 | 1 Billion | 0.006s | 0.0009s | **6.7×** |
 | 10 Billion | 0.066s | 0.001s | **66.0×** |
-| 100 Billion | 0.721s | 0.004s | **180.3×** |
-| 1 Trillion | 8.640s | 0.010s | **864.0×** |
-| 10 Trillion | 127.13s | 0.040s | **3178.3×** |
+| 100 Billion | 0.721s | 0.003s | **240.3×** |
+| 1 Trillion | 8.640s | 0.008s | **1080.0×** |
+| 10 Trillion | 127.13s | 0.036s | **3531.4×** |
 ### Comparison vs Strix Halo Reference
 
 | Range | V4 (Ultra 9 285K) | Strix Halo Reference | Speedup |
 |---|---|---|---|
 | 1 Billion | 0.0009s | 0.011s | **12.2×** |
 | 10 Billion | 0.001s | 0.109s | **109.0×** |
-| 100 Billion | 0.004s | 1.483s | **370.8×** |
-| 1 Trillion | 0.010s | 25.820s | **2582.0×** |
+| 100 Billion | 0.003s | 1.483s | **494.3×** |
+| 1 Trillion | 0.008s | 25.820s | **3227.5×** |
 
 ## Key Optimizations
 
@@ -104,6 +104,7 @@ See [OPTIMIZATIONS_V4.md](OPTIMIZATIONS_V4.md) for the full optimization log.
 - **Barrett fast division** — Precomputed reciprocals for ~4600 primes (37KB, fits L1). Replaces 25-cycle hardware division with 12-cycle multiply-high in easy leaf loop (**8% speedup at 10T**).
 - **Deferred total update** — Cross-off loop accumulates delta locally, breaking the serial dependency on `sieve.total`. Combined with raw pointer access for zero-overhead sieve updates.
 - **mimalloc allocator** — Replaces Windows default heap with mimalloc for 8.6× faster multi-threaded allocation. Reduces parallel S2 allocation overhead from 129ms to ~15ms (**5% speedup at 10T**).
+- **Pi-formula for easy leaves** — For segment 0, when primes[b-1]² ≥ segment_size, uses identity phi(n,b-1) = 1 + max(pi(n)-(b-1), 0) with a precomputed pi table. Eliminates sieve counting for 4.7M easy leaf iterations. Batch-counts trivial phi=1 leaves in O(1) per prime (**10% speedup at 10T**).
 
 ## Building
 
