@@ -922,13 +922,18 @@ fn count_primes(x: u64) -> u64 {
 
     // Adaptive alpha: larger inputs benefit from higher alpha because the S2 inner loops
     // have more work per prime, amortizing per-prime overhead better.
+    // Optimal values found empirically: 2.2 at 10T, 2.4 at 100T, 6.0 at 1Q, 13 at 10Q, 16 at 100Q
     let log_x = (x as f64).log10();
     let alpha = if log_x <= 13.0 {
         2.2
     } else if log_x <= 14.0 {
         2.2 + 0.2 * (log_x - 13.0)
-    } else {
+    } else if log_x <= 15.0 {
         2.4 + 3.6 * (log_x - 14.0)
+    } else if log_x <= 16.0 {
+        6.0 + 7.0 * (log_x - 15.0)
+    } else {
+        13.0 + 3.0 * (log_x - 16.0)
     };
     let y = std::cmp::max((icbrt(x) as f64 * alpha) as usize, 1);
 
@@ -989,6 +994,8 @@ fn main() {
         Case { limit: 10_000_000_000_000, label: "10 Trillion",  expected: 346_065_536_839 },
         Case { limit: 100_000_000_000_000, label: "100 Trillion", expected: 3_204_941_750_802 },
         Case { limit: 1_000_000_000_000_000, label: "1 Quadrillion", expected: 29_844_570_422_669 },
+        Case { limit: 10_000_000_000_000_000, label: "10 Quadrillion", expected: 279_238_341_033_925 },
+        Case { limit: 100_000_000_000_000_000, label: "100 Quadrillion", expected: 2_623_557_157_654_233 },
     ];
 
     println!("{:<15} {:>12} {:>18}  {}", "Range", "Time", "Primes Found", "Status");
