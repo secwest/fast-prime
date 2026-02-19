@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 primal = "0.3"
 rayon = "1.10"
+crossterm = "0.28"
 
 [profile.release]
 opt-level = 3
