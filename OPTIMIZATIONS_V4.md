@@ -452,6 +452,54 @@ This is exact — no approximation. O(num_primes × num_threads) correction work
 
 ---
 
+## Optimization 17: Chunk Count Tuning + Truncated Correction ✅
+
+**Hypothesis**: Early segments do 100× more work (max_b=4600) than late segments
+(max_b=46). Using more chunks than threads enables rayon's work-stealing to balance
+the load. Truncating the correction pass to max_b_seen (instead of all primes)
+enables finer granularity without excessive overhead.
+
+**Sweep results** (10T):
+
+| Chunks      | Time    |
+|-------------|---------|
+| nthreads×4  | 0.055s  |
+| nthreads×8  | 0.051s  |
+| nthreads×10 | 0.050s  |
+| nthreads×16 | 0.053s  |
+| per-segment | 0.080s  |
+
+**Chosen**: nthreads×8 with truncated correction.
+
+**Result**: 10T 0.062s → 0.050s (~19% improvement)
+
+---
+
+## Optimization 18: Alpha Re-tune to 1.6 ✅
+
+**Hypothesis**: With parallel S2, the S2 vs P2 balance has shifted. Lower alpha gives
+more segments (more parallelism) and fewer primes (less per-segment work). P2 cost
+increases but is overlapped with S2.
+
+**Sweep results** (10T, 3 runs each):
+
+| Alpha | Avg Time |
+|-------|----------|
+| 1.0   | blocked  |
+| 1.2   | 0.052s   |
+| 1.4   | 0.044s   |
+| 1.5   | 0.042s   |
+| 1.6   | 0.041s   |
+| 1.8   | 0.044s   |
+| 2.0   | 0.050s   |
+| 2.5   | 0.066s   |
+
+**Adopted**: α = 1.6
+
+**Result**: 10T 0.050s → 0.042s (~16% improvement)
+
+---
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
@@ -459,8 +507,8 @@ This is exact — no approximation. O(num_primes × num_threads) correction work
 | 1 Billion   | 0.0012s  | 0.002s   | 1.7×           |
 | 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
 | 100 Billion | 0.004s   | 0.034s   | **8.5×**       |
-| 1 Trillion  | 0.015s   | 0.168s   | **11.2×**      |
-| 10 Trillion | 0.062s   | 1.190s   | **19.2×**      |
+| 1 Trillion  | 0.010s   | 0.168s   | **16.8×**      |
+| 10 Trillion | 0.042s   | 1.190s   | **28.3×**      |
 
 ### Remaining Optimization Opportunities
 
