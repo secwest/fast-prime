@@ -286,17 +286,40 @@ between S2 and P2 has shifted. Smaller y (lower alpha) means less P2 work.
 
 ---
 
+## Optimization 9: Concurrent S2 + P2 via thread::scope ✅
+
+**Hypothesis**: S2 and P2 are independent computations. Running P2 sieve construction
+and lookups in a background thread overlaps it entirely with S2.
+
+**Change**: Use `std::thread::scope` to spawn P2 on a separate thread while S2
+runs on the main thread. Both complete before the join.
+
+**Result** (α = 2.0, with all prior optimizations):
+
+| Range      | Before  | After   | Speedup |
+|------------|---------|---------|---------|
+| 100 Billion| 0.011s  | 0.008s  | **1.4×** |
+| 1 Trillion | 0.040s  | 0.033s  | **1.2×** |
+| 10 Trillion| 0.163s  | 0.137s  | **1.2×** |
+
+P2 was ~20% of total time; overlapping it with S2 makes it essentially free.
+
+**Failed**: Batched cross_off_step — building per-word masks for primes < 64 was
+10% slower due to mask construction overhead and extra branches.
+
+---
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
 | 1 Billion   | 0.0014s  | 0.002s   | 1.4×           |
-| 10 Billion  | 0.0035s  | 0.007s   | 2.0×           |
-| 100 Billion | 0.011s   | 0.034s   | **3.1×**       |
-| 1 Trillion  | 0.040s   | 0.168s   | **4.2×**       |
-| 10 Trillion | 0.163s   | 1.190s   | **7.3×**       |
+| 10 Billion  | 0.003s   | 0.007s   | 2.3×           |
+| 100 Billion | 0.008s   | 0.034s   | **4.3×**       |
+| 1 Trillion  | 0.033s   | 0.168s   | **5.1×**       |
+| 10 Trillion | 0.137s   | 1.190s   | **8.7×**       |
 
 ### Remaining Optimization Opportunities
 
-1. **Parallel S2**: Split segments across rayon threads with phi_vector initialization
-2. **Batch sieve for cross-off**: Process multiple primes in combined passes
+1. **Parallel S2 segments**: Split segment range across threads (complex phi precomputation)
+2. **Reduce integer divisions**: Reciprocal multiplication for x/(prime*m)

@@ -478,11 +478,13 @@ fn count_primes(x: u64) -> u64 {
         }
     }
 
-    // S2: special leaves via segmented sieve
-    let s2 = compute_s2(x, y, c, &primes, &lpf, &mu, &pi);
-
-    // P2
-    let p2 = compute_p2(x, y, pi_y);
+    // Run S2 and P2 concurrently: P2 sieve construction overlaps with S2 computation
+    let (s2, p2) = std::thread::scope(|s| {
+        let p2_handle = s.spawn(|| compute_p2(x, y, pi_y));
+        let s2 = compute_s2(x, y, c, &primes, &lpf, &mu, &pi);
+        let p2 = p2_handle.join().unwrap();
+        (s2, p2)
+    });
 
     let result = s1 + s2 + pi_y as i64 - 1 - p2;
     result as u64
