@@ -145,6 +145,7 @@ impl BitSieve {
     }
 
     /// Count set bits in positions [0, pos].
+    #[inline]
     fn count(&self, pos: usize) -> i64 {
         let full = pos / 64;
         let bit = pos % 64;
@@ -162,6 +163,7 @@ impl BitSieve {
         self.bits[..nwords].iter().map(|w| w.count_ones() as i64).sum()
     }
 
+    #[inline]
     fn cross_off(&mut self, pos: usize) {
         let w = pos / 64;
         let b = pos % 64;
@@ -327,7 +329,8 @@ fn generate_pi(limit: usize, sieve: &Sieve) -> Vec<u32> {
 fn count_primes(x: u64) -> u64 {
     if x < 2 { return 0; }
 
-    let y = std::cmp::max(icbrt(x) as usize, 1);
+    let alpha = 2.0;
+    let y = std::cmp::max((icbrt(x) as f64 * alpha) as usize, 1);
 
     // For small x, use primal directly
     if x <= 10_000 {
