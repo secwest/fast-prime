@@ -640,13 +640,15 @@ both finish faster than the old primal bottleneck.
 
 ## Current Best Performance
 
-| Range       | V4 Time  | V3 Time  | Speedup vs V3 |
-|-------------|----------|----------|----------------|
-| 1 Billion   | 0.0009s  | 0.002s   | 2.2×           |
-| 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
-| 100 Billion | 0.003s   | 0.034s   | **11.3×**      |
-| 1 Trillion  | 0.006s   | 0.168s   | **28.0×**      |
-| 10 Trillion | 0.022s   | 1.190s   | **54.1×**      |
+| Range         | V4 Time  | V3 Time  | Speedup vs V3 |
+|---------------|----------|----------|----------------|
+| 1 Billion     | 0.0009s  | 0.002s   | 2.2×           |
+| 10 Billion    | 0.002s   | 0.007s   | 3.5×           |
+| 100 Billion   | 0.003s   | 0.034s   | **11.3×**      |
+| 1 Trillion    | 0.006s   | 0.168s   | **28.0×**      |
+| 10 Trillion   | 0.022s   | 1.190s   | **54.1×**      |
+| 100 Trillion  | 0.103s   |    —     |       —        |
+| 1 Quadrillion | 2.210s   |    —     |       —        |
 
 ### Remaining Optimization Opportunities
 
