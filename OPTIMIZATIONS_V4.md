@@ -266,19 +266,37 @@ replaced by ~256 word-level AND + POPCNT operations (80× fewer operations).
 
 ---
 
-##Current Best Performance
+## Optimization 8: Re-tune Alpha back to 2.0 ✅
+
+**Hypothesis**: With the pre-sieve template eliminating pre-sieve cost, the balance
+between S2 and P2 has shifted. Smaller y (lower alpha) means less P2 work.
+
+**Results** (with pre-sieve template):
+
+| Alpha | 1T Time | 10T Time |
+|-------|---------|----------|
+| 1.5   | 0.040s  | 0.169s   |
+| 1.75  | 0.039s  | 0.164s   |
+| 2.0   | 0.039s  | 0.162s   |
+| 2.5   | 0.042s  | 0.175s   |
+
+α = 2.0 is now optimal again (was 2.5 before pre-sieve template).
+
+**Adopted**: α = 2.0
+
+---
+
+## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
-| 1 Billion   | 0.0018s  | 0.002s   | 1.1×           |
-| 10 Billion  | 0.004s   | 0.007s   | 1.8×           |
-| 100 Billion | 0.012s   | 0.034s   | **2.8×**       |
-| 1 Trillion  | 0.042s   | 0.168s   | **4.0×**       |
-| 10 Trillion | 0.175s   | 1.190s   | **6.8×**       |
+| 1 Billion   | 0.0014s  | 0.002s   | 1.4×           |
+| 10 Billion  | 0.0035s  | 0.007s   | 2.0×           |
+| 100 Billion | 0.011s   | 0.034s   | **3.1×**       |
+| 1 Trillion  | 0.040s   | 0.168s   | **4.2×**       |
+| 10 Trillion | 0.163s   | 1.190s   | **7.3×**       |
 
 ### Remaining Optimization Opportunities
 
 1. **Parallel S2**: Split segments across rayon threads with phi_vector initialization
-2. **Pre-sieve more primes**: Extend template to include prime 17 (period 510510)
-3. **Batch sieve for cross-off**: Process multiple primes in combined passes
-4. **Re-tune alpha**: With faster pre-sieve, optimal alpha may have shifted
+2. **Batch sieve for cross-off**: Process multiple primes in combined passes

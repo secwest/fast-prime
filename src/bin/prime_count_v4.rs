@@ -452,7 +452,7 @@ fn generate_pi(limit: usize, sieve: &Sieve) -> Vec<u32> {
 fn count_primes(x: u64) -> u64 {
     if x < 2 { return 0; }
 
-    let alpha = 2.5;
+    let alpha = 2.0;
     let y = std::cmp::max((icbrt(x) as f64 * alpha) as usize, 1);
 
     // For small x, use primal directly
