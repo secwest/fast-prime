@@ -322,7 +322,7 @@ impl Display {
         limit: Option<u64>,   // None ⟹ ∞ mode
     ) -> io::Result<()> {
         let cols = self.term_cols as usize;
-        let title = " Pi Sieve \u{2014} High Speed Prime Generation";
+        let title = " Fast-Prime \u{2014} Intel Optimized Sieve";
 
         // Save cursor, move to top
         print!("\x1b[s"); // save
