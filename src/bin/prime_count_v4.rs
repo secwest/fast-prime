@@ -185,16 +185,6 @@ impl BitSieve {
     fn count_total(&self) -> i64 {
         self.total
     }
-
-    #[inline]
-    fn cross_off(&mut self, pos: usize) {
-        let w = pos / 64;
-        let b = pos % 64;
-        let old = unsafe { *self.bits.get_unchecked(w) };
-        let was_set = ((old >> b) & 1) as i64;
-        unsafe { *self.bits.get_unchecked_mut(w) = old & !(1u64 << b); }
-        self.total -= was_set;
-    }
 }
 
 /// Pre-sieve template for first c primes. Period = lcm(p_1..p_c).
