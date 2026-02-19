@@ -32,8 +32,8 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 │ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │     4,118,054,813 │
 │ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    37,607,912,018 │
 │ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.02200s  │   346,065,536,839 │
-│ 100 Trillion  │          —   │          —   │          —   │    0.10300s  │ 3,204,941,750,802 │
-│ 1 Quadrillion │          —   │          —   │          —   │    2.21000s  │29,844,570,422,669 │
+│ 100 Trillion  │          —   │          —   │          —   │    0.09900s  │ 3,204,941,750,802 │
+│ 1 Quadrillion │          —   │          —   │          —   │    0.79300s  │29,844,570,422,669 │
 └───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
 
@@ -95,7 +95,7 @@ See [OPTIMIZATIONS_V4.md](OPTIMIZATIONS_V4.md) for the full optimization log.
 - **LMO formula** — π(x) = S1 + S2 + π(y) - 1 - P2, where y = x^{1/3} · α. Completely different algorithmic approach from V2/V3.
 - **S2 segmented sieve** — Special leaves computed via bit-packed sieve with POPCNT. Processes segments of [0, z] where z = x/y, crossing off primes progressively.
 - **Monotonic max_b optimization** — Since max_b decreases across segments, primes beyond max_b are never processed in later segments. This eliminates O(π(y)) redundant work per segment (**2-3× speedup**).
-- **Alpha tuning** — y = x^{1/3} · 2.2 (re-tuned for parallel S2 + pi-formula; balances S2 easy leaf load vs P2 cost).
+- **Alpha tuning** — Adaptive alpha scales with log₁₀(x): α=2.2 for x≤10¹³, ramping to α=6.0 at 10¹⁵. Larger inputs benefit from higher alpha because S2 inner loops amortize per-prime overhead better (**64% speedup at 1Q**).
 - **Concurrent S2+P2** — P2 runs in a background thread overlapping with S2 via `thread::scope`. Makes P2 essentially free (**18% speedup**).
 - **Parallel S2 via delta-phi correction** — Segments split across threads, each tracking local phi + correction coefficients. True phi reconstructed via prefix-sum after join. Exact correction, no approximation (**1.8× speedup**).
 - **Pre-sieve template** — 30030-bit precomputed pattern for primes 2,3,5,7,11,13 applied via word-aligned AND, replacing 6 individual cross-off loops (**1.9× speedup**).

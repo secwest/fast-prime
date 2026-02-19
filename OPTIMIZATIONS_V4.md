@@ -638,6 +638,57 @@ both finish faster than the old primal bottleneck.
 | 1 Trillion  | 0.007s  | 0.006s  | **17%** |
 | 10 Trillion | 0.028s  | 0.022s  | **21%** |
 
+## Failed: Profile-Guided Optimization (PGO) ✗
+
+**Hypothesis**: Rust/LLVM PGO uses runtime branch profile data to optimize code layout,
+branch prediction hints, and inlining decisions. Typically yields 5-15% on complex code.
+
+**Change**: Built with `-Cprofile-generate`, ran full benchmark suite for training data,
+merged profiles with `llvm-profdata`, rebuilt with `-Cprofile-use`.
+
+**Result**: No improvement — within noise at all scales. LTO=fat + codegen-units=1 already
+captures most of the benefits that PGO provides. The hot loops are manually unrolled with
+minimal branching, leaving little for PGO to improve.
+
+**Reverted** (no code changes were needed).
+
+---
+
+## Optimization 27: Adaptive Alpha Scaling ✅ (MAJOR WIN for large inputs)
+
+**Discovery**: Alpha sweep revealed dramatically different optima per input size:
+
+| Alpha | 10T best | 100T best | 1Q best  |
+|-------|----------|-----------|----------|
+| 2.2   | 0.022s   | 0.103s    | 2.21s    |
+| 2.4   | 0.026s   | 0.099s    | ~1.95s   |
+| 3.0   | 0.027s   | 0.110s    | 1.58s    |
+| 4.0   | 0.031s   | 0.128s    | 1.06s    |
+| 5.0   | 0.037s   | 0.133s    | 0.83s    |
+| 6.0   | 0.042s   | 0.170s    | 0.79s    |
+| 8.0   | ~0.05s   | 0.191s    | 0.94s    |
+
+**Root cause**: For larger x, segments have more primes and longer inner loops,
+so the per-prime overhead (starting position calculation, phi tracking) is better
+amortized. Higher alpha means larger y and fewer segments (smaller z = x/y), which
+reduces total S2 work. At 1Q, even α=6.0 gives 3200+ segments — plenty for parallelism.
+
+**Formula**: `alpha = f(log10(x))`
+- x ≤ 10^13: α = 2.2
+- 10^13 < x ≤ 10^14: α = 2.2 + 0.2·(log₁₀x - 13) → 2.2 to 2.4
+- x > 10^14: α = 2.4 + 3.6·(log₁₀x - 14) → 6.0 at 1Q
+
+**Result**:
+
+| Range         | Before  | After   | Speedup |
+|---------------|---------|---------|---------|
+| 1 Trillion    | 0.006s  | 0.006s  | same    |
+| 10 Trillion   | 0.022s  | 0.022s  | same    |
+| 100 Trillion  | 0.103s  | 0.099s  | **4%**  |
+| 1 Quadrillion | 2.210s  | 0.793s  | **64%** |
+
+---
+
 ## Current Best Performance
 
 | Range         | V4 Time  | V3 Time  | Speedup vs V3 |
@@ -647,12 +698,13 @@ both finish faster than the old primal bottleneck.
 | 100 Billion   | 0.003s   | 0.034s   | **11.3×**      |
 | 1 Trillion    | 0.006s   | 0.168s   | **28.0×**      |
 | 10 Trillion   | 0.022s   | 1.190s   | **54.1×**      |
-| 100 Trillion  | 0.103s   |    —     |       —        |
-| 1 Quadrillion | 2.210s   |    —     |       —        |
+| 100 Trillion  | 0.099s   |    —     |       —        |
+| 1 Quadrillion | 0.793s   |    —     |       —        |
 
 ### Remaining Optimization Opportunities
 
-1. **Further P2 sieve optimization**: Wheel-30 sieve for P2 bitmap, pre-sieve template
+1. **P2 pre-sieve template**: Apply pre-sieve (primes 2,3,5,7,11,13) to P2 bitmap
 2. **Extend pi-formula to more segments**: Currently only segment 0
 3. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
 4. **Correction pass vectorization**: SIMD dot-product for the sequential correction loop
+5. **Dedicated rayon thread pools**: Separate pools for P2 and S2 to avoid contention
