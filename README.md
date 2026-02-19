@@ -18,7 +18,7 @@ Extension of V2: sieve primes only up to N^{1/3} (not N^{1/2}), then compute the
 
 ### V4 — Lagarias-Miller-Odlyzko (`src/bin/prime_count_v4.rs`)
 
-Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Parallel S2 via delta-phi correction, concurrent P2 via rayon. Currently the fastest implementation, beating V3 by 33× at 10T.
+Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Parallel S2 via delta-phi correction, concurrent P2 via rayon. Currently the fastest implementation, beating V3 by 38× at 10T.
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -28,10 +28,10 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 │             │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │                  │
 ├─────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────────┤
 │ 1 Billion   │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │       50,847,534 │
-│ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00100s  │      455,052,511 │
+│ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │      455,052,511 │
 │ 100 Billion │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    4,118,054,813 │
-│ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.00800s  │   37,607,912,018 │
-│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.03600s  │  346,065,536,839 │
+│ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.00700s  │   37,607,912,018 │
+│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.03100s  │  346,065,536,839 │
 └─────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────────┘
 ```
 
@@ -40,18 +40,18 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 | Range | V1 (24 threads) | V4 (parallel) | V4 Speedup |
 |---|---|---|---|
 | 1 Billion | 0.006s | 0.0009s | **6.7×** |
-| 10 Billion | 0.066s | 0.001s | **66.0×** |
+| 10 Billion | 0.066s | 0.002s | **33.0×** |
 | 100 Billion | 0.721s | 0.003s | **240.3×** |
-| 1 Trillion | 8.640s | 0.008s | **1080.0×** |
-| 10 Trillion | 127.13s | 0.036s | **3531.4×** |
+| 1 Trillion | 8.640s | 0.007s | **1234.3×** |
+| 10 Trillion | 127.13s | 0.031s | **4101.0×** |
 ### Comparison vs Strix Halo Reference
 
 | Range | V4 (Ultra 9 285K) | Strix Halo Reference | Speedup |
 |---|---|---|---|
 | 1 Billion | 0.0009s | 0.011s | **12.2×** |
-| 10 Billion | 0.001s | 0.109s | **109.0×** |
+| 10 Billion | 0.002s | 0.109s | **54.5×** |
 | 100 Billion | 0.003s | 1.483s | **494.3×** |
-| 1 Trillion | 0.008s | 25.820s | **3227.5×** |
+| 1 Trillion | 0.007s | 25.820s | **3688.6×** |
 
 ## Key Optimizations
 
@@ -92,7 +92,7 @@ See [OPTIMIZATIONS_V4.md](OPTIMIZATIONS_V4.md) for the full optimization log.
 - **LMO formula** — π(x) = S1 + S2 + π(y) - 1 - P2, where y = x^{1/3} · α. Completely different algorithmic approach from V2/V3.
 - **S2 segmented sieve** — Special leaves computed via bit-packed sieve with POPCNT. Processes segments of [0, z] where z = x/y, crossing off primes progressively.
 - **Monotonic max_b optimization** — Since max_b decreases across segments, primes beyond max_b are never processed in later segments. This eliminates O(π(y)) redundant work per segment (**2-3× speedup**).
-- **Alpha tuning** — y = x^{1/3} · 1.6 (re-tuned for parallel S2; lower alpha = more segments = better parallelism).
+- **Alpha tuning** — y = x^{1/3} · 2.2 (re-tuned for parallel S2 + pi-formula; balances S2 easy leaf load vs P2 cost).
 - **Concurrent S2+P2** — P2 runs in a background thread overlapping with S2 via `thread::scope`. Makes P2 essentially free (**18% speedup**).
 - **Parallel S2 via delta-phi correction** — Segments split across threads, each tracking local phi + correction coefficients. True phi reconstructed via prefix-sum after join. Exact correction, no approximation (**1.8× speedup**).
 - **Pre-sieve template** — 30030-bit precomputed pattern for primes 2,3,5,7,11,13 applied via word-aligned AND, replacing 6 individual cross-off loops (**1.9× speedup**).

@@ -539,15 +539,36 @@ majority of leaves.
 | 1 Trillion  | 0.010s  | 0.008s  | -20%   |
 | 10 Trillion | 0.040s  | 0.036s  | -10%   |
 
+## Optimization 21: Alpha Re-tune to 2.2 ✅
+
+**Hypothesis**: With the pi-formula optimization reducing per-leaf cost in segment 0,
+the optimal alpha may have shifted. Higher alpha means larger y, more primes, but the
+pi-formula handles the increased easy leaf load efficiently.
+
+**Sweep results** (10T, 8 runs each, showing best):
+
+| Alpha | Best    | Median  |
+|-------|---------|---------|
+| 1.6   | 0.035s  | 0.038s  |
+| 1.9   | 0.031s  | 0.034s  |
+| 2.1   | 0.031s  | 0.033s  |
+| 2.2   | 0.029s  | 0.031s  |
+| 2.3   | 0.031s  | 0.033s  |
+| 2.4   | 0.031s  | 0.032s  |
+
+**Adopted**: α = 2.2
+
+**Result**: 10T 0.036s → 0.031s (~14% improvement)
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
 | 1 Billion   | 0.0009s  | 0.002s   | 2.2×           |
-| 10 Billion  | 0.001s   | 0.007s   | 7.0×           |
+| 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
 | 100 Billion | 0.003s   | 0.034s   | **11.3×**      |
-| 1 Trillion  | 0.008s   | 0.168s   | **21.0×**      |
-| 10 Trillion | 0.036s   | 1.190s   | **33.1×**      |
+| 1 Trillion  | 0.007s   | 0.168s   | **24.0×**      |
+| 10 Trillion | 0.031s   | 1.190s   | **38.4×**      |
 
 ### Remaining Optimization Opportunities
 
