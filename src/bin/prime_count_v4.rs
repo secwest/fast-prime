@@ -405,16 +405,12 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                 if xpq >= low && xpq < high {
                     let pos = xpq - low;
                     let count = match prev_pos {
-                        None => {
-                            running_count = sieve.count(pos);
-                            running_count
-                        }
+                        Some(pp) if pos == pp => running_count,
                         Some(pp) if pos > pp => {
                             running_count += sieve.count_delta(pp, pos);
                             running_count
                         }
                         _ => {
-                            // Same or earlier position — recalculate
                             running_count = sieve.count(pos);
                             running_count
                         }
