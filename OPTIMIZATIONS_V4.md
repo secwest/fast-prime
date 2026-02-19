@@ -765,6 +765,39 @@ For 100Q, α=16 was optimal (34.7s), close to the previous formula (α=13.2 → 
 
 ---
 
+## Optimization 30: Odd-only S2 Sieve ✅
+
+**Insight**: The S2 sieve represents ALL integers in each segment, but all even positions
+are always zero (crossed off by the template since prime 2 is in the template). Half the
+sieve memory is wasted on guaranteed-zero bits.
+
+**Changes**:
+- Sieve bit i now represents odd integer `low + 2*i + 1` (half the memory)
+- Template period reduced from lcm(2,3,5,7,11,13)=30030 to lcm(3,5,7,11,13)=15015
+- Cross-off only visits odd multiples: step = p in bit space (since odd multiples of p
+  are 2p apart, and each bit covers 2 integers)
+- `int_to_odd_bp(n, low) = (n - low - 1) / 2` maps integer to bit position
+- `first_odd_multiple(p, bound)` finds starting position for cross-off
+
+**Benefits**:
+- Sieve memory halved: 512KB → 256KB per segment (closer to L2)
+- Cross-off iterations halved: only odd multiples visited
+- Template init halved: fewer words to tile
+- count/count_delta faster: fewer bits to scan
+
+**Result**:
+
+| Range          | Before  | After   | Improvement |
+|----------------|---------|---------|-------------|
+| 1 Trillion     | 0.006s  | 0.005s  | 17%         |
+| 10 Trillion    | 0.022s  | 0.019s  | **14%**     |
+| 100 Trillion   | 0.096s  | 0.091s  | **5%**      |
+| 1 Quadrillion  | 0.793s  | 0.755s  | **5%**      |
+| 10 Quadrillion | 5.680s  | 5.430s  | **4%**      |
+| 100 Quadrillion| 34.33s  | 33.63s  | **2%**      |
+
+---
+
 ## Current Best Performance
 
 | Range          | V4 Time  | V3 Time  | Speedup vs V3 |
@@ -772,12 +805,12 @@ For 100Q, α=16 was optimal (34.7s), close to the previous formula (α=13.2 → 
 | 1 Billion      | 0.0009s  | 0.002s   | 2.2×           |
 | 10 Billion     | 0.002s   | 0.007s   | 3.5×           |
 | 100 Billion    | 0.003s   | 0.034s   | **11.3×**      |
-| 1 Trillion     | 0.006s   | 0.168s   | **28.0×**      |
-| 10 Trillion    | 0.022s   | 1.190s   | **54.1×**      |
-| 100 Trillion   | 0.096s   |    —     |       —        |
-| 1 Quadrillion  | 0.793s   |    —     |       —        |
-| 10 Quadrillion | 5.680s   |    —     |       —        |
-| 100 Quadrillion| 34.33s   |    —     |       —        |
+| 1 Trillion     | 0.005s   | 0.168s   | **33.6×**      |
+| 10 Trillion    | 0.019s   | 1.190s   | **62.6×**      |
+| 100 Trillion   | 0.091s   |    —     |       —        |
+| 1 Quadrillion  | 0.755s   |    —     |       —        |
+| 10 Quadrillion | 5.430s   |    —     |       —        |
+| 100 Quadrillion| 33.63s   |    —     |       —        |
 
 ### Remaining Optimization Opportunities
 
