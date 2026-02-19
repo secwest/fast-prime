@@ -18,7 +18,7 @@ Extension of V2: sieve primes only up to N^{1/3} (not N^{1/2}), then compute the
 
 ### V4 — Lagarias-Miller-Odlyzko (`src/bin/prime_count_v4.rs`)
 
-Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Parallel S2 via delta-phi correction, concurrent P2 via rayon. Currently the fastest implementation, beating V3 by 41× at 10T.
+Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Parallel S2 via delta-phi correction, concurrent P2 via rayon. Currently the fastest implementation, beating V3 by 42× at 10T.
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -31,7 +31,7 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 │ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │      455,052,511 │
 │ 100 Billion │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    4,118,054,813 │
 │ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.00700s  │   37,607,912,018 │
-│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.02900s  │  346,065,536,839 │
+│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.02800s  │  346,065,536,839 │
 └─────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────────┘
 ```
 
@@ -43,7 +43,7 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 | 10 Billion | 0.066s | 0.002s | **33.0×** |
 | 100 Billion | 0.721s | 0.003s | **240.3×** |
 | 1 Trillion | 8.640s | 0.007s | **1234.3×** |
-| 10 Trillion | 127.13s | 0.029s | **4383.8×** |
+| 10 Trillion | 127.13s | 0.028s | **4540.4×** |
 ### Comparison vs Strix Halo Reference
 
 | Range | V4 (Ultra 9 285K) | Strix Halo Reference | Speedup |

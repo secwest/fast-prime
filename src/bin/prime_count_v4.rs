@@ -330,7 +330,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
 
     // Use more chunks than threads for better load balancing via work-stealing.
     // Early segments (near low=0) do 100× more work than late segments.
-    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 32);
+    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 6);
 
     // Each chunk returns (s2_local, phi_totals, coefficients, max_b_seen)
     let results: Vec<(i64, Vec<i64>, Vec<i64>, usize)> = (0..nchunks).into_par_iter().map(|tid| {

@@ -582,6 +582,26 @@ smaller ranges.
 | 1 Trillion  | 0.007s  | 0.007s  | same   |
 | 10 Trillion | 0.031s  | 0.029s  | -6%    |
 
+## Optimization 23: Reduce Chunk Count to 6× Threads ✅
+
+**Insight**: Fewer chunks means fewer entries in the correction pass (sequential O(nchunks × max_b)
+dot-product and prefix-sum). With work-stealing, rayon still achieves good load balance even with
+fewer chunks. More chunks add correction overhead without improving peak performance.
+
+**Sweep** (10T, 8+ runs):
+
+| Multiplier | Chunks | Best   | Median |
+|------------|--------|--------|--------|
+| 4×         | 96     | 0.028s | 0.028s |
+| 6×         | 144    | 0.027s | 0.029s |
+| 8×         | 192    | 0.027s | 0.029s |
+| 16×        | 384    | 0.028s | 0.030s |
+| 32×        | 768    | 0.029s | 0.029s |
+
+**Adopted**: 6× (good balance of low overhead and reliable scheduling)
+
+**Result**: 10T 0.029s → 0.028s (best), correction pass ~3× faster.
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
@@ -590,11 +610,11 @@ smaller ranges.
 | 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
 | 100 Billion | 0.003s   | 0.034s   | **11.3×**      |
 | 1 Trillion  | 0.007s   | 0.168s   | **24.0×**      |
-| 10 Trillion | 0.029s   | 1.190s   | **41.0×**      |
+| 10 Trillion | 0.028s   | 1.190s   | **42.5×**      |
 
 ### Remaining Optimization Opportunities
 
 1. **Extend pi-formula to more segments**: Currently only segment 0
 2. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
-3. **Correction pass optimization**: Currently O(nchunks × max_b), ~2ms serial
+3. **Correction pass vectorization**: SIMD dot-product for the sequential correction loop
 4. **Thread count tuning**: P-core vs all-core configuration
