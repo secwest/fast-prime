@@ -290,6 +290,26 @@ impl BitSieve {
     fn count_total(&self) -> i64 {
         self.total
     }
+
+    /// Build prefix-sum array for O(1) count queries when sieve is frozen.
+    /// prefix[w] = total set bits in words [0, w).
+    fn build_prefix(&self) -> Vec<u32> {
+        let nwords = (self.len + 63) / 64;
+        let mut prefix = vec![0u32; nwords + 1];
+        for i in 0..nwords {
+            prefix[i + 1] = prefix[i] + unsafe { *self.bits.get_unchecked(i) }.count_ones();
+        }
+        prefix
+    }
+
+    /// O(1) count using prefix-sum table. Returns number of set bits in [0, pos].
+    #[inline]
+    fn count_prefix(&self, pos: usize, prefix: &[u32]) -> i64 {
+        let word = pos / 64;
+        let bit = pos % 64;
+        let mask = (2u64 << bit) - 1;
+        prefix[word] as i64 + (unsafe { *self.bits.get_unchecked(word) } & mask).count_ones() as i64
+    }
 }
 
 /// Pre-sieve template for first c primes. Period = lcm(p_1..p_c).
@@ -543,6 +563,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             // Easy special leaves
             // For segment 0: use pi formula phi(n,b-1) = pi(n) - b + 2 when primes[b-1]² ≥ high
             let use_pi_formula = low == 0 && seg_idx == seg_start;
+            let sqrt_high = isqrt(high as u64) as usize;
             while b <= max_b && b < nprimes {
                 let prime = primes[b] as u64;
                 let x_div_prime = x / prime;
@@ -619,43 +640,57 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                 }
 
                 phi[b] += sieve.count_total();
+
+                // Cross-off: when prime > √high, all composite multiples are already
+                // cleared by smaller primes. Only the prime itself might need clearing.
                 let p = prime as usize;
-                let first_mul = ((std::cmp::max(low, p) + p - 1) / p) * p;
-                let start = if first_mul >= high { seg_len } else { first_mul - low };
-                let mut k = start;
-                let bits = sieve.bits.as_mut_ptr();
-                let mut delta = 0i64;
-                while k + p * 3 < seg_len {
-                    unsafe {
-                        let w0 = k >> 6; let b0 = k & 63;
-                        let old0 = *bits.add(w0);
-                        delta += ((old0 >> b0) & 1) as i64;
-                        *bits.add(w0) = old0 & !(1u64 << b0);
-                        let k1 = k + p; let w1 = k1 >> 6; let b1 = k1 & 63;
-                        let old1 = *bits.add(w1);
-                        delta += ((old1 >> b1) & 1) as i64;
-                        *bits.add(w1) = old1 & !(1u64 << b1);
-                        let k2 = k + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
-                        let old2 = *bits.add(w2);
-                        delta += ((old2 >> b2) & 1) as i64;
-                        *bits.add(w2) = old2 & !(1u64 << b2);
-                        let k3 = k + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
-                        let old3 = *bits.add(w3);
-                        delta += ((old3 >> b3) & 1) as i64;
-                        *bits.add(w3) = old3 & !(1u64 << b3);
+                if p > sqrt_high {
+                    if p >= low && p < high {
+                        let pos = p - low;
+                        let w = pos >> 6; let bk = pos & 63;
+                        let old = unsafe { *sieve.bits.get_unchecked(w) };
+                        let was_set = ((old >> bk) & 1) as i64;
+                        unsafe { *sieve.bits.get_unchecked_mut(w) = old & !(1u64 << bk); }
+                        sieve.total -= was_set;
                     }
-                    k += p * 4;
-                }
-                while k < seg_len {
-                    unsafe {
-                        let w = k >> 6; let bk = k & 63;
-                        let old = *bits.add(w);
-                        delta += ((old >> bk) & 1) as i64;
-                        *bits.add(w) = old & !(1u64 << bk);
+                } else {
+                    let first_mul = ((std::cmp::max(low, p) + p - 1) / p) * p;
+                    let start = if first_mul >= high { seg_len } else { first_mul - low };
+                    let mut k = start;
+                    let bits = sieve.bits.as_mut_ptr();
+                    let mut delta = 0i64;
+                    while k + p * 3 < seg_len {
+                        unsafe {
+                            let w0 = k >> 6; let b0 = k & 63;
+                            let old0 = *bits.add(w0);
+                            delta += ((old0 >> b0) & 1) as i64;
+                            *bits.add(w0) = old0 & !(1u64 << b0);
+                            let k1 = k + p; let w1 = k1 >> 6; let b1 = k1 & 63;
+                            let old1 = *bits.add(w1);
+                            delta += ((old1 >> b1) & 1) as i64;
+                            *bits.add(w1) = old1 & !(1u64 << b1);
+                            let k2 = k + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
+                            let old2 = *bits.add(w2);
+                            delta += ((old2 >> b2) & 1) as i64;
+                            *bits.add(w2) = old2 & !(1u64 << b2);
+                            let k3 = k + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
+                            let old3 = *bits.add(w3);
+                            delta += ((old3 >> b3) & 1) as i64;
+                            *bits.add(w3) = old3 & !(1u64 << b3);
+                        }
+                        k += p * 4;
                     }
-                    k += p;
+                    while k < seg_len {
+                        unsafe {
+                            let w = k >> 6; let bk = k & 63;
+                            let old = *bits.add(w);
+                            delta += ((old >> bk) & 1) as i64;
+                            *bits.add(w) = old & !(1u64 << bk);
+                        }
+                        k += p;
+                    }
+                    sieve.total -= delta;
                 }
-                sieve.total -= delta;
                 b += 1;
             }
         }
