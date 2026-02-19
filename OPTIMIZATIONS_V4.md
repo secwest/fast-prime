@@ -188,15 +188,42 @@ amortizing more of the initial count() call across incremental deltas.
 
 ---
 
-## Current Best Performance (α = 2.0, parallel P2, incremental count)
+## Optimization 5: Branchless Cross-off + O(1) count_total ✅
+
+**Two changes combined**:
+
+1. **Branchless tracked total**: Extract bit value with `(old >> b) & 1` and subtract
+   from total, making count_total() O(1) instead of O(nwords). Previous branchy version
+   was slower, but this branchless version has no pipeline stalls.
+
+2. **Remove dead `if low + k > 1` branch**: In all three cross-off loops, this check
+   prevented crossing off position 1 (number 1). But no prime ≥ 2 ever has a multiple
+   at position 1, so the check was dead code. Removing it eliminates one branch per
+   cross-off iteration across ~millions of iterations.
+
+**Failed**: Precomputed valid_m table — storing Vec<(m, mu)> per b was 2.5× SLOWER
+due to precomputation cost, cache misses, and range-check overhead. Sequential access
+to mu[] and lpf[] arrays is more cache-friendly.
+
+**Result** (α = 2.0, with parallel P2 + incremental count):
+
+| Range      | Before  | After   | Speedup |
+|------------|---------|---------|---------|
+| 100 Billion| 0.021s  | 0.020s  | 1.1×    |
+| 1 Trillion | 0.091s  | 0.084s  | **1.1×** |
+| 10 Trillion| 0.396s  | 0.370s  | **1.1×** |
+
+---
+
+## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
 | 1 Billion   | 0.0015s  | 0.002s   | 1.3×           |
 | 10 Billion  | 0.006s   | 0.007s   | 1.2×           |
-| 100 Billion | 0.021s   | 0.034s   | 1.6×           |
-| 1 Trillion  | 0.091s   | 0.168s   | **1.8×**       |
-| 10 Trillion | 0.396s   | 1.190s   | **3.0×**       |
+| 100 Billion | 0.020s   | 0.034s   | 1.7×           |
+| 1 Trillion  | 0.084s   | 0.168s   | **2.0×**       |
+| 10 Trillion | 0.370s   | 1.190s   | **3.2×**       |
 
 ### Remaining Optimization Opportunities
 

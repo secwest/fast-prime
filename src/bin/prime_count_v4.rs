@@ -133,11 +133,12 @@ fn compute_p2(x: u64, y: usize, pi_y: usize) -> i64 {
 struct BitSieve {
     bits: Vec<u64>,
     len: usize,
+    total: i64,
 }
 
 impl BitSieve {
     fn new(max_len: usize) -> Self {
-        BitSieve { bits: vec![0u64; (max_len + 63) / 64], len: 0 }
+        BitSieve { bits: vec![0u64; (max_len + 63) / 64], len: 0, total: 0 }
     }
 
     fn reset(&mut self, len: usize) {
@@ -148,6 +149,7 @@ impl BitSieve {
         if excess > 0 && nwords > 0 {
             self.bits[nwords - 1] = u64::MAX >> excess;
         }
+        self.total = len as i64;
     }
 
     /// Count set bits in positions [0, pos].
@@ -192,15 +194,18 @@ impl BitSieve {
     }
 
     fn count_total(&self) -> i64 {
-        let nwords = (self.len + 63) / 64;
-        self.bits[..nwords].iter().map(|w| w.count_ones() as i64).sum()
+        self.total
     }
 
     #[inline]
     fn cross_off(&mut self, pos: usize) {
         let w = pos / 64;
         let b = pos % 64;
-        unsafe { *self.bits.get_unchecked_mut(w) &= !(1u64 << b); }
+        let old = unsafe { *self.bits.get_unchecked(w) };
+        // Branchless: extract bit value and subtract from total
+        let was_set = ((old >> b) & 1) as i64;
+        unsafe { *self.bits.get_unchecked_mut(w) = old & !(1u64 << b); }
+        self.total -= was_set;
     }
 }
 
@@ -244,8 +249,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             };
             let mut k = start;
             while k < seg_len {
-                // Don't cross off the prime itself (position = prime value)
-                if low + k > 1 { sieve.cross_off(k); }
+                sieve.cross_off(k);
                 k += p;
             }
             next[b] = low + k;
@@ -306,7 +310,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             };
             let mut k = start;
             while k < seg_len {
-                if low + k > 1 { sieve.cross_off(k); }
+                sieve.cross_off(k);
                 k += p;
             }
             next[b] = low + k;
@@ -364,7 +368,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             };
             let mut k = start;
             while k < seg_len {
-                if low + k > 1 { sieve.cross_off(k); }
+                sieve.cross_off(k);
                 k += p;
             }
             next[b] = low + k;
