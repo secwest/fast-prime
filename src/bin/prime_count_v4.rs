@@ -1,0 +1,418 @@
+use primal::Sieve;
+use std::time::Instant;
+
+// ── Lagarias-Miller-Odlyzko prime counting ───────────────────────────────────
+//
+// Formula: π(x) = S1(x,a) + S2(x,a) + π(y) - 1 - P2(x,a)
+// where y = x^{1/3}, a = π(y), c = min(a, 6), and:
+//   S1  = "ordinary leaves" — Σ μ(n)·φ(x/n, c)   for squarefree n ≤ y, lpf(n) > p_c
+//   S2  = "special leaves"  — -Σ μ(m)·φ(x/(p_b·m), b-1)
+//   P2  = contribution from pairs of large primes
+//
+// Reference: Kim Walisch, primecount (pi_lmo1.cpp, pi_lmo_parallel.cpp)
+
+/// Integer square root (exact).
+fn isqrt(n: u64) -> u64 {
+    if n < 2 { return n; }
+    let mut x = (n as f64).sqrt() as u64;
+    while x > n / x { x -= 1; }
+    while (x + 1) <= n / (x + 1) { x += 1; }
+    x
+}
+
+/// Integer cube root (exact).
+fn icbrt(n: u64) -> u64 {
+    if n < 2 { return n; }
+    let mut x = (n as f64).cbrt() as u64 + 1;
+    while x > 0 && x as u128 * x as u128 * x as u128 > n as u128 { x -= 1; }
+    while (x + 1) as u128 * (x + 1) as u128 * (x + 1) as u128 <= n as u128 { x += 1; }
+    x
+}
+
+// ── Precomputation tables ────────────────────────────────────────────────────
+
+/// Generate least prime factor table for [0, limit].
+fn generate_lpf(limit: usize) -> Vec<i32> {
+    let mut lpf = vec![i32::MAX; limit + 1];
+    lpf[0] = 0;
+    for p in 2..=limit {
+        if lpf[p] != i32::MAX { continue; }
+        for m in (p..=limit).step_by(p) {
+            if lpf[m] == i32::MAX {
+                lpf[m] = p as i32;
+            }
+        }
+    }
+    lpf
+}
+
+/// Generate Möbius function table for [0, limit].
+fn generate_mu(limit: usize) -> Vec<i8> {
+    let mut mu = vec![1i8; limit + 1];
+    mu[0] = 0;
+    let mut is_prime = vec![true; limit + 1];
+    for p in 2..=limit {
+        if !is_prime[p] { continue; }
+        for m in (p..=limit).step_by(p) {
+            if m > p { is_prime[m] = false; }
+            mu[m] = -mu[m];
+        }
+        let p2 = p * p;
+        for m in (p2..=limit).step_by(p2) {
+            mu[m] = 0;
+        }
+    }
+    mu
+}
+
+// ── PhiTiny: φ(x, c) for small c using precomputed wheel ────────────────────
+
+const TINY_PRIMES: [u64; 7] = [0, 2, 3, 5, 7, 11, 13];
+
+struct PhiTinyCache {
+    pc: u64,
+    phi_pc: u64,
+    partial: Vec<u64>,
+}
+
+impl PhiTinyCache {
+    fn new(c: usize) -> Self {
+        let mut pc = 1u64;
+        let mut phi_pc = 1u64;
+        for i in 1..=c { pc *= TINY_PRIMES[i]; phi_pc *= TINY_PRIMES[i] - 1; }
+        let mut partial = vec![0u64; pc as usize + 1];
+        for k in 1..=pc as usize {
+            partial[k] = partial[k - 1];
+            let kk = k as u64;
+            let mut coprime = true;
+            for i in 1..=c {
+                if kk % TINY_PRIMES[i] == 0 { coprime = false; break; }
+            }
+            if coprime { partial[k] += 1; }
+        }
+        PhiTinyCache { pc, phi_pc, partial }
+    }
+
+    fn phi(&self, x: u64) -> i64 {
+        if x == 0 { return 0; }
+        let full = (x / self.pc) * self.phi_pc;
+        let rem = (x % self.pc) as usize;
+        (full + self.partial[rem]) as i64
+    }
+}
+
+// ── P2: Pairs of large primes ────────────────────────────────────────────────
+
+fn compute_p2(x: u64, y: usize, pi_y: usize) -> i64 {
+    let sqrt_x = isqrt(x) as usize;
+    if y >= sqrt_x { return 0; }
+
+    let max_val = (x / (y as u64 + 1)) as usize;
+    let p2_sieve = Sieve::new(std::cmp::max(max_val, sqrt_x));
+
+    let mut p2: i64 = 0;
+    let pi_sqrt_x = p2_sieve.prime_pi(sqrt_x);
+
+    for p in p2_sieve.primes_from(y + 1).take_while(|&p| p <= sqrt_x) {
+        p2 += p2_sieve.prime_pi((x / p as u64) as usize) as i64;
+    }
+
+    let choose2 = |n: i64| n * (n - 1) / 2;
+    p2 - choose2(pi_sqrt_x as i64) + choose2(pi_y as i64)
+}
+
+// ── S2: Special leaves via segmented sieve with POPCNT ───────────────────────
+
+/// Bit-packed sieve segment.
+struct BitSieve {
+    bits: Vec<u64>,
+    len: usize,
+}
+
+impl BitSieve {
+    fn new(max_len: usize) -> Self {
+        BitSieve { bits: vec![0u64; (max_len + 63) / 64], len: 0 }
+    }
+
+    fn reset(&mut self, len: usize) {
+        self.len = len;
+        let nwords = (len + 63) / 64;
+        for w in self.bits[..nwords].iter_mut() { *w = u64::MAX; }
+        let excess = nwords * 64 - len;
+        if excess > 0 && nwords > 0 {
+            self.bits[nwords - 1] = u64::MAX >> excess;
+        }
+    }
+
+    /// Count set bits in positions [0, pos].
+    fn count(&self, pos: usize) -> i64 {
+        let full = pos / 64;
+        let bit = pos % 64;
+        let mut cnt = 0u64;
+        for i in 0..full {
+            cnt += unsafe { *self.bits.get_unchecked(i) }.count_ones() as u64;
+        }
+        let mask = (2u64 << bit) - 1;
+        cnt += (unsafe { *self.bits.get_unchecked(full) } & mask).count_ones() as u64;
+        cnt as i64
+    }
+
+    fn count_total(&self) -> i64 {
+        let nwords = (self.len + 63) / 64;
+        self.bits[..nwords].iter().map(|w| w.count_ones() as i64).sum()
+    }
+
+    fn cross_off(&mut self, pos: usize) {
+        let w = pos / 64;
+        let b = pos % 64;
+        unsafe { *self.bits.get_unchecked_mut(w) &= !(1u64 << b); }
+    }
+}
+
+/// Compute S2 using segmented sieve (matches pi_lmo_parallel structure).
+fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
+              lpf: &[i32], mu: &[i8], pi: &[u32]) -> i64 {
+    let z = (x / y as u64) as usize;
+    let sqrt_y = isqrt(y as u64) as usize;
+    let pi_sqrty = pi[std::cmp::min(sqrt_y, y)] as usize;
+    let pi_y = pi[y] as usize;
+
+    // Segment size ≈ √z, at least 64
+    let segment_size = std::cmp::max(isqrt(z as u64) as usize, 64).next_power_of_two();
+
+    // phi[b] accumulates φ(low, b-1) across segments
+    // Initialize: φ(0, b-1) = 0 for all b
+    let mut phi: Vec<i64> = vec![0i64; primes.len()];
+
+    // next[b] = smallest multiple of primes[b] not yet crossed off
+    let mut next: Vec<usize> = (0..primes.len()).map(|b| primes[b] as usize).collect();
+
+    let mut sieve = BitSieve::new(segment_size);
+    let mut s2: i64 = 0;
+    let mut low: usize = 0;
+
+    while low <= z {
+        let high = std::cmp::min(low + segment_size, z + 1);
+        let seg_len = high - low;
+        let low1 = std::cmp::max(low, 1);
+
+        sieve.reset(seg_len);
+        // Position 0 in first segment represents the integer 0, which is not in [1, x]
+        if low == 0 { sieve.cross_off(0); }
+
+        // Pre-sieve: cross off multiples of first c primes
+        for b in 1..=std::cmp::min(c, primes.len() - 1) {
+            let p = primes[b] as usize;
+            let start = if next[b] >= low { next[b] - low } else {
+                let rem = (low - next[b]) % p;
+                if rem == 0 { 0 } else { p - rem }
+            };
+            let mut k = start;
+            while k < seg_len {
+                // Don't cross off the prime itself (position = prime value)
+                if low + k > 1 { sieve.cross_off(k); }
+                k += p;
+            }
+            next[b] = low + k;
+        }
+
+        // Determine which b values have special leaves in this segment
+        let max_b = if low1 > 0 {
+            pi[std::cmp::min(isqrt(x / low1 as u64) as usize, y)] as usize
+        } else { pi_y };
+        let max_b = std::cmp::min(max_b, pi_y - 1);
+
+        let mut b = c + 1;
+
+        // Hard special leaves: c+1 ≤ b ≤ π(√y)
+        while b <= std::cmp::min(pi_sqrty, max_b) && b < primes.len() {
+            let prime = primes[b] as u64;
+            let min_m = std::cmp::max(
+                x / (prime * high as u64),
+                y as u64 / prime
+            ) as usize;
+            let max_m = std::cmp::min(
+                x / (prime * low1 as u64),
+                y as u64
+            ) as usize;
+
+            if prime as usize >= max_m { break; }
+
+            for m in (min_m + 1..=max_m).rev() {
+                if mu[m] != 0 && (prime as i32) < lpf[m] {
+                    let xpm = (x / (prime * m as u64)) as usize;
+                    if xpm >= low && xpm < high {
+                        let count = sieve.count(xpm - low);
+                        s2 -= mu[m] as i64 * (phi[b] + count);
+                    }
+                }
+            }
+
+            phi[b] += sieve.count_total();
+            // Cross off multiples of prime
+            let p = prime as usize;
+            let start = if next[b] >= low { next[b] - low } else {
+                let rem = (low - next[b]) % p;
+                if rem == 0 { 0 } else { p - rem }
+            };
+            let mut k = start;
+            while k < seg_len {
+                if low + k > 1 { sieve.cross_off(k); }
+                k += p;
+            }
+            next[b] = low + k;
+            b += 1;
+        }
+
+        // Easy special leaves: π(√y) < b ≤ max_b (two-prime products)
+        while b <= max_b && b < primes.len() {
+            let prime = primes[b] as u64;
+            let l_max = std::cmp::min(
+                (x / (prime * low1 as u64)) as usize,
+                y
+            );
+            let mut l = pi[std::cmp::min(l_max, y)] as usize;
+            let min_m = std::cmp::max(
+                (x / (prime * high as u64)) as usize,
+                prime as usize
+            );
+
+            if l < primes.len() && prime as usize >= primes[l] as usize { break; }
+
+            while l > 0 && l < primes.len() && (primes[l] as usize) > min_m {
+                let xpq = (x / (prime * primes[l] as u64)) as usize;
+                if xpq >= low && xpq < high {
+                    let count = sieve.count(xpq - low);
+                    s2 += phi[b] + count; // mu(q) = -1, so -= (-1) * phi = += phi
+                }
+                l -= 1;
+            }
+
+            phi[b] += sieve.count_total();
+            let p = prime as usize;
+            let start = if next[b] >= low { next[b] - low } else {
+                let rem = (low - next[b]) % p;
+                if rem == 0 { 0 } else { p - rem }
+            };
+            let mut k = start;
+            while k < seg_len {
+                if low + k > 1 { sieve.cross_off(k); }
+                k += p;
+            }
+            next[b] = low + k;
+            b += 1;
+        }
+
+        // Accumulate phi for remaining b values that had no leaves this segment
+        while b < primes.len() {
+            phi[b] += sieve.count_total();
+            let p = primes[b] as usize;
+            let start = if next[b] >= low { next[b] - low } else {
+                let rem = (low - next[b]) % p;
+                if rem == 0 { 0 } else { p - rem }
+            };
+            let mut k = start;
+            while k < seg_len {
+                if low + k > 1 { sieve.cross_off(k); }
+                k += p;
+            }
+            next[b] = low + k;
+            b += 1;
+        }
+
+        low += segment_size;
+    }
+
+    s2
+}
+
+// ── Main counting function ───────────────────────────────────────────────────
+
+/// Generate π(n) lookup table for n in [0, limit].
+fn generate_pi(limit: usize, sieve: &Sieve) -> Vec<u32> {
+    let mut pi = vec![0u32; limit + 1];
+    let mut count = 0u32;
+    for n in 0..=limit {
+        if n >= 2 && sieve.is_prime(n) {
+            count += 1;
+        }
+        pi[n] = count;
+    }
+    pi
+}
+
+fn count_primes(x: u64) -> u64 {
+    if x < 2 { return 0; }
+
+    let y = std::cmp::max(icbrt(x) as usize, 1);
+
+    // For small x, use primal directly
+    if x <= 10_000 {
+        return Sieve::new(x as usize).prime_pi(x as usize) as u64;
+    }
+
+    let prime_sieve = Sieve::new(y);
+    let mut primes: Vec<u32> = vec![0];
+    primes.extend(prime_sieve.primes_from(2).take_while(|&p| p <= y).map(|p| p as u32));
+
+    let pi_y = primes.len() - 1;
+    let c = std::cmp::min(6, pi_y);
+    let phi_cache = PhiTinyCache::new(c);
+    let lpf = generate_lpf(y);
+    let mu = generate_mu(y);
+    let pi = generate_pi(y, &prime_sieve);
+
+    // S1: ordinary leaves = Σ μ(n)·φ(x/n, c) for n ≤ y, lpf(n) > p_c
+    let pc = primes[c];
+    let mut s1: i64 = 0;
+    for n in 1..=y {
+        if mu[n] != 0 && lpf[n] > pc as i32 {
+            s1 += mu[n] as i64 * phi_cache.phi(x / n as u64);
+        }
+    }
+
+    // S2: special leaves via segmented sieve
+    let s2 = compute_s2(x, y, c, &primes, &lpf, &mu, &pi);
+
+    // P2
+    let p2 = compute_p2(x, y, pi_y);
+
+    let result = s1 + s2 + pi_y as i64 - 1 - p2;
+    result as u64
+}
+
+fn main() {
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║  Prime Counter V4 — Lagarias-Miller-Odlyzko (LMO)         ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    struct Case { limit: u64, label: &'static str, expected: u64 }
+
+    let cases = [
+        Case { limit:              1_000, label: "1 Thousand",   expected:             168 },
+        Case { limit:             10_000, label: "10 Thousand",  expected:           1_229 },
+        Case { limit:            100_000, label: "100 Thousand", expected:           9_592 },
+        Case { limit:          1_000_000, label: "1 Million",    expected:          78_498 },
+        Case { limit:      1_000_000_000, label: "1 Billion",    expected:      50_847_534 },
+        Case { limit:     10_000_000_000, label: "10 Billion",   expected:     455_052_511 },
+        Case { limit:    100_000_000_000, label: "100 Billion",  expected:   4_118_054_813 },
+        Case { limit:  1_000_000_000_000, label: "1 Trillion",   expected: 37_607_912_018 },
+        Case { limit: 10_000_000_000_000, label: "10 Trillion",  expected: 346_065_536_839 },
+    ];
+
+    println!("{:<15} {:>12} {:>18}  {}", "Range", "Time", "Primes Found", "Status");
+    println!("{}", "─".repeat(65));
+
+    for c in &cases {
+        let t0 = Instant::now();
+        let count = count_primes(c.limit);
+        let secs = t0.elapsed().as_secs_f64();
+        let check = if count == c.expected { "✓" } else { "✗ MISMATCH" };
+
+        println!(
+            "{:<15} {:>10.5}s   {:>16}  {}  (expected: {})",
+            c.label, secs, count, check, c.expected
+        );
+    }
+}
