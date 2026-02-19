@@ -312,7 +312,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     let nprimes = primes.len();
 
     // Build pi lookup table for segment 0: phi(n,b-1) = pi(n) - b + 2 when primes[b-1]² > n
-    let seg0_pi: Vec<u32> = {
+    let global_pi: Vec<u32> = {
         let n = segment_size;
         let mut is_p = vec![true; n + 1];
         is_p[0] = false;
@@ -476,14 +476,12 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                         coeff[b] += batch;
                         l = l_batch_stop;
                     }
-                    // Remaining leaves need individual pi lookup
+                    // Remaining leaves: pi lookup, bounds guaranteed for segment 0
                     while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
                         let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
-                        if xpq < high {
-                            let pi_n = seg0_pi[xpq] as i64;
-                            s2_local += 1 + std::cmp::max(pi_n - bm1, 0);
-                            coeff[b] += 1;
-                        }
+                        let pi_n = unsafe { *global_pi.get_unchecked(xpq) } as i64;
+                        s2_local += 1 + std::cmp::max(pi_n - bm1, 0);
+                        coeff[b] += 1;
                         l -= 1;
                     }
                 } else {
