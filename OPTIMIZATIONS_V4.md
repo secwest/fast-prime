@@ -341,18 +341,75 @@ reduce per-segment overhead (init_sieve calls, prime start calculations, phi boo
 
 ---
 
+## Optimization 12: Precompute x/prime ✅
+
+**Hypothesis**: In inner loops, `x / (prime * m)` does a 128-bit multiply followed by 
+division. Since prime is fixed within the inner loop, precomputing `x_div_prime = x / prime`
+once and using `x_div_prime / m` eliminates one division.
+
+**Math**: `floor(x / (a*b)) = floor(floor(x/a) / b)` — exact for integers.
+
+**Result**: 1T 0.031s → 0.029s, 10T 0.134s → 0.126s (**6% faster**)
+
+---
+
+## Optimization 13: 4× Unrolled Cross-off Loop ✅
+
+**Hypothesis**: Cross-off loop (`while k < seg_len { cross_off(k); k += p; }`) spends
+significant time on loop control (branch, increment, compare). Unrolling by 4 reduces
+loop overhead by 75%.
+
+**Profiling showed**: cross_off = 46% of S2, easy_leaf = 44%, hard_leaf = 8%, init = 2%.
+
+**Result** (8× unroll was SLOWER due to code bloat/register pressure):
+
+| Range       | Before   | After    | Speedup |
+|-------------|----------|----------|---------|
+| 1 Trillion  | 0.029s   | 0.027s   | **1.07×**|
+| 10 Trillion | 0.126s   | 0.117s   | **1.08×**|
+
+---
+
+## Optimization 14: Easy Leaf Position Reuse + Barrett Fast Division ✅
+
+**Hypothesis**: Easy leaves dominate (44% of S2 = 57ms at 10T). Two optimizations:
+
+1. When consecutive primes map to the same sieve position, skip the count query
+   entirely and reuse the previous count (saves sieve access).
+
+2. Barrett reciprocal table for primes: `recip[l] = floor(2^64 / primes[l])`. Only
+   ~4600 entries = 37KB (fits L1 cache). Replaces 25-cycle hardware division with
+   ~12-cycle branchless multiply-high + correction: `q = mulhi(n, recip) + (n - q*d >= d)`.
+
+**Key insight**: Full reciprocal table for ALL m values (344KB) caused L2 cache pressure.
+Primes-only table (37KB) fits in L1 with no pressure.
+
+**Failed**: Barrett for ALL m values (344KB table → 4% SLOWER due to cache pressure).
+**Failed**: Wheel mod 30 for hard leaf m iteration (overhead ≈ savings). 
+**Failed**: Alpha retuning (1.5–3.0 tested, α=2.0 still optimal).
+
+**Result**:
+
+| Range       | Before   | After    | Speedup |
+|-------------|----------|----------|---------|
+| 100 Billion | 0.007s   | 0.007s   | ~same   |
+| 1 Trillion  | 0.027s   | 0.027s   | ~same   |
+| 10 Trillion | 0.117s   | 0.110s   | **1.06×**|
+
+---
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
-| 1 Billion   | 0.0012s  | 0.002s   | 1.7×           |
+| 1 Billion   | 0.0010s  | 0.002s   | 2.0×           |
 | 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
 | 100 Billion | 0.007s   | 0.034s   | **4.9×**       |
-| 1 Trillion  | 0.031s   | 0.168s   | **5.4×**       |
-| 10 Trillion | 0.134s   | 1.190s   | **8.9×**       |
+| 1 Trillion  | 0.027s   | 0.168s   | **6.2×**       |
+| 10 Trillion | 0.110s   | 1.190s   | **10.8×**      |
 
 ### Remaining Optimization Opportunities
 
 1. **Parallel S2 segments**: Split segment range across threads (complex phi precomputation)
-2. **Reduce integer divisions**: Reciprocal multiplication for x/(prime*m)
-3. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
+2. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
+3. **Position-group iteration**: Iterate easy leaves by floor(X/q) groups instead of individual primes
