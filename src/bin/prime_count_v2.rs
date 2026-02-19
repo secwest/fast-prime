@@ -57,30 +57,61 @@ fn count_primes(n: u64) -> u64 {
             }
         }
 
-        // Branch 2: harmonic block technique
+        // Branch 2: two-phase harmonic iteration (halves division count)
         if crossover < j_end {
-            let mut j = crossover + 1;
-            while j <= j_end {
-                let q = (n_div_p / j as u64) as usize;
-                let last_j = std::cmp::min((n_div_p / q as u64) as usize, j_end);
-                let delta = unsafe { *small.get_unchecked(q) } as i64 - pcnt;
+            let sqrt_x = isqrt(n_div_p) as usize;
+
+            // Phase A: j ≤ √(n/p), each j maps to a unique q — 1 division per j
+            let phase_a_end = std::cmp::min(sqrt_x, j_end);
+            if crossover < phase_a_end {
                 unsafe {
-                    for jj in j..=last_j {
-                        *large.get_unchecked_mut(jj) -= delta;
+                    for j in (crossover + 1)..=phase_a_end {
+                        let q = (n_div_p / j as u64) as usize;
+                        *large.get_unchecked_mut(j) -= *small.get_unchecked(q) as i64 - pcnt;
                     }
                 }
-                j = last_j + 1;
+            }
+
+            // Phase B: j > √(n/p), iterate q downward — 1 division per q (carry first_j)
+            if phase_a_end < j_end {
+                let q_start = if phase_a_end >= crossover + 1 {
+                    (n_div_p / (phase_a_end + 1) as u64) as usize
+                } else {
+                    (n_div_p / (crossover + 1) as u64) as usize
+                };
+                let q_end = (n_div_p / j_end as u64) as usize;
+                let mut first_j = phase_a_end + 1;
+                unsafe {
+                    for q in (q_end..=q_start).rev() {
+                        let last_j = std::cmp::min((n_div_p / q as u64) as usize, j_end);
+                        if first_j > last_j { continue; }
+                        let delta = *small.get_unchecked(q) as i64 - pcnt;
+                        for jj in first_j..=last_j {
+                            *large.get_unchecked_mut(jj) -= delta;
+                        }
+                        first_j = last_j + 1;
+                        if first_j > j_end { break; }
+                    }
+                }
             }
         }
 
         // Update small values (reverse order)
         if p * p <= v {
             let pcnt32 = pcnt as i32;
-            let recip_p = ((1u64 << 40) + p as u64 - 1) / p as u64;
-            unsafe {
-                for j in (p * p..=v).rev() {
-                    let q = ((j as u64 * recip_p) >> 40) as usize;
-                    *small.get_unchecked_mut(j) -= *small.get_unchecked(q) - pcnt32;
+            if p == 2 {
+                unsafe {
+                    for j in (4..=v).rev() {
+                        *small.get_unchecked_mut(j) -= *small.get_unchecked(j >> 1) - pcnt32;
+                    }
+                }
+            } else {
+                let recip_p = ((1u64 << 40) + p as u64 - 1) / p as u64;
+                unsafe {
+                    for j in (p * p..=v).rev() {
+                        let q = ((j as u64 * recip_p) >> 40) as usize;
+                        *small.get_unchecked_mut(j) -= *small.get_unchecked(q) - pcnt32;
+                    }
                 }
             }
         }

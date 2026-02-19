@@ -1,59 +1,85 @@
 # fast-prime
 
-A highly optimized prime counting sieve in Rust, targeting modern hybrid-core CPUs.
+A highly optimized prime counting toolkit in Rust, featuring two independent implementations targeting modern hybrid-core CPUs.
 
-Counts all primes up to N using a segmented Sieve of Eratosthenes with wheel mod 30 factorization, two-level cache-aware segmentation, and parallel execution via [Rayon](https://github.com/rayon-rs/rayon).
+## Implementations
 
-## Benchmarks — Intel Core Ultra 9 285K (24 threads)
+### V1 — Segmented Sieve (`src/main.rs`)
+
+Counts all primes up to N using a segmented Sieve of Eratosthenes with wheel mod 30 factorization, two-level cache-aware segmentation, and parallel execution via [Rayon](https://github.com/rayon-rs/rayon). Uses all 24 threads.
+
+### V2 — Combinatorial Counter (`src/bin/prime_count_v2.rs`)
+
+Computes π(N) exactly using the Lucy_Hedgehog combinatorial method. O(N^{3/4} / ln N) time, O(√N) space — no full sieve needed. Single-threaded, yet dramatically faster than the parallel sieve for large N.
+
+## Benchmarks — Intel Core Ultra 9 285K
 
 ```
-┌─────────────┬──────────────┬──────────────────┐
-│ Range       │ Time         │ Primes Found     │
-├─────────────┼──────────────┼──────────────────┤
-│ 1 Thousand  │    0.00004s  │              168 │
-│ 1 Million   │    0.00009s  │           78,498 │
-│ 1 Billion   │    0.00600s  │       50,847,534 │
-│ 10 Billion  │    0.06500s  │      455,052,511 │
-│ 100 Billion │    0.71300s  │    4,118,054,813 │
-│ 1 Trillion  │    8.60000s  │   37,607,912,018 │
-└─────────────┴──────────────┴──────────────────┘
+┌─────────────┬──────────────────────────┬──────────────────────────┬──────────────────┐
+│ Range       │ V1 Sieve (24 threads)    │ V2 Combinatorial (1 thr) │ Primes Found     │
+├─────────────┼──────────────────────────┼──────────────────────────┼──────────────────┤
+│ 1 Billion   │    0.00600s              │    0.00240s              │       50,847,534 │
+│ 10 Billion  │    0.06570s              │    0.01080s              │      455,052,511 │
+│ 100 Billion │    0.72087s              │    0.05464s              │    4,118,054,813 │
+│ 1 Trillion  │    8.64000s              │    0.26790s              │   37,607,912,018 │
+│ 10 Trillion │    N/A                   │    1.65119s              │  346,065,536,839 │
+└─────────────┴──────────────────────────┴──────────────────────────┴──────────────────┘
 ```
 
-### Comparison vs Reference Implementations
+### V2 vs V1 Speedup
 
-| Range | This (Ultra 9 285K) | Strix Halo Reference | Speedup |
+| Range | V1 (24 threads) | V2 (1 thread) | V2 Speedup |
 |---|---|---|---|
-| 1 Billion | 0.006s | 0.011s | **1.83×** |
-| 10 Billion | 0.065s | 0.109s | **1.68×** |
-| 100 Billion | 0.713s | 1.483s | **2.08×** |
-| 1 Trillion | 8.600s | 25.820s | **3.00×** |
+| 1 Billion | 0.006s | 0.0024s | **2.5×** |
+| 10 Billion | 0.066s | 0.011s | **6.1×** |
+| 100 Billion | 0.721s | 0.055s | **13.2×** |
+| 1 Trillion | 8.640s | 0.268s | **32.2×** |
+
+### Comparison vs Strix Halo Reference
+
+| Range | V2 (Ultra 9 285K) | Strix Halo Reference | Speedup |
+|---|---|---|---|
+| 1 Billion | 0.0024s | 0.011s | **4.6×** |
+| 10 Billion | 0.011s | 0.109s | **9.9×** |
+| 100 Billion | 0.055s | 1.483s | **27.0×** |
+| 1 Trillion | 0.268s | 25.820s | **96.3×** |
 
 ## Key Optimizations
 
+### V1 — Sieve
+
 See [OPTIMIZATIONS.md](OPTIMIZATIONS.md) for a detailed log of every optimization tried, including results (positive and negative).
 
-### Architecture
+- **Wheel mod 30** — Only sieves 8 residues per 30 numbers (coprime to 2, 3, 5), reducing candidate count by ~73% vs odds-only.
+- **Two-level cache-aware segmentation** — L2 segments (1MB) for parallelism, with L1 sub-segments (24KB) for tiny primes (~2× speedup).
+- **Extended pre-sieve pattern** — Composites of primes 7, 11, 13, 17, 19 pre-computed in a 323KB repeating pattern, tiled via memcpy.
+- **4-tier prime classification** — Tiny (L1 carry-forward), small (4× unrolled), medium (simple loop), large (single-write).
+- **Barrett fast division** — Precomputed reciprocals replace costly u64 division in `compute_starts`.
+- **Rayon work-stealing** — Naturally balances load across P-cores and E-cores.
 
-- **Wheel mod 30** — Only sieves 8 residues per 30 numbers (coprime to 2, 3, 5), reducing candidate count by ~73% vs odds-only. Each byte encodes 8 wheel residues as individual bits.
-- **Two-level cache-aware segmentation** — L2 segments (1MB) for parallelism, with L1 sub-segments (24KB) for tiny primes. This is the single biggest optimization, providing ~2× speedup.
-- **Extended pre-sieve pattern** — Composites of primes 7, 11, 13, 17, 19 are pre-computed in a 323KB repeating pattern and tiled via memcpy, eliminating inner-loop work for five frequent small primes.
-- **4-tier prime classification** — Tiny primes (L1 sub-segmented with carry-forward), small primes (4× unrolled), medium primes (simple loop), large primes (single-write). Each tier uses the optimal marking strategy.
-- **Carry-forward L1 sub-segment starts** — Compute starts once per L2 segment for tiny primes, carry forward across L1 sub-segments (eliminates ~97% of compute_starts calls for tiny primes).
-- **DK_TABLE precomputation** — Const lookup table for delta-k values eliminates branch+compare in start computation.
-- **Barrett fast division** — Precomputed reciprocals replace costly u64 division in `compute_starts` with 128-bit multiply.
-- **Precomputed wheel tables** — `TARGET_K_MOD` lookup table eliminates per-residue modular inverse computation.
-- **Lazy presieve (OnceLock)** — 323KB pattern built once, reused across all calls.
-- **Adaptive parallel granularity** — Segments scale between 8KB–1MB to ensure enough work units for work-stealing across heterogeneous P-cores and E-cores.
-- **`target-cpu=native`** — Compiled with native CPU instructions (AVX2, POPCNT, BMI2).
-- **Rayon work-stealing** — Naturally balances load across fast P-cores and slower E-cores without explicit affinity pinning.
+### V2 — Combinatorial
+
+See [OPTIMIZATIONS_V2.md](OPTIMIZATIONS_V2.md) for the full optimization log.
+
+- **Lucy_Hedgehog algorithm** — Computes π(N) in O(N^{3/4} / ln N) time using O(√N) space. No full sieve needed.
+- **Two-phase harmonic iteration** — Splits the inner loop at √(N/p): Phase A iterates j with singleton blocks (1 div/j), Phase B iterates q downward with multi-element blocks (1 div/q, carry first_j). Halves total divisions (**41% speedup**).
+- **Barrett fast division** — Replaces integer DIV (~21 cycles) with multiply+shift (~4 cycles) in the small[] update loop.
+- **i32 small array** — Values ≤ √N fit in i32, halving memory footprint for better cache utilization.
+- **Unsafe indexing** — Bounds checks eliminated in hot loops where indices are mathematically guaranteed in-bounds.
 
 ## Building
 
 Requires [Rust](https://rustup.rs/) (1.70+).
 
 ```sh
+# Build everything
 cargo build --release
+
+# Run V1 (segmented sieve, uses all threads)
 ./target/release/prime-count
+
+# Run V2 (combinatorial, single-threaded)
+./target/release/prime_count_v2
 ```
 
 The build is configured with aggressive optimizations in `Cargo.toml`:
@@ -73,7 +99,9 @@ And native CPU targeting in `.cargo/config.toml`:
 rustflags = ["-C", "target-cpu=native"]
 ```
 
-## Algorithm
+## Algorithms
+
+### V1 — Segmented Sieve of Eratosthenes
 
 1. **Bootstrap** — Build a small sieve up to √N using [primal](https://crates.io/crates/primal) to collect sieving primes
 2. **Classify primes** — Split sieving primes into 4 tiers (tiny/small/medium/large) with precomputed Barrett reciprocals
@@ -85,6 +113,17 @@ rustflags = ["-C", "target-cpu=native"]
    - Large primes: single byte write per residue
 5. **Count** — Survivors (zero bits) counted with hardware `POPCNT` via `count_ones()`, 64 bits at a time
 6. **Sum** — Per-segment counts reduced in parallel
+
+### V2 — Lucy_Hedgehog Combinatorial Method
+
+1. **Initialize** — Create two arrays of size √N: `small[j] = j-1` (integers in [2,j]) and `large[j] = ⌊N/j⌋-1` (integers in [2, ⌊N/j⌋])
+2. **Sieve** — For each prime p (from primal), update all tracked values: `S(v) -= S(v/p) - π(p-1)`
+   - **Branch 1**: For j where j·p ≤ √N, read directly from `large[j·p]`
+   - **Branch 2**: Two-phase harmonic iteration:
+     - Phase A (j ≤ √(N/p)): each j maps to a unique ⌊N/(jp)⌋, one division per j
+     - Phase B (j > √(N/p)): iterate q downward, carry first_j forward, one division per q
+   - **Small update**: Update `small[j]` in reverse order using Barrett fast division
+3. **Result** — `large[1]` = π(N)
 
 ## Dependencies
 
