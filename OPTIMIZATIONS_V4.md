@@ -735,17 +735,49 @@ Kept for architectural correctness.
 
 ---
 
+## Optimization 29: Extended Alpha Tuning for 10Q/100Q ✅
+
+Added 10 Quadrillion (10^16) and 100 Quadrillion (10^17) benchmark cases.
+
+Alpha sweep for 10Q revealed the previous formula (α=9.6) was suboptimal:
+
+| Alpha | 10Q Time |
+|-------|----------|
+| 6     | 7.36s    |
+| 8     | 6.50s    |
+| 10    | 6.07s    |
+| 12    | 5.94s    |
+| **13**| **5.67s**|
+| 14    | 5.78s    |
+| 16    | 6.18s    |
+| 20    | 6.49s    |
+
+For 100Q, α=16 was optimal (34.7s), close to the previous formula (α=13.2 → 35.2s).
+
+**Updated formula** (piecewise linear in log₁₀(x)):
+- x ≤ 10^13: α = 2.2
+- 10^13 < x ≤ 10^14: slope 0.2 → 2.4
+- 10^14 < x ≤ 10^15: slope 3.6 → 6.0
+- 10^15 < x ≤ 10^16: slope 7.0 → 13.0
+- x > 10^16: slope 3.0 → 16.0 at 10^17
+
+**Result**: 10Q improved 9% (6.25s → 5.68s). All other scales unchanged.
+
+---
+
 ## Current Best Performance
 
-| Range         | V4 Time  | V3 Time  | Speedup vs V3 |
-|---------------|----------|----------|----------------|
-| 1 Billion     | 0.0009s  | 0.002s   | 2.2×           |
-| 10 Billion    | 0.002s   | 0.007s   | 3.5×           |
-| 100 Billion   | 0.003s   | 0.034s   | **11.3×**      |
-| 1 Trillion    | 0.006s   | 0.168s   | **28.0×**      |
-| 10 Trillion   | 0.022s   | 1.190s   | **54.1×**      |
-| 100 Trillion  | 0.096s   |    —     |       —        |
-| 1 Quadrillion | 0.793s   |    —     |       —        |
+| Range          | V4 Time  | V3 Time  | Speedup vs V3 |
+|----------------|----------|----------|----------------|
+| 1 Billion      | 0.0009s  | 0.002s   | 2.2×           |
+| 10 Billion     | 0.002s   | 0.007s   | 3.5×           |
+| 100 Billion    | 0.003s   | 0.034s   | **11.3×**      |
+| 1 Trillion     | 0.006s   | 0.168s   | **28.0×**      |
+| 10 Trillion    | 0.022s   | 1.190s   | **54.1×**      |
+| 100 Trillion   | 0.096s   |    —     |       —        |
+| 1 Quadrillion  | 0.793s   |    —     |       —        |
+| 10 Quadrillion | 5.680s   |    —     |       —        |
+| 100 Quadrillion| 34.33s   |    —     |       —        |
 
 ### Remaining Optimization Opportunities
 
