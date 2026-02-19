@@ -127,19 +127,51 @@ fn count_primes(n: u64) -> u64 {
                         }
                     }
                 } else {
-                    // Larger primes: use reciprocal table for division
+                    // Larger primes: use reciprocal table for division, unrolled by 4
                     unsafe {
-                        for q in (q_end..=q_start).rev() {
+                        let mut q = q_start;
+                        let end4 = q_end.saturating_add(3);
+                        while q >= end4 {
+                            let lj0 = std::cmp::min(((n_div_p as u128 * *recip.get_unchecked(q) as u128) >> 64) as usize, j_end);
+                            let lj1 = std::cmp::min(((n_div_p as u128 * *recip.get_unchecked(q-1) as u128) >> 64) as usize, j_end);
+                            let lj2 = std::cmp::min(((n_div_p as u128 * *recip.get_unchecked(q-2) as u128) >> 64) as usize, j_end);
+                            let lj3 = std::cmp::min(((n_div_p as u128 * *recip.get_unchecked(q-3) as u128) >> 64) as usize, j_end);
+                            if first_j <= lj0 {
+                                let d = *small.get_unchecked(q) as i64 - pcnt;
+                                for jj in first_j..=lj0 { *large.get_unchecked_mut(jj) -= d; }
+                                first_j = lj0 + 1;
+                            }
+                            if first_j <= lj1 {
+                                let d = *small.get_unchecked(q-1) as i64 - pcnt;
+                                for jj in first_j..=lj1 { *large.get_unchecked_mut(jj) -= d; }
+                                first_j = lj1 + 1;
+                            }
+                            if first_j <= lj2 {
+                                let d = *small.get_unchecked(q-2) as i64 - pcnt;
+                                for jj in first_j..=lj2 { *large.get_unchecked_mut(jj) -= d; }
+                                first_j = lj2 + 1;
+                            }
+                            if first_j <= lj3 {
+                                let d = *small.get_unchecked(q-3) as i64 - pcnt;
+                                for jj in first_j..=lj3 { *large.get_unchecked_mut(jj) -= d; }
+                                first_j = lj3 + 1;
+                            }
+                            if first_j > j_end { break; }
+                            q -= 4;
+                        }
+                        while q >= q_end {
                             let last_j = std::cmp::min(
                                 ((n_div_p as u128 * *recip.get_unchecked(q) as u128) >> 64) as usize,
                                 j_end);
-                            if first_j > last_j { continue; }
-                            let delta = *small.get_unchecked(q) as i64 - pcnt;
-                            for jj in first_j..=last_j {
-                                *large.get_unchecked_mut(jj) -= delta;
+                            if first_j <= last_j {
+                                let delta = *small.get_unchecked(q) as i64 - pcnt;
+                                for jj in first_j..=last_j {
+                                    *large.get_unchecked_mut(jj) -= delta;
+                                }
+                                first_j = last_j + 1;
                             }
-                            first_j = last_j + 1;
                             if first_j > j_end { break; }
+                            q -= 1;
                         }
                     }
                 }

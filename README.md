@@ -18,11 +18,11 @@ Computes π(N) exactly using the Lucy_Hedgehog combinatorial method. O(N^{3/4} /
 ┌─────────────┬──────────────────────────┬──────────────────────────┬──────────────────┐
 │ Range       │ V1 Sieve (24 threads)    │ V2 Combinatorial (1 thr) │ Primes Found     │
 ├─────────────┼──────────────────────────┼──────────────────────────┼──────────────────┤
-│ 1 Billion   │    0.00600s              │    0.00214s              │       50,847,534 │
-│ 10 Billion  │    0.06570s              │    0.01020s              │      455,052,511 │
-│ 100 Billion │    0.72087s              │    0.04750s              │    4,118,054,813 │
-│ 1 Trillion  │    8.64000s              │    0.23200s              │   37,607,912,018 │
-│ 10 Trillion │  127.13000s              │    1.45000s              │  346,065,536,839 │
+│ 1 Billion   │    0.00600s              │    0.00200s              │       50,847,534 │
+│ 10 Billion  │    0.06570s              │    0.01000s              │      455,052,511 │
+│ 100 Billion │    0.72087s              │    0.04300s              │    4,118,054,813 │
+│ 1 Trillion  │    8.64000s              │    0.21200s              │   37,607,912,018 │
+│ 10 Trillion │  127.13000s              │    1.37500s              │  346,065,536,839 │
 └─────────────┴──────────────────────────┴──────────────────────────┴──────────────────┘
 ```
 
@@ -30,20 +30,20 @@ Computes π(N) exactly using the Lucy_Hedgehog combinatorial method. O(N^{3/4} /
 
 | Range | V1 (24 threads) | V2 (1 thread) | V2 Speedup |
 |---|---|---|---|
-| 1 Billion | 0.006s | 0.0021s | **2.8×** |
-| 10 Billion | 0.066s | 0.010s | **6.4×** |
-| 100 Billion | 0.721s | 0.048s | **15.0×** |
-| 1 Trillion | 8.640s | 0.232s | **37.2×** |
-| 10 Trillion | 127.13s | 1.450s | **87.7×** |
+| 1 Billion | 0.006s | 0.0020s | **3.0×** |
+| 10 Billion | 0.066s | 0.010s | **6.6×** |
+| 100 Billion | 0.721s | 0.043s | **16.8×** |
+| 1 Trillion | 8.640s | 0.212s | **40.8×** |
+| 10 Trillion | 127.13s | 1.375s | **92.5×** |
 
 ### Comparison vs Strix Halo Reference
 
 | Range | V2 (Ultra 9 285K) | Strix Halo Reference | Speedup |
 |---|---|---|---|
-| 1 Billion | 0.0021s | 0.011s | **5.2×** |
+| 1 Billion | 0.0020s | 0.011s | **5.5×** |
 | 10 Billion | 0.010s | 0.109s | **10.9×** |
-| 100 Billion | 0.048s | 1.483s | **30.9×** |
-| 1 Trillion | 0.232s | 25.820s | **111.3×** |
+| 100 Billion | 0.043s | 1.483s | **34.5×** |
+| 1 Trillion | 0.212s | 25.820s | **121.8×** |
 
 ## Key Optimizations
 

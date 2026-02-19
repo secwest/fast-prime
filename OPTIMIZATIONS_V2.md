@@ -134,16 +134,17 @@ increment per q-step is ≤ 2, making multiply+compare cheaper than division).
 
 ---
 
-## Optimization #9: Phase A 4× Unroll
+## Optimization #9: Phase A/B 4× Unroll
 
-Unroll the Phase A loop by 4 to allow the CPU to pipeline independent u128
-reciprocal multiplies (MULQ has 3-cycle latency, 1-cycle throughput — 4
-independent multiplies keep the pipeline full).
+Unroll the Phase A and Phase B loops by 4 to allow the CPU to pipeline
+independent u128 reciprocal multiplies (MULQ has 3-cycle latency, 1-cycle
+throughput — 4 independent multiplies keep the pipeline full).
 
 | Range | Before | After | Speedup |
 |---|---|---|---|
-| 1 Trillion | 0.232s | 0.231s | ~0.5% |
-| 10 Trillion | 1.48s | 1.45s | **2%** |
+| 100 Billion | 0.048s | 0.043s | 10% |
+| 1 Trillion | 0.232s | 0.212s | **8.6%** |
+| 10 Trillion | 1.48s | 1.37s | **7.4%** |
 
 ---
 
@@ -168,6 +169,6 @@ independent multiplies keep the pipeline full).
 |---|---|---|
 | 1 Billion | 0.002s | 3.0× faster |
 | 10 Billion | 0.010s | 6.6× faster |
-| 100 Billion | 0.048s | 15.0× faster |
-| 1 Trillion | 0.231s | **37.4× faster** |
-| 10 Trillion | 1.45s | **87.7× faster** |
+| 100 Billion | 0.043s | 16.8× faster |
+| 1 Trillion | 0.212s | **40.8× faster** |
+| 10 Trillion | 1.37s | **92.8× faster** |
