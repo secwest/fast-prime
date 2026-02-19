@@ -105,6 +105,38 @@ lookups at 1T (~9ms). For 10T, the correction costs ~91ms vs ~73ms savings.
 exceeds the sieve savings, especially at 10T. Would require the full
 Deleglise-Rivat method for a net benefit.
 
+### Safe indexing for auto-vectorization (Phase B)
+Replaced `get_unchecked_mut(jj)` with slice operations `&mut large[first_j..=last_j]`.
+**Result**: Slightly worse — bounds check overhead outweighs any vectorization gain.
+
+### Parallel reciprocal init with rayon
+Used `par_chunks_mut(8192)` for parallel u128 division.
+**Result**: Rayon thread pool warmup makes it worse for small inputs, neutral at 10T.
+
+### Parallel initialization via std::thread::scope
+Overlapped reciprocal table build (u128 division) with small[]/large[] init on
+separate OS threads. Three sub-attempts: 3 threads, 2 threads, and parallel P₂.
+**Result**: All worse (1T: 0.173-0.177s vs 0.168s baseline). OS thread spawn
+overhead (~50-100μs) exceeds the potential overlap savings (~2ms). Init is only
+3.1% of total time — not enough headroom for thread overhead.
+
+### Phase B prime batching (skip composite q values)
+Attempted to skip composite q values in Phase B, only computing u128 multiply
+boundaries at prime positions. Assumed small[q] = π(q) during the sieve.
+**Result**: **INCORRECT** — all counts too low (1M: 78482 vs 78498, off by 16).
+**Root cause**: The intermediate small[] array during the sieve is NOT π(q).
+After sieving primes 2,...,(p-1), "surviving composites" (products of primes ≥ p,
+like p², p×next_prime) cause small[q] to change at non-prime positions.
+Example: for p=5, small[25] changes because 25=5² survives the sieve of {2,3}.
+
+### Phase B merged constant-delta runs
+Scanned small[] to detect transitions (where small[q] changes), only computing
+u128 boundary at transition points. Merges consecutive fills with same delta.
+**Result**: Correct but 1T **regressed** 11% (0.168→0.187s). Branch misprediction
+in the scanning inner loop (~15M transitions in 65M q values = 23% rate) costs
+210M cycles (38ms), overwhelming the 150M cycles (27ms) saved by fewer multiplies.
+The original branchless u128 multiply at 1-cycle throughput (4× unrolled) wins.
+
 ---
 
 ## Analysis: Why V3 is Near-Optimal
