@@ -106,23 +106,106 @@ impl PhiTinyCache {
     }
 }
 
-// ── P2: Pairs of large primes ────────────────────────────────────────────────
+// ── P2: Pairs of large primes (parallel sieve) ──────────────────────────────
+
+/// Parallel odd-number sieve with fast π(n) queries.
+/// Replaces primal::Sieve for P2 to enable multi-threaded sieve construction.
+struct ParallelPiSieve {
+    bitmap: Vec<u64>,   // bit i = is_prime(2i+1)
+    prefix: Vec<u32>,   // prefix[w] = count of set bits in bitmap[0..w]
+}
+
+impl ParallelPiSieve {
+    fn new(limit: usize) -> Self {
+        if limit < 3 {
+            return ParallelPiSieve {
+                bitmap: vec![0],
+                prefix: vec![0, 0],
+            };
+        }
+        let half = limit / 2 + 1;
+        let nwords = (half + 63) / 64;
+
+        let sqrt_limit = isqrt(limit as u64) as usize;
+        let small_sieve = Sieve::new(sqrt_limit);
+        let cross_primes: Vec<usize> = small_sieve.primes_from(3)
+            .take_while(|&p| p <= sqrt_limit)
+            .collect();
+
+        let mut bitmap = vec![!0u64; nwords];
+        let last_bits = half % 64;
+        if last_bits > 0 && nwords > 0 {
+            bitmap[nwords - 1] &= (1u64 << last_bits) - 1;
+        }
+
+        let chunk_words = std::cmp::max(nwords / rayon::current_num_threads(), 512);
+        bitmap.par_chunks_mut(chunk_words)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                let word_start = chunk_idx * chunk_words;
+                let bit_start = word_start * 64;
+                let chunk_len = chunk.len();
+                let num_start = 2 * bit_start + 1;
+
+                if bit_start == 0 && chunk_len > 0 {
+                    chunk[0] &= !1u64; // number 1 is not prime
+                }
+
+                for &p in &cross_primes {
+                    let pp = p * p;
+                    let first_num = if pp > num_start {
+                        pp
+                    } else {
+                        let m = ((num_start + p - 1) / p) * p;
+                        if m % 2 == 0 { m + p } else { m }
+                    };
+                    let first_bit = (first_num - 1) / 2;
+                    if first_bit >= bit_start + chunk_len * 64 { continue; }
+                    let mut idx = if first_bit >= bit_start { first_bit - bit_start } else { continue };
+                    while idx < chunk_len * 64 {
+                        chunk[idx / 64] &= !(1u64 << (idx % 64));
+                        idx += p;
+                    }
+                }
+            });
+
+        let mut prefix = vec![0u32; nwords + 1];
+        for i in 0..nwords {
+            prefix[i + 1] = prefix[i] + bitmap[i].count_ones();
+        }
+
+        ParallelPiSieve { bitmap, prefix }
+    }
+
+    #[inline]
+    fn prime_pi(&self, n: usize) -> usize {
+        if n < 2 { return 0; }
+        let count_2 = 1usize;
+        if n < 3 { return count_2; }
+        let largest_odd = if n % 2 == 1 { n } else { n - 1 };
+        let bit_idx = (largest_odd - 1) / 2;
+        let word = bit_idx / 64;
+        let bit = bit_idx % 64;
+        let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
+        count_2 + self.prefix[word] as usize + (self.bitmap[word] & mask).count_ones() as usize
+    }
+}
 
 fn compute_p2(x: u64, y: usize, pi_y: usize) -> i64 {
     let sqrt_x = isqrt(x) as usize;
     if y >= sqrt_x { return 0; }
 
     let max_val = (x / (y as u64 + 1)) as usize;
-    let p2_sieve = Sieve::new(std::cmp::max(max_val, sqrt_x));
+    let sieve_limit = std::cmp::max(max_val, sqrt_x);
+    let p2_sieve = ParallelPiSieve::new(sieve_limit);
 
     let pi_sqrt_x = p2_sieve.prime_pi(sqrt_x);
 
-    // Collect primes in (y, sqrt_x]
-    let p2_primes: Vec<usize> = p2_sieve.primes_from(y + 1)
+    let small_sieve = Sieve::new(sqrt_x);
+    let p2_primes: Vec<usize> = small_sieve.primes_from(y + 1)
         .take_while(|&p| p <= sqrt_x)
         .collect();
 
-    // Parallel sum of π(x/p) for each prime p
     let p2: i64 = p2_primes.par_iter()
         .map(|&p| p2_sieve.prime_pi((x / p as u64) as usize) as i64)
         .sum();
