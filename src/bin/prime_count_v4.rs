@@ -295,6 +295,19 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     // Pre-sieve template for first c primes
     let template = PreSieveTemplate::new(primes, std::cmp::min(c, primes.len() - 1));
 
+    // Barrett reciprocal table for primes (for fast division in easy leaf loop)
+    // Only ~4600 entries at 10T = 37KB, fits L1 cache
+    let prime_recip: Vec<u64> = primes.iter().map(|&p| {
+        if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
+    }).collect();
+
+    // Branchless Barrett: floor(n/d) = mulhi(n, recip) + correction
+    #[inline(always)]
+    fn fast_div(n: u64, d: u64, recip_d: u64) -> u64 {
+        let q = ((n as u128 * recip_d as u128) >> 64) as u64;
+        q + (n - q.wrapping_mul(d) >= d) as u64
+    }
+
     // phi[b] accumulates φ(low, b-1) across segments
     let mut phi: Vec<i64> = vec![0i64; primes.len()];
     let mut next: Vec<usize> = (0..primes.len()).map(|b| primes[b] as usize).collect();
@@ -401,7 +414,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             let mut prev_pos: Option<usize> = None;
             let mut running_count: i64 = 0;
             while l > 0 && l < primes.len() && (primes[l] as usize) > min_m {
-                let xpq = (x_div_prime / primes[l] as u64) as usize;
+                let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
                 if xpq >= low && xpq < high {
                     let pos = xpq - low;
                     let count = match prev_pos {
