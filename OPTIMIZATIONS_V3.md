@@ -137,21 +137,57 @@ in the scanning inner loop (~15M transitions in 65M q values = 23% rate) costs
 210M cycles (38ms), overwhelming the 150M cycles (27ms) saved by fewer multiplies.
 The original branchless u128 multiply at 1-cycle throughput (4× unrolled) wins.
 
+### 8× unrolling (Phase A + small update)
+Doubled the unroll factor from 4× to 8× for both Phase A and the small update.
+**Result**: 1T **regressed** 13% (0.168→0.189s). Instruction cache pressure from
+the larger loop body negates any ILP gains. The CPU's OoO engine already extracts
+maximum parallelism from 4× unrolling.
+
+### AVX-512 SIMD investigation
+Arrow Lake (Ultra 9 285K) does **NOT support AVX-512** — only AVX2.
+Detailed analysis of AVX2 SIMD for all hot paths:
+- **Phase A u128 multiply**: AVX2 has no 64×64→128 multiply. Karatsuba via
+  `vpmuludq` (32×32→64) requires ~12 instructions for 4 multiplies = 3 cycles/mul.
+  Scalar `mulxq` achieves 1 cycle/mul throughput. **SIMD is 3× slower.**
+- **small[] gather**: AVX2 `vpgatherdd` has ~20-cycle latency for 4 elements.
+  4 scalar loads pipeline to ~4 cycles total. **SIMD gather is 5× slower.**
+- **Phase B fills**: Fills are 1-2 elements; SIMD setup overhead exceeds savings.
+- **Small update**: AVXIFMA (52-bit multiply) could help the 40-bit reciprocal,
+  but the gather bottleneck for random small[q] reads negates any multiply savings.
+**Conclusion**: No SIMD path is viable on AVX2. Scalar `mulxq` is optimal.
+
+### Profile-Guided Optimization (PGO)
+Built with `-Cprofile-generate`, trained on full benchmark suite, rebuilt with
+`-Cprofile-use`.
+**Result**: Neutral — 1T avg 0.175s vs 0.177s baseline (within noise).
+The code structure is already well-suited for the CPU's default branch prediction.
+Training on mixed input sizes may even mislead the optimizer for large inputs.
+
 ---
 
 ## Analysis: Why V3 is Near-Optimal
 
 The large update runs at ~3.5 cycles per operation on Arrow Lake:
-- **MUL r64→r128**: 3-cycle latency, 1-cycle throughput
+- **MUL r64→r128**: 3-cycle latency, 1-cycle throughput (compiler uses `mulxq`)
 - **Address-dependent load** from small[q]: must wait for multiply result
 - **OoO execution** with 4× unroll hides some latency but can't fully overlap
   the multiply→load dependency chain
+- **No AVX-512** on Arrow Lake — only AVX2, which lacks 64×64→128 multiply
+  and has slow gather (20 cycles for 4 elements vs 4 cycles for 4 scalar loads)
 
 The theoretical minimum is ~3 cycles/op (multiply throughput bound).
 The 0.5 extra cycles come from L2/L3 cache misses on the random small[] reads.
 
+**Total failed optimization attempts: 15+** including:
+parallel init (thread overhead), pre-sieve p=2 (complex init slower), software
+prefetching (4 variants), f64 reciprocal (precision), extended N^{1/4} cutoff
+(P₃ cost), fused init, safe indexing (bounds check), parallel rayon init,
+Phase B prime batching (incorrect), Phase B merged runs (branch misprediction),
+8× unrolling (icache pressure), AVX-512 (not available), AVX2 SIMD (gather too
+slow), PGO (neutral).
+
 For a fundamentally faster approach, the algorithm would need to be changed
-to one with lower complexity (e.g., Deleglise-Rivat at O(N^{2/3}/ln²N)),
+to one with lower complexity (e.g., Deleglise-Rivat/LMO at O(N^{2/3}/ln²N)),
 which is significantly more complex to implement correctly.
 
 ---
