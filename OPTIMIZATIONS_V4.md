@@ -161,17 +161,42 @@ The default √z sizing already produces near-optimal segments.
 
 ---
 
-## Current Best Performance (α = 2.0, parallel P2)
+## Optimization 4: Incremental Count (count_delta) ✅
+
+**Hypothesis**: In the special leaves inner loops, positions are monotonically increasing
+(m decreases → xpm increases for hard leaves; q decreases → xpq increases for easy leaves).
+Instead of scanning from position 0 for each count(), maintain a running count and only
+scan the delta between consecutive positions.
+
+**Change**: Added `count_delta(prev_pos, pos)` to BitSieve that counts set bits in
+(prev_pos, pos] using partial word masks. Hard and easy leaf loops track running_count.
+
+**Bug found and fixed**: `word >> (b0 + 1)` when b0=63 causes shift-by-64, which wraps
+to shift-by-0 in release mode (Rust wrapping semantics), counting all 64 bits instead of 0.
+Fixed with explicit mask: `if b0 < 63 { u64::MAX << (b0+1) } else { 0 }`.
+
+**Result** (α = 2.0, with parallel P2):
+
+| Range      | Before  | After   | Speedup |
+|------------|---------|---------|---------|
+| 100 Billion| 0.022s  | 0.021s  | 1.0×    |
+| 1 Trillion | 0.098s  | 0.091s  | **1.1×** |
+| 10 Trillion| 0.480s  | 0.396s  | **1.2×** |
+
+Savings increase with x because larger ranges have more leaves per segment,
+amortizing more of the initial count() call across incremental deltas.
+
+---
+
+## Current Best Performance (α = 2.0, parallel P2, incremental count)
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
 | 1 Billion   | 0.0015s  | 0.002s   | 1.3×           |
-| 10 Billion  | 0.007s   | 0.007s   | 1.0×           |
-| 100 Billion | 0.022s   | 0.034s   | 1.5×           |
-| 1 Trillion  | 0.098s   | 0.168s   | **1.7×**       |
-| 10 Trillion | 0.480s   | 1.190s   | **2.5×**       |
-
-**Time breakdown at 1T** (pre-parallelization): tables 0.5ms, S1 0.04ms, S2 86ms (72%), P2 33ms (28%)
+| 10 Billion  | 0.006s   | 0.007s   | 1.2×           |
+| 100 Billion | 0.021s   | 0.034s   | 1.6×           |
+| 1 Trillion  | 0.091s   | 0.168s   | **1.8×**       |
+| 10 Trillion | 0.396s   | 1.190s   | **3.0×**       |
 
 ### Remaining Optimization Opportunities
 

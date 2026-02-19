@@ -164,6 +164,33 @@ impl BitSieve {
         cnt as i64
     }
 
+    /// Count set bits in (prev_pos, pos] given that count(prev_pos) is known.
+    #[inline]
+    fn count_delta(&self, prev_pos: usize, pos: usize) -> i64 {
+        let w0 = prev_pos / 64;
+        let b0 = prev_pos % 64;
+        let w1 = pos / 64;
+        let b1 = pos % 64;
+        if w0 == w1 {
+            let word = unsafe { *self.bits.get_unchecked(w0) };
+            let hi_mask = (2u64 << b1) - 1;
+            let lo_mask = (2u64 << b0) - 1;
+            return (word & (hi_mask ^ lo_mask)).count_ones() as i64;
+        }
+        let mut cnt = 0u64;
+        // Bits above b0 in word w0
+        let first_mask = if b0 < 63 { u64::MAX << (b0 + 1) } else { 0 };
+        cnt += (unsafe { *self.bits.get_unchecked(w0) } & first_mask).count_ones() as u64;
+        // Full words in between
+        for i in (w0 + 1)..w1 {
+            cnt += unsafe { *self.bits.get_unchecked(i) }.count_ones() as u64;
+        }
+        // Partial word w1 up to b1
+        let mask = (2u64 << b1) - 1;
+        cnt += (unsafe { *self.bits.get_unchecked(w1) } & mask).count_ones() as u64;
+        cnt as i64
+    }
+
     fn count_total(&self) -> i64 {
         let nwords = (self.len + 63) / 64;
         self.bits[..nwords].iter().map(|w| w.count_ones() as i64).sum()
@@ -246,12 +273,26 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
 
             if prime as usize >= max_m { break; }
 
+            // Iterate m descending (xpm ascending) with incremental count
+            let mut prev_pos: Option<usize> = None;
+            let mut running_count: i64 = 0;
             for m in (min_m + 1..=max_m).rev() {
                 if mu[m] != 0 && (prime as i32) < lpf[m] {
                     let xpm = (x / (prime * m as u64)) as usize;
                     if xpm >= low && xpm < high {
-                        let count = sieve.count(xpm - low);
+                        let pos = xpm - low;
+                        let count = match prev_pos {
+                            None => {
+                                running_count = sieve.count(pos);
+                                running_count
+                            }
+                            Some(pp) => {
+                                running_count += sieve.count_delta(pp, pos);
+                                running_count
+                            }
+                        };
                         s2 -= mu[m] as i64 * (phi[b] + count);
+                        prev_pos = Some(pos);
                     }
                 }
             }
@@ -287,11 +328,30 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
 
             if l < primes.len() && prime as usize >= primes[l] as usize { break; }
 
+            // q = primes[l] decreases => xpq increases => positions are ascending
+            let mut prev_pos: Option<usize> = None;
+            let mut running_count: i64 = 0;
             while l > 0 && l < primes.len() && (primes[l] as usize) > min_m {
                 let xpq = (x / (prime * primes[l] as u64)) as usize;
                 if xpq >= low && xpq < high {
-                    let count = sieve.count(xpq - low);
-                    s2 += phi[b] + count; // mu(q) = -1, so -= (-1) * phi = += phi
+                    let pos = xpq - low;
+                    let count = match prev_pos {
+                        None => {
+                            running_count = sieve.count(pos);
+                            running_count
+                        }
+                        Some(pp) if pos > pp => {
+                            running_count += sieve.count_delta(pp, pos);
+                            running_count
+                        }
+                        _ => {
+                            // Same or earlier position — recalculate
+                            running_count = sieve.count(pos);
+                            running_count
+                        }
+                    };
+                    s2 += phi[b] + count;
+                    prev_pos = Some(pos);
                 }
                 l -= 1;
             }
