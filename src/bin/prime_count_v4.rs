@@ -141,17 +141,6 @@ impl BitSieve {
         BitSieve { bits: vec![0u64; (max_len + 63) / 64], len: 0, total: 0 }
     }
 
-    fn reset(&mut self, len: usize) {
-        self.len = len;
-        let nwords = (len + 63) / 64;
-        for w in self.bits[..nwords].iter_mut() { *w = u64::MAX; }
-        let excess = nwords * 64 - len;
-        if excess > 0 && nwords > 0 {
-            self.bits[nwords - 1] = u64::MAX >> excess;
-        }
-        self.total = len as i64;
-    }
-
     /// Count set bits in positions [0, pos].
     #[inline]
     fn count(&self, pos: usize) -> i64 {
@@ -258,19 +247,36 @@ impl PreSieveTemplate {
         }
     }
 
-    /// Apply template to sieve segment starting at `low`.
-    fn apply(&self, sieve: &mut BitSieve, low: usize) {
-        let nwords = (sieve.len + 63) / 64;
+    /// Apply template to sieve segment starting at `low`, combining with reset.
+    /// This replaces separate reset() + apply() calls.
+    fn init_sieve(&self, sieve: &mut BitSieve, low: usize, len: usize) {
+        sieve.len = len;
+        let nwords = (len + 63) / 64;
         let mut tpl_pos = low % self.period;
+        let mut total = 0i64;
         for w in 0..nwords {
-            let tpl_word = self.get_word(tpl_pos);
-            let old = unsafe { *sieve.bits.get_unchecked(w) };
-            let new = old & tpl_word;
-            sieve.total -= (old.count_ones() as i64) - (new.count_ones() as i64);
-            unsafe { *sieve.bits.get_unchecked_mut(w) = new; }
+            let word = self.get_word(tpl_pos);
+            unsafe { *sieve.bits.get_unchecked_mut(w) = word; }
+            total += word.count_ones() as i64;
             tpl_pos += 64;
             if tpl_pos >= self.period { tpl_pos -= self.period; }
         }
+        // Clear excess bits in the last word
+        let excess = nwords * 64 - len;
+        if excess > 0 {
+            let last = unsafe { *sieve.bits.get_unchecked(nwords - 1) };
+            let masked = last & (u64::MAX >> excess);
+            total -= (last.count_ones() as i64) - (masked.count_ones() as i64);
+            unsafe { *sieve.bits.get_unchecked_mut(nwords - 1) = masked; }
+        }
+        // Clear position 0 in first segment (integer 0 not in [1,x])
+        if low == 0 {
+            let old = unsafe { *sieve.bits.get_unchecked(0) };
+            let was_set = (old & 1) as i64;
+            unsafe { *sieve.bits.get_unchecked_mut(0) = old & !1; }
+            total -= was_set;
+        }
+        sieve.total = total;
     }
 }
 
@@ -301,11 +307,8 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
         let seg_len = high - low;
         let low1 = std::cmp::max(low, 1);
 
-        sieve.reset(seg_len);
-        if low == 0 { sieve.cross_off(0); }
-
-        // Apply pre-sieve template (replaces individual cross-off loops for first c primes)
-        template.apply(&mut sieve, low);
+        // Combined reset + template apply + position 0 handling
+        template.init_sieve(&mut sieve, low, seg_len);
 
         // Determine which b values have special leaves in this segment
         let max_b = if low1 > 0 {
