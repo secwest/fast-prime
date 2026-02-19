@@ -174,13 +174,15 @@ fn compute_starts(sp: &SievePrime, seg_start: u64, seg_bytes_len: usize) -> [usi
 }
 
 /// Sieve marking for small primes (many hits per segment): 4× unrolled.
+/// `starts` are absolute u32 positions within the full L2 segment; updated in-place for carry-forward.
 #[inline]
-unsafe fn sieve_small(sieve: &mut [u8], starts: &[usize; 8], p: usize) {
+unsafe fn sieve_small(sieve: &mut [u8], starts: &mut [u32; 8], p: usize, sub_offset: usize) {
     let len = sieve.len();
 
     for i in 0..8 {
-        let mut idx = starts[i];
-        if idx >= len { continue; }
+        let s = starts[i] as usize;
+        if s < sub_offset || s - sub_offset >= len { continue; }
+        let mut idx = s - sub_offset;
         let bit = BITS[i];
 
         let end4 = len.saturating_sub(3 * p);
@@ -195,6 +197,7 @@ unsafe fn sieve_small(sieve: &mut [u8], starts: &[usize; 8], p: usize) {
             *sieve.get_unchecked_mut(idx) |= bit;
             idx += p;
         }
+        starts[i] = (sub_offset + idx) as u32;
     }
 }
 
@@ -333,7 +336,7 @@ fn count_primes(limit: u64) -> u64 {
     let num_segs = (total_bytes + seg_bytes - 1) / seg_bytes;
 
     // Split primes into tiers
-    let tiny_threshold = (L1_SEG_BYTES / 4) as u32;
+    let tiny_threshold = (L1_SEG_BYTES / 3) as u32;
     let large_threshold = seg_bytes as u32;
     let tiny_split = sieving_primes.partition_point(|sp| sp.p < tiny_threshold);
     let large_split = sieving_primes.partition_point(|sp| sp.p < large_threshold);
@@ -341,11 +344,13 @@ fn count_primes(limit: u64) -> u64 {
     let small_primes = &sieving_primes[tiny_split..large_split];
     let large_primes = &sieving_primes[large_split..];
 
+    let tiny_count = tiny_primes.len();
+
     let upper_count: u64 = (0..num_segs)
         .into_par_iter()
         .map_init(
-            || vec![0u8; seg_bytes],
-            |sieve_buf, seg_idx| {
+            || (vec![0u8; seg_bytes], vec![[0u32; 8]; tiny_count]),
+            |(sieve_buf, starts_buf), seg_idx| {
             let byte_offset = seg_idx * seg_bytes;
             let seg_start_num = sieve_start + (byte_offset as u64) * 30;
             let remaining_bytes = total_bytes - byte_offset;
@@ -356,17 +361,23 @@ fn count_primes(limit: u64) -> u64 {
             let pattern_offset = (presieve_base_offset + byte_offset) % PRESIEVE_PERIOD;
             apply_presieve(sieve, pattern_offset, &presieve);
 
-            // Tiny primes: process in L1-sized sub-segments for cache locality
+            // Tiny primes: compute starts once, carry forward across L1 sub-segments
             if !tiny_primes.is_empty() {
+                for (pi, sp) in tiny_primes.iter().enumerate() {
+                    let starts = compute_starts(sp, seg_start_num, seg_byte_count);
+                    let s = &mut starts_buf[pi];
+                    for j in 0..8 {
+                        s[j] = if starts[j] == usize::MAX { u32::MAX } else { starts[j] as u32 };
+                    }
+                }
+
                 let mut sub_offset = 0usize;
                 while sub_offset < seg_byte_count {
                     let sub_len = L1_SEG_BYTES.min(seg_byte_count - sub_offset);
-                    let sub_start = seg_start_num + (sub_offset as u64) * 30;
                     let sub_sieve = &mut sieve[sub_offset..sub_offset + sub_len];
 
-                    for sp in tiny_primes {
-                        let starts = compute_starts(sp, sub_start, sub_len);
-                        unsafe { sieve_small(sub_sieve, &starts, sp.p as usize); }
+                    for (pi, sp) in tiny_primes.iter().enumerate() {
+                        unsafe { sieve_small(sub_sieve, &mut starts_buf[pi], sp.p as usize, sub_offset); }
                     }
                     sub_offset += L1_SEG_BYTES;
                 }
