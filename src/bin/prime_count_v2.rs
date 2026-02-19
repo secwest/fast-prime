@@ -1,3 +1,4 @@
+use primal::Sieve;
 use std::time::Instant;
 
 // ── Lucy_Hedgehog / Meissel-Lehmer prime counting ──────────────────────────
@@ -30,17 +31,15 @@ fn count_primes(n: u64) -> u64 {
     let mut small = vec![0i32; v + 1];
     let mut large = vec![0i64; v + 1];
 
-    // Initialize with p=2 already sieved: S(x, 2) = x - floor(x/2) for x >= 2
-    // This counts odd numbers in [1,x] (including 1 for the prime 2 itself)
+    // Initialize: S(x) = x - 1 (all integers from 2 to x)
     for j in 1..=v {
-        small[j] = (j as i32 - 1) - (j as i32 / 2 - 1).max(0); // j - 1 - (j/2 - 1) = j - j/2
-        large[j] = (n / j as u64) as i64 - 1 - ((n / (2 * j as u64)) as i64 - 1).max(0);
+        small[j] = j as i32 - 1;
+        large[j] = (n / j as u64) as i64 - 1;
     }
 
-    // Sieve: iterate only over odd primes p = 3, 5, 7, ...
-    let mut p = 3;
-    while p <= v {
-        if small[p] <= small[p - 1] { p += 2; continue; } // p is composite
+    // Sieve: for each prime p, update S values
+    let prime_sieve = Sieve::new(v);
+    for p in prime_sieve.primes_from(2) {
 
         let pcnt = small[p - 1] as i64;
         let p2 = p as u64 * p as u64;
@@ -85,7 +84,6 @@ fn count_primes(n: u64) -> u64 {
                 }
             }
         }
-        p += 2;
     }
 
     large[1] as u64
@@ -106,6 +104,7 @@ fn main() {
         Case { limit:     10_000_000_000, label: "10 Billion",   expected:     455_052_511 },
         Case { limit:    100_000_000_000, label: "100 Billion",  expected:   4_118_054_813 },
         Case { limit:  1_000_000_000_000, label: "1 Trillion",   expected: 37_607_912_018 },
+        Case { limit: 10_000_000_000_000, label: "10 Trillion",  expected: 346_065_536_839 },
     ];
 
     println!("{:<15} {:>12} {:>18}  {}", "Range", "Time", "Primes Found", "Status");
