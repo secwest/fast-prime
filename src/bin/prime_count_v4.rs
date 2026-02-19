@@ -303,23 +303,6 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             b += 1;
         }
 
-        // Accumulate phi for remaining b values that had no leaves this segment
-        while b < primes.len() {
-            phi[b] += sieve.count_total();
-            let p = primes[b] as usize;
-            let start = if next[b] >= low { next[b] - low } else {
-                let rem = (low - next[b]) % p;
-                if rem == 0 { 0 } else { p - rem }
-            };
-            let mut k = start;
-            while k < seg_len {
-                if low + k > 1 { sieve.cross_off(k); }
-                k += p;
-            }
-            next[b] = low + k;
-            b += 1;
-        }
-
         low += segment_size;
     }
 
@@ -351,6 +334,7 @@ fn count_primes(x: u64) -> u64 {
         return Sieve::new(x as usize).prime_pi(x as usize) as u64;
     }
 
+    let t0 = Instant::now();
     let prime_sieve = Sieve::new(y);
     let mut primes: Vec<u32> = vec![0];
     primes.extend(prime_sieve.primes_from(2).take_while(|&p| p <= y).map(|p| p as u32));
@@ -361,8 +345,10 @@ fn count_primes(x: u64) -> u64 {
     let lpf = generate_lpf(y);
     let mu = generate_mu(y);
     let pi = generate_pi(y, &prime_sieve);
+    let t_tables = t0.elapsed();
 
     // S1: ordinary leaves = Σ μ(n)·φ(x/n, c) for n ≤ y, lpf(n) > p_c
+    let t1 = Instant::now();
     let pc = primes[c];
     let mut s1: i64 = 0;
     for n in 1..=y {
@@ -370,12 +356,25 @@ fn count_primes(x: u64) -> u64 {
             s1 += mu[n] as i64 * phi_cache.phi(x / n as u64);
         }
     }
+    let t_s1 = t1.elapsed();
 
     // S2: special leaves via segmented sieve
+    let t2 = Instant::now();
     let s2 = compute_s2(x, y, c, &primes, &lpf, &mu, &pi);
+    let t_s2 = t2.elapsed();
 
     // P2
+    let t3 = Instant::now();
     let p2 = compute_p2(x, y, pi_y);
+    let t_p2 = t3.elapsed();
+
+    if x >= 1_000_000_000 {
+        eprintln!("  tables: {:.3}ms, S1: {:.3}ms, S2: {:.3}ms, P2: {:.3}ms",
+            t_tables.as_secs_f64() * 1000.0,
+            t_s1.as_secs_f64() * 1000.0,
+            t_s2.as_secs_f64() * 1000.0,
+            t_p2.as_secs_f64() * 1000.0);
+    }
 
     let result = s1 + s2 + pi_y as i64 - 1 - p2;
     result as u64
