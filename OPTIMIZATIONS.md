@@ -332,16 +332,14 @@ L1/4 was optimal — primes with ≥4 hits per sub-segment benefit from L1 local
 
 ---
 
-## Summary: Cumulative Improvement
+## Summary: Cumulative Improvement (before latest optimizations)
 
-| Range | Ref. Baseline | Final | Total Speedup |
+| Range | Ref. Baseline | After Opt 17 | Speedup |
 |---|---|---|---|
 | 1 Billion | 0.107s | 0.006s | **17.8×** |
 | 10 Billion | 1.119s | 0.069s | **16.2×** |
 | 100 Billion | 11.609s | 0.757s | **15.3×** |
 | 1 Trillion | 119.618s | 9.07s | **13.2×** |
-
-The single biggest optimization was L1 sub-segmentation (#14), providing ~2× speedup. Wheel mod 30 (#1) provided the foundational ~6× improvement over the odds-only baseline.
 
 ---
 
@@ -411,6 +409,73 @@ The total number of sieve writes is nearly identical (8.35M/p for wheel-210 vs 8
 | 1 Thousand | 0.0004s | 168 | ✓ |
 | 1 Million | 0.0001s | 78,498 | ✓ |
 | 1 Billion | 0.006s | 50,847,534 | ✓ |
-| 10 Billion | 0.069s | 455,052,511 | ✓ |
-| 100 Billion | 0.757s | 4,118,054,813 | ✓ |
-| 1 Trillion | 9.07s | 37,607,912,018 | ✓ |
+| 10 Billion | 0.065s | 455,052,511 | ✓ |
+| 100 Billion | 0.713s | 4,118,054,813 | ✓ |
+| 1 Trillion | 8.60s | 37,607,912,018 | ✓ |
+
+---
+
+## ✅ Optimization 18: DK_TABLE Precomputation
+
+**What:** Replace the branch+compare loop in `compute_starts` with a const `DK_TABLE[8][30][8]` lookup table. For each (p_idx, k_rem) pair, the table directly provides the 8 delta-k values needed to reach each target residue.
+
+**Why it helps:** Eliminates conditional branching in the inner loop of compute_starts. The table is 1920 bytes and fits entirely in L1.
+
+**Result:** 1T improved from 9.07s to 8.86s (~2.5%).
+
+---
+
+## ✅ Optimization 19: Carry-Forward L1 Sub-Segment Starts
+
+**What:** Instead of calling `compute_starts` for every tiny prime × every L1 sub-segment, compute starts once per L2 segment and carry forward the sieve write position across L1 sub-segments. `sieve_small` now updates absolute positions in-place, so the next sub-segment knows exactly where to resume.
+
+**Why it helps:** Previously: 1011 tiny primes × 43 L1 sub-segments = 43,473 compute_starts calls per L2 segment. Now: 1011 calls + 42 × 1011 cheap position adjustments. Eliminates ~97% of compute_starts calls for tiny primes.
+
+Also uses u32 carries buffer (25KB) instead of usize (50KB), fitting comfortably in L1 cache (48KB).
+
+Also adjusted tiny threshold from L1/4 (6144) to L1/3 (8192) — moves more primes into the carry-forward-optimized tiny tier.
+
+**Result:** 1T improved from 8.86s to 8.60s (~3%).
+
+---
+
+## ❌ Failed: Carry-Forward Across L2 Segments
+
+Loss of rayon work-stealing for heterogeneous P+E cores. Fixed chunk distribution doesn't match P-core vs E-core speeds. **Result:** 10.3-10.6s (~15% slower).
+
+---
+
+## ❌ Failed: Per-Prime dk_byte/dk_rem Arrays
+
+Struct bloats from 16→168 bytes. 78K primes × 168 bytes = 13.2MB — far exceeds L2. **Result:** 10.0s (~10% slower).
+
+---
+
+## ❌ Failed: Raw Pointer Arithmetic in Sieve Loops
+
+LLVM generates better code for index-based loops than pointer arithmetic on x86-64. **Result:** 9.83s (~10% slower).
+
+---
+
+## ❌ Failed: Profile-Guided Optimization (PGO)
+
+Branch patterns already predictable. PGO adds no useful info. **Result:** 9.00s (stable but not faster than 8.86s best).
+
+---
+
+## ❌ Failed: u32 Division / Fused Compute+Sieve / Software Pipelining / 8× Unroll
+
+Multiple micro-optimizations tried, all slower: u32 division (no difference), fused compute+sieve (5% slower — prevents LLVM optimization), software-pipelined medium primes (3% slower), 8× unroll (1% slower), separate no-bounds-check compute_starts (3% slower), 1.5MB/768KB segments (1-2% slower), presieve with prime 23 (no improvement), LLVM machine outliner (build failure on MSVC).
+
+---
+
+## Summary: Cumulative Improvement
+
+| Range | Ref. Baseline | Final | Total Speedup |
+|---|---|---|---|
+| 1 Billion | 0.107s | 0.006s | **17.8×** |
+| 10 Billion | 1.119s | 0.065s | **17.2×** |
+| 100 Billion | 11.609s | 0.713s | **16.3×** |
+| 1 Trillion | 119.618s | 8.60s | **13.9×** |
+
+vs Strix Halo reference (25.82s at 1T): **3.0× faster**.
