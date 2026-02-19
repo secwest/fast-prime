@@ -288,8 +288,9 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     let pi_sqrty = pi[std::cmp::min(sqrt_y, y)] as usize;
     let pi_y = pi[y] as usize;
 
-    // Segment size ≈ √z, at least 256
-    let segment_size = std::cmp::max(isqrt(z as u64) as usize, 256).next_power_of_two();
+    // Segment size: larger segments reduce per-segment overhead (init, start calc)
+    // 1<<17 = 128K bits = 16KB, fits comfortably in L1 cache (48KB)
+    let segment_size = std::cmp::max(isqrt(z as u64) as usize, 1 << 17).next_power_of_two();
 
     // Pre-sieve template for first c primes
     let template = PreSieveTemplate::new(primes, std::cmp::min(c, primes.len() - 1));
