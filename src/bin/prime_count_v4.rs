@@ -306,17 +306,18 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     let nprimes = primes.len();
     // Use more chunks than threads for better load balancing via work-stealing.
     // Early segments (near low=0) do 100× more work than late segments.
-    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 4);
+    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 8);
 
-    // Each chunk returns (s2_local, phi_totals, coefficients)
-    let results: Vec<(i64, Vec<i64>, Vec<i64>)> = (0..nchunks).into_par_iter().map(|tid| {
+    // Each chunk returns (s2_local, phi_totals, coefficients, max_b_seen)
+    let results: Vec<(i64, Vec<i64>, Vec<i64>, usize)> = (0..nchunks).into_par_iter().map(|tid| {
         let seg_start = tid * num_segments / nchunks;
         let seg_end = (tid + 1) * num_segments / nchunks;
 
         let mut sieve = BitSieve::new(segment_size);
         let mut phi = vec![0i64; nprimes];
         let mut s2_local = 0i64;
-        let mut coeff = vec![0i64; nprimes]; // phi[b] correction coefficient
+        let mut coeff = vec![0i64; nprimes];
+        let mut max_b_seen: usize = 0;
 
         for seg_idx in seg_start..seg_end {
             let low = seg_idx * segment_size;
@@ -331,6 +332,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                 pi[std::cmp::min(isqrt(x / low1 as u64) as usize, y)] as usize
             } else { pi_y };
             let max_b = std::cmp::min(max_b, pi_y - 1);
+            if max_b > max_b_seen { max_b_seen = max_b; }
 
             let mut b = c + 1;
 
@@ -493,7 +495,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             }
         }
 
-        (s2_local, phi, coeff)
+        (s2_local, phi, coeff, max_b_seen)
     }).collect();
 
     // Correction pass: fix phi[b] offsets across thread boundaries
@@ -501,12 +503,15 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     let mut prefix_phi = results[0].1.clone();
 
     for k in 1..results.len() {
-        let (s2_local, ref phi_total, ref coeff) = results[k];
-        // Correction = Σ_b prefix_phi[b] * coeff[b]
-        let correction: i64 = prefix_phi.iter().zip(coeff.iter())
-            .map(|(&p, &c)| p * c).sum();
+        let (s2_local, ref phi_total, ref coeff, max_b_seen) = results[k];
+        // Correction = Σ_b prefix_phi[b] * coeff[b], only to max_b_seen
+        let limit = std::cmp::min(max_b_seen + 1, nprimes);
+        let mut correction = 0i64;
+        for b in 0..limit {
+            correction += prefix_phi[b] * coeff[b];
+        }
         s2 += s2_local + correction;
-        for b in 0..nprimes {
+        for b in 0..limit {
             prefix_phi[b] += phi_total[b];
         }
     }
