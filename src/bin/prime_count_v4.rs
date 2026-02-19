@@ -322,12 +322,13 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
         // Hard special leaves: c+1 ≤ b ≤ π(√y)
         while b <= std::cmp::min(pi_sqrty, max_b) && b < primes.len() {
             let prime = primes[b] as u64;
+            let x_div_prime = x / prime;
             let min_m = std::cmp::max(
-                x / (prime * high as u64),
+                x_div_prime / high as u64,
                 y as u64 / prime
             ) as usize;
             let max_m = std::cmp::min(
-                x / (prime * low1 as u64),
+                x_div_prime / low1 as u64,
                 y as u64
             ) as usize;
 
@@ -338,7 +339,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             let mut running_count: i64 = 0;
             for m in (min_m + 1..=max_m).rev() {
                 if mu[m] != 0 && (prime as i32) < lpf[m] {
-                    let xpm = (x / (prime * m as u64)) as usize;
+                    let xpm = (x_div_prime / m as u64) as usize;
                     if xpm >= low && xpm < high {
                         let pos = xpm - low;
                         let count = match prev_pos {
@@ -375,13 +376,14 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
         // Easy special leaves: π(√y) < b ≤ max_b (two-prime products)
         while b <= max_b && b < primes.len() {
             let prime = primes[b] as u64;
+            let x_div_prime = x / prime;
             let l_max = std::cmp::min(
-                (x / (prime * low1 as u64)) as usize,
+                (x_div_prime / low1 as u64) as usize,
                 y
             );
             let mut l = pi[std::cmp::min(l_max, y)] as usize;
             let min_m = std::cmp::max(
-                (x / (prime * high as u64)) as usize,
+                (x_div_prime / high as u64) as usize,
                 prime as usize
             );
 
@@ -391,7 +393,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             let mut prev_pos: Option<usize> = None;
             let mut running_count: i64 = 0;
             while l > 0 && l < primes.len() && (primes[l] as usize) > min_m {
-                let xpq = (x / (prime * primes[l] as u64)) as usize;
+                let xpq = (x_div_prime / primes[l] as u64) as usize;
                 if xpq >= low && xpq < high {
                     let pos = xpq - low;
                     let count = match prev_pos {
