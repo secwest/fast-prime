@@ -1,4 +1,5 @@
 use primal::Sieve;
+use rayon::prelude::*;
 use std::time::Instant;
 
 // ── Lagarias-Miller-Odlyzko prime counting ───────────────────────────────────
@@ -110,12 +111,17 @@ fn compute_p2(x: u64, y: usize, pi_y: usize) -> i64 {
     let max_val = (x / (y as u64 + 1)) as usize;
     let p2_sieve = Sieve::new(std::cmp::max(max_val, sqrt_x));
 
-    let mut p2: i64 = 0;
     let pi_sqrt_x = p2_sieve.prime_pi(sqrt_x);
 
-    for p in p2_sieve.primes_from(y + 1).take_while(|&p| p <= sqrt_x) {
-        p2 += p2_sieve.prime_pi((x / p as u64) as usize) as i64;
-    }
+    // Collect primes in (y, sqrt_x]
+    let p2_primes: Vec<usize> = p2_sieve.primes_from(y + 1)
+        .take_while(|&p| p <= sqrt_x)
+        .collect();
+
+    // Parallel sum of π(x/p) for each prime p
+    let p2: i64 = p2_primes.par_iter()
+        .map(|&p| p2_sieve.prime_pi((x / p as u64) as usize) as i64)
+        .sum();
 
     let choose2 = |n: i64| n * (n - 1) / 2;
     p2 - choose2(pi_sqrt_x as i64) + choose2(pi_y as i64)
@@ -179,8 +185,8 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     let pi_sqrty = pi[std::cmp::min(sqrt_y, y)] as usize;
     let pi_y = pi[y] as usize;
 
-    // Segment size ≈ √z, at least 64
-    let segment_size = std::cmp::max(isqrt(z as u64) as usize, 64).next_power_of_two();
+    // Segment size ≈ √z, at least 256
+    let segment_size = std::cmp::max(isqrt(z as u64) as usize, 256).next_power_of_two();
 
     // phi[b] accumulates φ(low, b-1) across segments
     // Initialize: φ(0, b-1) = 0 for all b
@@ -337,7 +343,6 @@ fn count_primes(x: u64) -> u64 {
         return Sieve::new(x as usize).prime_pi(x as usize) as u64;
     }
 
-    let t0 = Instant::now();
     let prime_sieve = Sieve::new(y);
     let mut primes: Vec<u32> = vec![0];
     primes.extend(prime_sieve.primes_from(2).take_while(|&p| p <= y).map(|p| p as u32));
@@ -348,10 +353,8 @@ fn count_primes(x: u64) -> u64 {
     let lpf = generate_lpf(y);
     let mu = generate_mu(y);
     let pi = generate_pi(y, &prime_sieve);
-    let t_tables = t0.elapsed();
 
-    // S1: ordinary leaves = Σ μ(n)·φ(x/n, c) for n ≤ y, lpf(n) > p_c
-    let t1 = Instant::now();
+    // S1: ordinary leaves
     let pc = primes[c];
     let mut s1: i64 = 0;
     for n in 1..=y {
@@ -359,25 +362,12 @@ fn count_primes(x: u64) -> u64 {
             s1 += mu[n] as i64 * phi_cache.phi(x / n as u64);
         }
     }
-    let t_s1 = t1.elapsed();
 
     // S2: special leaves via segmented sieve
-    let t2 = Instant::now();
     let s2 = compute_s2(x, y, c, &primes, &lpf, &mu, &pi);
-    let t_s2 = t2.elapsed();
 
     // P2
-    let t3 = Instant::now();
     let p2 = compute_p2(x, y, pi_y);
-    let t_p2 = t3.elapsed();
-
-    if x >= 1_000_000_000 {
-        eprintln!("  tables: {:.3}ms, S1: {:.3}ms, S2: {:.3}ms, P2: {:.3}ms",
-            t_tables.as_secs_f64() * 1000.0,
-            t_s1.as_secs_f64() * 1000.0,
-            t_s2.as_secs_f64() * 1000.0,
-            t_p2.as_secs_f64() * 1000.0);
-    }
 
     let result = s1 + s2 + pi_y as i64 - 1 - p2;
     result as u64

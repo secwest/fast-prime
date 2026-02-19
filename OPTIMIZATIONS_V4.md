@@ -117,23 +117,65 @@ more complex code.
 
 ---
 
-## Current Best Performance (α = 2.0)
+## Optimization 3: Parallel P2 via Rayon ✅
+
+**Hypothesis**: P2 computes π(x/p) for each prime p in (y, √x]. These lookups are
+independent and embarrassingly parallel. The primal sieve is immutable and thread-safe.
+
+**Change**: Collect primes into a Vec, then use `par_iter().map().sum()` via rayon.
+Also removed per-component timing instrumentation to reduce overhead.
+
+**Result** (α = 2.0):
+
+| Range      | Before  | After   | Speedup |
+|------------|---------|---------|---------|
+| 100 Billion| 0.032s  | 0.022s  | **1.5×** |
+| 1 Trillion | 0.120s  | 0.098s  | **1.2×** |
+| 10 Trillion| 0.560s  | 0.480s  | **1.2×** |
+
+P2 was 28% of total time; parallelizing it across 24 threads nearly eliminates it.
+
+---
+
+## Failed: Tracked Total in BitSieve ✗
+
+**Hypothesis**: Maintain a running `total` field in BitSieve, decrementing in cross_off,
+to make count_total() O(1) instead of scanning all words.
+
+**Result**: 1T went from 0.120s → 0.140s (17% SLOWER). The branch in cross_off
+(checking if bit was set before decrementing) causes pipeline stalls. The branchless
+`AND NOT` is faster than the conditional decrement.
+
+**Reverted**.
+
+---
+
+## Failed: Segment Size Cap at 64K ✗
+
+**Hypothesis**: Capping segment_size at 65536 bits (8KB) would improve L1 cache hits.
+
+**Result**: No measurable difference — within noise of the uncapped version.
+The default √z sizing already produces near-optimal segments.
+
+**Reverted**.
+
+---
+
+## Current Best Performance (α = 2.0, parallel P2)
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
 | 1 Billion   | 0.0015s  | 0.002s   | 1.3×           |
-| 10 Billion  | 0.008s   | 0.007s   | 0.9×           |
-| 100 Billion | 0.032s   | 0.034s   | 1.1×           |
-| 1 Trillion  | 0.120s   | 0.168s   | **1.4×**       |
-| 10 Trillion | 0.560s   | 1.190s   | **2.1×**       |
+| 10 Billion  | 0.007s   | 0.007s   | 1.0×           |
+| 100 Billion | 0.022s   | 0.034s   | 1.5×           |
+| 1 Trillion  | 0.098s   | 0.168s   | **1.7×**       |
+| 10 Trillion | 0.480s   | 1.190s   | **2.5×**       |
 
-**Time breakdown at 1T**: tables 0.5ms, S1 0.04ms, S2 86ms (72%), P2 33ms (28%)
-**Time breakdown at 10T**: tables 0.7ms, S1 0.1ms, S2 437ms (78%), P2 122ms (22%)
+**Time breakdown at 1T** (pre-parallelization): tables 0.5ms, S1 0.04ms, S2 86ms (72%), P2 33ms (28%)
 
 ### Remaining Optimization Opportunities
 
 1. **Parallel S2**: Split segments across rayon threads with phi_vector initialization
-2. **Larger segment size**: Current √z may be suboptimal for cache
-3. **Wheel-30 sieve**: Skip multiples of 2/3/5 in the sieve (8 bits per 30 numbers)
-4. **Precompute valid m indices**: Skip composite m values in the inner loop
-5. **Batch cross_off_count**: Combined sieve+counter update for large segments
+2. **Wheel-30 sieve**: Skip multiples of 2/3/5 in the sieve (8 bits per 30 numbers)
+3. **Precompute valid m indices**: Skip composite m values in the inner loop
+4. **Batch cross_off_count**: Combined sieve+counter update for large segments
