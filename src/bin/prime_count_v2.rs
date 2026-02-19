@@ -128,14 +128,15 @@ fn count_primes(n: u64) -> u64 {
                     }
                 } else {
                     // Larger primes: use reciprocal table for division, unrolled by 4
+                    // For q > q_end, n_div_p/q < j_end always (proven: n_div_p = q_end*j_end + r, r < j_end)
                     unsafe {
                         let mut q = q_start;
-                        let end4 = q_end.saturating_add(3);
+                        let end4 = q_end.saturating_add(4); // scalar tail handles q_end..q_end+3
                         while q >= end4 {
-                            let lj0 = std::cmp::min(((n_div_p as u128 * *recip.get_unchecked(q) as u128) >> 64) as usize, j_end);
-                            let lj1 = std::cmp::min(((n_div_p as u128 * *recip.get_unchecked(q-1) as u128) >> 64) as usize, j_end);
-                            let lj2 = std::cmp::min(((n_div_p as u128 * *recip.get_unchecked(q-2) as u128) >> 64) as usize, j_end);
-                            let lj3 = std::cmp::min(((n_div_p as u128 * *recip.get_unchecked(q-3) as u128) >> 64) as usize, j_end);
+                            let lj0 = ((n_div_p as u128 * *recip.get_unchecked(q) as u128) >> 64) as usize;
+                            let lj1 = ((n_div_p as u128 * *recip.get_unchecked(q-1) as u128) >> 64) as usize;
+                            let lj2 = ((n_div_p as u128 * *recip.get_unchecked(q-2) as u128) >> 64) as usize;
+                            let lj3 = ((n_div_p as u128 * *recip.get_unchecked(q-3) as u128) >> 64) as usize;
                             if first_j <= lj0 {
                                 let d = *small.get_unchecked(q) as i64 - pcnt;
                                 for jj in first_j..=lj0 { *large.get_unchecked_mut(jj) -= d; }

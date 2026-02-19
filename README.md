@@ -21,8 +21,8 @@ Computes π(N) exactly using the Lucy_Hedgehog combinatorial method. O(N^{3/4} /
 │ 1 Billion   │    0.00600s              │    0.00200s              │       50,847,534 │
 │ 10 Billion  │    0.06570s              │    0.00900s              │      455,052,511 │
 │ 100 Billion │    0.72087s              │    0.03500s              │    4,118,054,813 │
-│ 1 Trillion  │    8.64000s              │    0.18500s              │   37,607,912,018 │
-│ 10 Trillion │  127.13000s              │    1.24000s              │  346,065,536,839 │
+│ 1 Trillion  │    8.64000s              │    0.17600s              │   37,607,912,018 │
+│ 10 Trillion │  127.13000s              │    1.23000s              │  346,065,536,839 │
 └─────────────┴──────────────────────────┴──────────────────────────┴──────────────────┘
 ```
 
@@ -33,8 +33,8 @@ Computes π(N) exactly using the Lucy_Hedgehog combinatorial method. O(N^{3/4} /
 | 1 Billion | 0.006s | 0.0020s | **3.0×** |
 | 10 Billion | 0.066s | 0.009s | **7.3×** |
 | 100 Billion | 0.721s | 0.035s | **20.6×** |
-| 1 Trillion | 8.640s | 0.185s | **46.7×** |
-| 10 Trillion | 127.13s | 1.240s | **102.5×** |
+| 1 Trillion | 8.640s | 0.176s | **49.1×** |
+| 10 Trillion | 127.13s | 1.230s | **103.4×** |
 
 ### Comparison vs Strix Halo Reference
 
@@ -43,7 +43,7 @@ Computes π(N) exactly using the Lucy_Hedgehog combinatorial method. O(N^{3/4} /
 | 1 Billion | 0.0020s | 0.011s | **5.5×** |
 | 10 Billion | 0.009s | 0.109s | **12.1×** |
 | 100 Billion | 0.035s | 1.483s | **42.4×** |
-| 1 Trillion | 0.185s | 25.820s | **139.6×** |
+| 1 Trillion | 0.176s | 25.820s | **146.7×** |
 
 ## Key Optimizations
 

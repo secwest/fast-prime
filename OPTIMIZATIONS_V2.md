@@ -163,6 +163,21 @@ update loop is 24% of total runtime.
 
 ---
 
+## Optimization #11: Eliminate min() in Phase B Unrolled Loop
+
+Mathematically proved that for q > q_end, `floor(n_div_p / q) < j_end` always holds
+(since `n_div_p = q_end * j_end + r` with `r < j_end`). This means the `std::cmp::min(lj, j_end)`
+calls in the 4× unrolled Phase B loop are no-ops for all iterations except possibly
+the last. Moved `end4` from `q_end + 3` to `q_end + 4` so the unrolled loop never
+processes q_end, eliminating 4 cmov instructions from the hot path.
+
+| Range | Before | After | Speedup |
+|---|---|---|---|
+| 1 Trillion | 0.185s | 0.176s | **5%** |
+| 10 Trillion | 1.24s | 1.23s | 1% |
+
+---
+
 ## Failed Attempts
 
 - **Skip delta==0 blocks in branch 2**: Extra branch misprediction outweighed savings.
@@ -175,6 +190,9 @@ update loop is 24% of total runtime.
 - **Reciprocal table for setup divisions**: Only 2 divisions per prime; u128 overhead > savings.
 - **Uniform reciprocal table (remove p≤7 hybrid)**: Slightly worse — carry-forward helps small primes.
 - **Reverse Phase A iteration**: No cache benefit; hardware prefetcher already effective.
+- **8× unroll (Phase A, small update)**: Register pressure negates gains; OoO engine saturated at 4×.
+- **Carry-forward cutoff tuning (p≤2, p≤3, p≤5)**: All within noise of p≤7. Current cutoff optimal.
+- **Profile-Guided Optimization (PGO)**: Marginal (~3%), within measurement noise.
 
 ---
 
@@ -183,7 +201,7 @@ update loop is 24% of total runtime.
 | Range | Time | vs Sieve V1 (24 threads) |
 |---|---|---|
 | 1 Billion | 0.002s | 3.0× faster |
-| 10 Billion | 0.009s | 7.3× faster |
+| 10 Billion | 0.007s | 9.4× faster |
 | 100 Billion | 0.035s | 20.6× faster |
-| 1 Trillion | 0.185s | **46.7× faster** |
-| 10 Trillion | 1.24s | **102.5× faster** |
+| 1 Trillion | 0.176s | **49.1× faster** |
+| 10 Trillion | 1.23s | **103.4× faster** |
