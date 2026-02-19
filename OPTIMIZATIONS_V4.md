@@ -309,17 +309,50 @@ P2 was ~20% of total time; overlapping it with S2 makes it essentially free.
 
 ---
 
+## Optimization 10: Combined init_sieve ✅
+
+**Hypothesis**: Merging reset() + template.apply() + cross_off(0) into a single init_sieve() 
+pass eliminates one full traversal of sieve words.
+
+**Change**: New `init_sieve()` method on PreSieveTemplate copies template words directly
+into sieve (computing popcount total on the fly), handles excess bits and position-0 
+clearing in one pass. Removed dead `reset()` method.
+
+**Result**: Marginal improvement (~2%), primarily visible at smaller scales.
+
+---
+
+## Optimization 11: Larger Segment Size (128K bits) ✅
+
+**Hypothesis**: Default segment size √z is only 16K-32K at 10T scale. Larger segments
+reduce per-segment overhead (init_sieve calls, prime start calculations, phi bookkeeping).
+
+**Tested**: Minimum segment sizes 128K (16KB), 256K (32KB):
+- 128K bits (16KB): fits L1 cache (48KB), ~5% faster at all scales
+- 256K bits (32KB): L1 pressure causes regression
+
+**Result** (128K minimum, α = 2.0):
+
+| Range       | Before   | After    | Speedup |
+|-------------|----------|----------|---------|
+| 100 Billion | 0.009s   | 0.007s   | **1.3×** |
+| 1 Trillion  | 0.034s   | 0.031s   | **1.1×** |
+| 10 Trillion | 0.142s   | 0.134s   | **1.06×**|
+
+---
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
-| 1 Billion   | 0.0014s  | 0.002s   | 1.4×           |
-| 10 Billion  | 0.003s   | 0.007s   | 2.3×           |
-| 100 Billion | 0.008s   | 0.034s   | **4.3×**       |
-| 1 Trillion  | 0.033s   | 0.168s   | **5.1×**       |
-| 10 Trillion | 0.137s   | 1.190s   | **8.7×**       |
+| 1 Billion   | 0.0012s  | 0.002s   | 1.7×           |
+| 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
+| 100 Billion | 0.007s   | 0.034s   | **4.9×**       |
+| 1 Trillion  | 0.031s   | 0.168s   | **5.4×**       |
+| 10 Trillion | 0.134s   | 1.190s   | **8.9×**       |
 
 ### Remaining Optimization Opportunities
 
 1. **Parallel S2 segments**: Split segment range across threads (complex phi precomputation)
 2. **Reduce integer divisions**: Reciprocal multiplication for x/(prime*m)
+3. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
