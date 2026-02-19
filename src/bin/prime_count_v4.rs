@@ -304,12 +304,14 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     }
 
     let nprimes = primes.len();
-    let nthreads = std::cmp::min(rayon::current_num_threads(), num_segments);
+    // Use more chunks than threads for better load balancing via work-stealing.
+    // Early segments (near low=0) do 100× more work than late segments.
+    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 4);
 
-    // Each thread returns (s2_local, phi_totals, coefficients)
-    let results: Vec<(i64, Vec<i64>, Vec<i64>)> = (0..nthreads).into_par_iter().map(|tid| {
-        let seg_start = tid * num_segments / nthreads;
-        let seg_end = (tid + 1) * num_segments / nthreads;
+    // Each chunk returns (s2_local, phi_totals, coefficients)
+    let results: Vec<(i64, Vec<i64>, Vec<i64>)> = (0..nchunks).into_par_iter().map(|tid| {
+        let seg_start = tid * num_segments / nchunks;
+        let seg_end = (tid + 1) * num_segments / nchunks;
 
         let mut sieve = BitSieve::new(segment_size);
         let mut phi = vec![0i64; nprimes];
