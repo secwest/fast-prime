@@ -1,6 +1,6 @@
 # fast-prime
 
-A highly optimized prime counting toolkit in Rust, featuring two independent implementations targeting modern hybrid-core CPUs.
+A highly optimized prime counting toolkit in Rust, featuring three independent implementations targeting modern hybrid-core CPUs.
 
 ## Implementations
 
@@ -8,42 +8,46 @@ A highly optimized prime counting toolkit in Rust, featuring two independent imp
 
 Counts all primes up to N using a segmented Sieve of Eratosthenes with wheel mod 30 factorization, two-level cache-aware segmentation, and parallel execution via [Rayon](https://github.com/rayon-rs/rayon). Uses all 24 threads.
 
-### V2 — Combinatorial Counter (`src/bin/prime_count_v2.rs`)
+### V2 — Lucy_Hedgehog Combinatorial Counter (`src/bin/prime_count_v2.rs`)
 
 Computes π(N) exactly using the Lucy_Hedgehog combinatorial method. O(N^{3/4} / ln N) time, O(√N) space — no full sieve needed. Single-threaded, yet dramatically faster than the parallel sieve for large N.
+
+### V3 — Meissel-Lehmer (`src/bin/prime_count_v3.rs`)
+
+Extension of V2: sieve primes only up to N^{1/3} (not N^{1/2}), then compute the remaining P₂ contribution analytically. O(N^{2/3}) time, O(√N) space. Currently the fastest implementation.
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
 ```
-┌─────────────┬──────────────────────────┬──────────────────────────┬──────────────────┐
-│ Range       │ V1 Sieve (24 threads)    │ V2 Combinatorial (1 thr) │ Primes Found     │
-├─────────────┼──────────────────────────┼──────────────────────────┼──────────────────┤
-│ 1 Billion   │    0.00600s              │    0.00200s              │       50,847,534 │
-│ 10 Billion  │    0.06570s              │    0.00900s              │      455,052,511 │
-│ 100 Billion │    0.72087s              │    0.03500s              │    4,118,054,813 │
-│ 1 Trillion  │    8.64000s              │    0.17600s              │   37,607,912,018 │
-│ 10 Trillion │  127.13000s              │    1.23000s              │  346,065,536,839 │
-└─────────────┴──────────────────────────┴──────────────────────────┴──────────────────┘
+┌─────────────┬──────────────────────────┬──────────────────────────┬──────────────────────────┬──────────────────┐
+│ Range       │ V1 Sieve (24 threads)    │ V2 Lucy_Hedgehog (1 thr) │ V3 Meissel-Lehmer (1 thr)│ Primes Found     │
+├─────────────┼──────────────────────────┼──────────────────────────┼──────────────────────────┼──────────────────┤
+│ 1 Billion   │    0.00600s              │    0.00200s              │    0.00200s              │       50,847,534 │
+│ 10 Billion  │    0.06570s              │    0.00900s              │    0.00700s              │      455,052,511 │
+│ 100 Billion │    0.72087s              │    0.03500s              │    0.03400s              │    4,118,054,813 │
+│ 1 Trillion  │    8.64000s              │    0.17600s              │    0.17000s              │   37,607,912,018 │
+│ 10 Trillion │  127.13000s              │    1.23000s              │    1.19000s              │  346,065,536,839 │
+└─────────────┴──────────────────────────┴──────────────────────────┴──────────────────────────┴──────────────────┘
 ```
 
-### V2 vs V1 Speedup
+### Best (V3) vs V1 Speedup
 
-| Range | V1 (24 threads) | V2 (1 thread) | V2 Speedup |
+| Range | V1 (24 threads) | V3 (1 thread) | V3 Speedup |
 |---|---|---|---|
-| 1 Billion | 0.006s | 0.0020s | **3.0×** |
-| 10 Billion | 0.066s | 0.009s | **7.3×** |
-| 100 Billion | 0.721s | 0.035s | **20.6×** |
-| 1 Trillion | 8.640s | 0.176s | **49.1×** |
-| 10 Trillion | 127.13s | 1.230s | **103.4×** |
+| 1 Billion | 0.006s | 0.002s | **3.0×** |
+| 10 Billion | 0.066s | 0.007s | **9.4×** |
+| 100 Billion | 0.721s | 0.034s | **21.2×** |
+| 1 Trillion | 8.640s | 0.170s | **50.8×** |
+| 10 Trillion | 127.13s | 1.190s | **106.8×** |
 
 ### Comparison vs Strix Halo Reference
 
-| Range | V2 (Ultra 9 285K) | Strix Halo Reference | Speedup |
+| Range | V3 (Ultra 9 285K) | Strix Halo Reference | Speedup |
 |---|---|---|---|
-| 1 Billion | 0.0020s | 0.011s | **5.5×** |
-| 10 Billion | 0.009s | 0.109s | **12.1×** |
-| 100 Billion | 0.035s | 1.483s | **42.4×** |
-| 1 Trillion | 0.176s | 25.820s | **146.7×** |
+| 1 Billion | 0.002s | 0.011s | **5.5×** |
+| 10 Billion | 0.007s | 0.109s | **15.6×** |
+| 100 Billion | 0.034s | 1.483s | **43.6×** |
+| 1 Trillion | 0.170s | 25.820s | **151.9×** |
 
 ## Key Optimizations
 
@@ -69,6 +73,14 @@ See [OPTIMIZATIONS_V2.md](OPTIMIZATIONS_V2.md) for the full optimization log.
 - **i32 small array** — Values ≤ √N fit in i32, halving memory footprint for better cache utilization.
 - **Unsafe indexing** — Bounds checks eliminated in hot loops where indices are mathematically guaranteed in-bounds.
 
+### V3 — Meissel-Lehmer
+
+See [OPTIMIZATIONS_V3.md](OPTIMIZATIONS_V3.md) for the full optimization log.
+
+- **Meissel truncation** — Sieve primes only up to N^{1/3} instead of N^{1/2}, reducing the sieve loop from ~78K primes to ~1.2K primes at 1T.
+- **P₂ analytic sum** — For primes p > N^{1/3}, the update to π(N) is just `Σ [large[p] - π(p-1)]` — one array lookup per prime. Proven correct because S_a(n/p) values are frozen after the partial sieve.
+- **All V2 optimizations** — Reciprocal table, two-phase harmonic, 4× unroll, Barrett fast division.
+
 ## Building
 
 Requires [Rust](https://rustup.rs/) (1.70+).
@@ -80,8 +92,11 @@ cargo build --release
 # Run V1 (segmented sieve, uses all threads)
 ./target/release/prime-count
 
-# Run V2 (combinatorial, single-threaded)
+# Run V2 (Lucy_Hedgehog combinatorial, single-threaded)
 ./target/release/prime_count_v2
+
+# Run V3 (Meissel-Lehmer, single-threaded)
+./target/release/prime_count_v3
 ```
 
 The build is configured with aggressive optimizations in `Cargo.toml`:
@@ -126,6 +141,12 @@ rustflags = ["-C", "target-cpu=native"]
      - Phase B (j > √(N/p)): iterate q downward, carry first_j forward, one division per q
    - **Small update**: Update `small[j]` in reverse order using Barrett fast division
 3. **Result** — `large[1]` = π(N)
+
+### V3 — Meissel-Lehmer Method
+
+1. **Phase 1: Partial sieve** — Run Lucy_Hedgehog for primes p ≤ N^{1/3} only (~1.2K primes at 1T vs ~78K). This gives the S_a function values in small[] and large[].
+2. **Phase 2: P₂ sum** — For each prime p in (N^{1/3}, √N], compute `large[p] - π(p-1)`. The S_a values are proven frozen (no prime between p_a and p modifies them). Sum these contributions.
+3. **Result** — `large[1] - P₂` = π(N)
 
 ## Dependencies
 
