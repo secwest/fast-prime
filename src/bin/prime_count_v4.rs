@@ -365,6 +365,14 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                 if rem == 0 { 0 } else { p - rem }
             };
             let mut k = start;
+            // Unrolled cross-off for hard leaves
+            while k + p * 3 < seg_len {
+                sieve.cross_off(k);
+                sieve.cross_off(k + p);
+                sieve.cross_off(k + p * 2);
+                sieve.cross_off(k + p * 3);
+                k += p * 4;
+            }
             while k < seg_len {
                 sieve.cross_off(k);
                 k += p;
@@ -424,6 +432,14 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                 if rem == 0 { 0 } else { p - rem }
             };
             let mut k = start;
+            // Unrolled cross-off for easy leaves
+            while k + p * 3 < seg_len {
+                sieve.cross_off(k);
+                sieve.cross_off(k + p);
+                sieve.cross_off(k + p * 2);
+                sieve.cross_off(k + p * 3);
+                k += p * 4;
+            }
             while k < seg_len {
                 sieve.cross_off(k);
                 k += p;
