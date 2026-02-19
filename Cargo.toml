@@ -7,6 +7,7 @@ edition = "2021"
 primal = "0.3"
 rayon = "1.10"
 crossterm = "0.28"
+mimalloc = { version = "0.1", default-features = false }
 
 [profile.release]
 opt-level = 3

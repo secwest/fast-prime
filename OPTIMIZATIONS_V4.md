@@ -500,18 +500,36 @@ increases but is overlapped with S2.
 
 ---
 
+## Optimization 19: mimalloc Global Allocator ✅
+
+**Insight**: Profiling revealed that per-chunk Vec allocation (768 chunks × 74KB each = 57MB)
+consumed nearly as much time as actual computation (129ms allocation vs 147ms work). Windows'
+default heap allocator is slow under multi-threaded contention.
+
+**Change**: Added `mimalloc` as global allocator. mimalloc is designed for high-throughput
+multi-threaded allocation with thread-local heaps that minimize lock contention.
+
+**Result**: Allocation overhead dropped from 129ms to ~15ms (8.6× faster allocation).
+Overall S2 parallel time improved from ~42ms to ~35-40ms.
+
+| Range       | Before  | After   | Change |
+|-------------|---------|---------|--------|
+| 1 Trillion  | 0.010s  | 0.010s  | same   |
+| 10 Trillion | 0.042s  | 0.040s  | -5%    |
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
-| 1 Billion   | 0.0012s  | 0.002s   | 1.7×           |
-| 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
+| 1 Billion   | 0.0009s  | 0.002s   | 2.2×           |
+| 10 Billion  | 0.001s   | 0.007s   | 7.0×           |
 | 100 Billion | 0.004s   | 0.034s   | **8.5×**       |
 | 1 Trillion  | 0.010s   | 0.168s   | **16.8×**      |
-| 10 Trillion | 0.042s   | 1.190s   | **28.3×**      |
+| 10 Trillion | 0.040s   | 1.190s   | **29.8×**      |
 
 ### Remaining Optimization Opportunities
 
-1. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
-2. **Position-group iteration**: Iterate easy leaves by floor(X/q) groups instead of individual primes
-3. **Thread count tuning**: Currently using all rayon threads; may benefit from P-core-only configuration
+1. **Max chunk bottleneck**: Heaviest chunk takes ~23ms, limiting parallel S2 to ~35ms wall time
+2. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
+3. **Position-group iteration**: Iterate easy leaves by floor(X/q) groups instead of individual primes
+4. **Thread count tuning**: Currently using all rayon threads; may benefit from P-core-only configuration

@@ -27,11 +27,11 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 │ Range       │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ Primes Found     │
 │             │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │                  │
 ├─────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────────┤
-│ 1 Billion   │    0.00600s  │    0.00200s  │    0.00200s  │    0.00120s  │       50,847,534 │
-│ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │      455,052,511 │
+│ 1 Billion   │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │       50,847,534 │
+│ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00100s  │      455,052,511 │
 │ 100 Billion │    0.72087s  │    0.03500s  │    0.03400s  │    0.00360s  │    4,118,054,813 │
 │ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.01000s  │   37,607,912,018 │
-│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.04200s  │  346,065,536,839 │
+│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.04000s  │  346,065,536,839 │
 └─────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────────┘
 ```
 
@@ -39,17 +39,17 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 
 | Range | V1 (24 threads) | V4 (parallel) | V4 Speedup |
 |---|---|---|---|
-| 1 Billion | 0.006s | 0.0012s | **5.0×** |
-| 10 Billion | 0.066s | 0.002s | **33.0×** |
+| 1 Billion | 0.006s | 0.0009s | **6.7×** |
+| 10 Billion | 0.066s | 0.001s | **66.0×** |
 | 100 Billion | 0.721s | 0.004s | **180.3×** |
 | 1 Trillion | 8.640s | 0.010s | **864.0×** |
-| 10 Trillion | 127.13s | 0.042s | **3026.9×** |
+| 10 Trillion | 127.13s | 0.040s | **3178.3×** |
 ### Comparison vs Strix Halo Reference
 
 | Range | V4 (Ultra 9 285K) | Strix Halo Reference | Speedup |
 |---|---|---|---|
-| 1 Billion | 0.0012s | 0.011s | **9.2×** |
-| 10 Billion | 0.002s | 0.109s | **54.5×** |
+| 1 Billion | 0.0009s | 0.011s | **12.2×** |
+| 10 Billion | 0.001s | 0.109s | **109.0×** |
 | 100 Billion | 0.004s | 1.483s | **370.8×** |
 | 1 Trillion | 0.010s | 25.820s | **2582.0×** |
 
@@ -103,6 +103,7 @@ See [OPTIMIZATIONS_V4.md](OPTIMIZATIONS_V4.md) for the full optimization log.
 - **4× unrolled cross-off** — Reduces loop control overhead in the sieve cross-off inner loop (**7% speedup**).
 - **Barrett fast division** — Precomputed reciprocals for ~4600 primes (37KB, fits L1). Replaces 25-cycle hardware division with 12-cycle multiply-high in easy leaf loop (**8% speedup at 10T**).
 - **Deferred total update** — Cross-off loop accumulates delta locally, breaking the serial dependency on `sieve.total`. Combined with raw pointer access for zero-overhead sieve updates.
+- **mimalloc allocator** — Replaces Windows default heap with mimalloc for 8.6× faster multi-threaded allocation. Reduces parallel S2 allocation overhead from 129ms to ~15ms (**5% speedup at 10T**).
 
 ## Building
 

@@ -1,6 +1,10 @@
+use mimalloc::MiMalloc;
 use primal::Sieve;
 use rayon::prelude::*;
 use std::time::Instant;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 // ── Lagarias-Miller-Odlyzko prime counting ───────────────────────────────────
 //
