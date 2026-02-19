@@ -270,7 +270,9 @@ impl PreSieveTemplate {
     }
 }
 
-/// Compute S2 using segmented sieve (matches pi_lmo_parallel structure).
+/// Compute S2 using parallel segmented sieve with phi correction.
+/// Each thread processes a chunk of segments with local phi accumulators.
+/// Cross-segment phi dependency is resolved via a correction pass.
 fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
               lpf: &[i32], mu: &[i8], pi: &[u32]) -> i64 {
     let z = (x / y as u64) as usize;
@@ -278,30 +280,247 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
     let pi_sqrty = pi[std::cmp::min(sqrt_y, y)] as usize;
     let pi_y = pi[y] as usize;
 
-    // Segment size: larger segments reduce per-segment overhead (init, start calc)
-    // 1<<17 = 128K bits = 16KB, fits comfortably in L1 cache (48KB)
     let segment_size = std::cmp::max(isqrt(z as u64) as usize, 1 << 17).next_power_of_two();
 
-    // Pre-sieve template for first c primes
     let template = PreSieveTemplate::new(primes, std::cmp::min(c, primes.len() - 1));
 
-    // Barrett reciprocal table for primes (for fast division in easy leaf loop)
-    // Only ~4600 entries at 10T = 37KB, fits L1 cache
+    // Barrett reciprocal table for fast division in easy leaf loop
     let prime_recip: Vec<u64> = primes.iter().map(|&p| {
         if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
     }).collect();
 
-    // Branchless Barrett: floor(n/d) = mulhi(n, recip) + correction
     #[inline(always)]
     fn fast_div(n: u64, d: u64, recip_d: u64) -> u64 {
         let q = ((n as u128 * recip_d as u128) >> 64) as u64;
         q + (n - q.wrapping_mul(d) >= d) as u64
     }
 
-    // phi[b] accumulates φ(low, b-1) across segments
+    let num_segments = if z == 0 { 1 } else { (z / segment_size) + 1 };
+
+    // For small problems, use serial path
+    if num_segments <= 2 {
+        return compute_s2_serial(x, y, c, primes, lpf, mu, pi, z, pi_sqrty, pi_y,
+                                 segment_size, &template, &prime_recip, fast_div);
+    }
+
+    let nprimes = primes.len();
+    let nthreads = std::cmp::min(rayon::current_num_threads(), num_segments);
+
+    // Each thread returns (s2_local, phi_totals, coefficients)
+    let results: Vec<(i64, Vec<i64>, Vec<i64>)> = (0..nthreads).into_par_iter().map(|tid| {
+        let seg_start = tid * num_segments / nthreads;
+        let seg_end = (tid + 1) * num_segments / nthreads;
+
+        let mut sieve = BitSieve::new(segment_size);
+        let mut phi = vec![0i64; nprimes];
+        let mut s2_local = 0i64;
+        let mut coeff = vec![0i64; nprimes]; // phi[b] correction coefficient
+
+        for seg_idx in seg_start..seg_end {
+            let low = seg_idx * segment_size;
+            if low > z { break; }
+            let high = std::cmp::min(low + segment_size, z + 1);
+            let seg_len = high - low;
+            let low1 = std::cmp::max(low, 1);
+
+            template.init_sieve(&mut sieve, low, seg_len);
+
+            let max_b = if low1 > 0 {
+                pi[std::cmp::min(isqrt(x / low1 as u64) as usize, y)] as usize
+            } else { pi_y };
+            let max_b = std::cmp::min(max_b, pi_y - 1);
+
+            let mut b = c + 1;
+
+            // Hard special leaves
+            while b <= std::cmp::min(pi_sqrty, max_b) && b < nprimes {
+                let prime = primes[b] as u64;
+                let x_div_prime = x / prime;
+                let min_m = std::cmp::max(
+                    x_div_prime / high as u64, y as u64 / prime
+                ) as usize;
+                let max_m = std::cmp::min(
+                    x_div_prime / low1 as u64, y as u64
+                ) as usize;
+
+                if prime as usize >= max_m { break; }
+
+                let mut prev_pos: Option<usize> = None;
+                let mut running_count: i64 = 0;
+                for m in (min_m + 1..=max_m).rev() {
+                    if mu[m] != 0 && (prime as i32) < lpf[m] {
+                        let xpm = (x_div_prime / m as u64) as usize;
+                        if xpm >= low && xpm < high {
+                            let pos = xpm - low;
+                            let count = match prev_pos {
+                                None => {
+                                    running_count = sieve.count(pos);
+                                    running_count
+                                }
+                                Some(pp) => {
+                                    running_count += sieve.count_delta(pp, pos);
+                                    running_count
+                                }
+                            };
+                            s2_local -= mu[m] as i64 * (phi[b] + count);
+                            coeff[b] -= mu[m] as i64;
+                            prev_pos = Some(pos);
+                        }
+                    }
+                }
+
+                phi[b] += sieve.count_total();
+                let p = prime as usize;
+                // Compute starting position from scratch
+                let first_mul = ((std::cmp::max(low, p) + p - 1) / p) * p;
+                let start = if first_mul >= high { seg_len } else { first_mul - low };
+                let mut k = start;
+                let bits = sieve.bits.as_mut_ptr();
+                let mut delta = 0i64;
+                while k + p * 3 < seg_len {
+                    unsafe {
+                        let w0 = k >> 6; let b0 = k & 63;
+                        let old0 = *bits.add(w0);
+                        delta += ((old0 >> b0) & 1) as i64;
+                        *bits.add(w0) = old0 & !(1u64 << b0);
+                        let k1 = k + p; let w1 = k1 >> 6; let b1 = k1 & 63;
+                        let old1 = *bits.add(w1);
+                        delta += ((old1 >> b1) & 1) as i64;
+                        *bits.add(w1) = old1 & !(1u64 << b1);
+                        let k2 = k + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
+                        let old2 = *bits.add(w2);
+                        delta += ((old2 >> b2) & 1) as i64;
+                        *bits.add(w2) = old2 & !(1u64 << b2);
+                        let k3 = k + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
+                        let old3 = *bits.add(w3);
+                        delta += ((old3 >> b3) & 1) as i64;
+                        *bits.add(w3) = old3 & !(1u64 << b3);
+                    }
+                    k += p * 4;
+                }
+                while k < seg_len {
+                    unsafe {
+                        let w = k >> 6; let bk = k & 63;
+                        let old = *bits.add(w);
+                        delta += ((old >> bk) & 1) as i64;
+                        *bits.add(w) = old & !(1u64 << bk);
+                    }
+                    k += p;
+                }
+                sieve.total -= delta;
+                b += 1;
+            }
+
+            // Easy special leaves
+            while b <= max_b && b < nprimes {
+                let prime = primes[b] as u64;
+                let x_div_prime = x / prime;
+                let l_max = std::cmp::min(
+                    (x_div_prime / low1 as u64) as usize, y
+                );
+                let mut l = pi[std::cmp::min(l_max, y)] as usize;
+                let min_m = std::cmp::max(
+                    (x_div_prime / high as u64) as usize, prime as usize
+                );
+
+                if l < nprimes && prime as usize >= primes[l] as usize { break; }
+
+                let mut prev_pos: Option<usize> = None;
+                let mut running_count: i64 = 0;
+                while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
+                    let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
+                    if xpq >= low && xpq < high {
+                        let pos = xpq - low;
+                        let count = match prev_pos {
+                            Some(pp) if pos == pp => running_count,
+                            Some(pp) if pos > pp => {
+                                running_count += sieve.count_delta(pp, pos);
+                                running_count
+                            }
+                            _ => {
+                                running_count = sieve.count(pos);
+                                running_count
+                            }
+                        };
+                        s2_local += phi[b] + count;
+                        coeff[b] += 1;
+                        prev_pos = Some(pos);
+                    }
+                    l -= 1;
+                }
+
+                phi[b] += sieve.count_total();
+                let p = prime as usize;
+                let first_mul = ((std::cmp::max(low, p) + p - 1) / p) * p;
+                let start = if first_mul >= high { seg_len } else { first_mul - low };
+                let mut k = start;
+                let bits = sieve.bits.as_mut_ptr();
+                let mut delta = 0i64;
+                while k + p * 3 < seg_len {
+                    unsafe {
+                        let w0 = k >> 6; let b0 = k & 63;
+                        let old0 = *bits.add(w0);
+                        delta += ((old0 >> b0) & 1) as i64;
+                        *bits.add(w0) = old0 & !(1u64 << b0);
+                        let k1 = k + p; let w1 = k1 >> 6; let b1 = k1 & 63;
+                        let old1 = *bits.add(w1);
+                        delta += ((old1 >> b1) & 1) as i64;
+                        *bits.add(w1) = old1 & !(1u64 << b1);
+                        let k2 = k + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
+                        let old2 = *bits.add(w2);
+                        delta += ((old2 >> b2) & 1) as i64;
+                        *bits.add(w2) = old2 & !(1u64 << b2);
+                        let k3 = k + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
+                        let old3 = *bits.add(w3);
+                        delta += ((old3 >> b3) & 1) as i64;
+                        *bits.add(w3) = old3 & !(1u64 << b3);
+                    }
+                    k += p * 4;
+                }
+                while k < seg_len {
+                    unsafe {
+                        let w = k >> 6; let bk = k & 63;
+                        let old = *bits.add(w);
+                        delta += ((old >> bk) & 1) as i64;
+                        *bits.add(w) = old & !(1u64 << bk);
+                    }
+                    k += p;
+                }
+                sieve.total -= delta;
+                b += 1;
+            }
+        }
+
+        (s2_local, phi, coeff)
+    }).collect();
+
+    // Correction pass: fix phi[b] offsets across thread boundaries
+    let mut s2 = results[0].0;
+    let mut prefix_phi = results[0].1.clone();
+
+    for k in 1..results.len() {
+        let (s2_local, ref phi_total, ref coeff) = results[k];
+        // Correction = Σ_b prefix_phi[b] * coeff[b]
+        let correction: i64 = prefix_phi.iter().zip(coeff.iter())
+            .map(|(&p, &c)| p * c).sum();
+        s2 += s2_local + correction;
+        for b in 0..nprimes {
+            prefix_phi[b] += phi_total[b];
+        }
+    }
+
+    s2
+}
+
+/// Serial S2 fallback for small inputs.
+fn compute_s2_serial(x: u64, y: usize, c: usize, primes: &[u32],
+                     lpf: &[i32], mu: &[i8], pi: &[u32],
+                     z: usize, pi_sqrty: usize, pi_y: usize,
+                     segment_size: usize, template: &PreSieveTemplate,
+                     prime_recip: &[u64],
+                     fast_div: fn(u64, u64, u64) -> u64) -> i64 {
     let mut phi: Vec<i64> = vec![0i64; primes.len()];
     let mut next: Vec<usize> = (0..primes.len()).map(|b| primes[b] as usize).collect();
-
     let mut sieve = BitSieve::new(segment_size);
     let mut s2: i64 = 0;
     let mut low: usize = 0;
@@ -311,10 +530,8 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
         let seg_len = high - low;
         let low1 = std::cmp::max(low, 1);
 
-        // Combined reset + template apply + position 0 handling
         template.init_sieve(&mut sieve, low, seg_len);
 
-        // Determine which b values have special leaves in this segment
         let max_b = if low1 > 0 {
             pi[std::cmp::min(isqrt(x / low1 as u64) as usize, y)] as usize
         } else { pi_y };
@@ -322,22 +539,18 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
 
         let mut b = c + 1;
 
-        // Hard special leaves: c+1 ≤ b ≤ π(√y)
         while b <= std::cmp::min(pi_sqrty, max_b) && b < primes.len() {
             let prime = primes[b] as u64;
             let x_div_prime = x / prime;
             let min_m = std::cmp::max(
-                x_div_prime / high as u64,
-                y as u64 / prime
+                x_div_prime / high as u64, y as u64 / prime
             ) as usize;
             let max_m = std::cmp::min(
-                x_div_prime / low1 as u64,
-                y as u64
+                x_div_prime / low1 as u64, y as u64
             ) as usize;
 
             if prime as usize >= max_m { break; }
 
-            // Iterate m descending (xpm ascending) with incremental count
             let mut prev_pos: Option<usize> = None;
             let mut running_count: i64 = 0;
             for m in (min_m + 1..=max_m).rev() {
@@ -346,14 +559,8 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                     if xpm >= low && xpm < high {
                         let pos = xpm - low;
                         let count = match prev_pos {
-                            None => {
-                                running_count = sieve.count(pos);
-                                running_count
-                            }
-                            Some(pp) => {
-                                running_count += sieve.count_delta(pp, pos);
-                                running_count
-                            }
+                            None => { running_count = sieve.count(pos); running_count }
+                            Some(pp) => { running_count += sieve.count_delta(pp, pos); running_count }
                         };
                         s2 -= mu[m] as i64 * (phi[b] + count);
                         prev_pos = Some(pos);
@@ -376,17 +583,14 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                     let old0 = *bits.add(w0);
                     delta += ((old0 >> b0) & 1) as i64;
                     *bits.add(w0) = old0 & !(1u64 << b0);
-
                     let k1 = k + p; let w1 = k1 >> 6; let b1 = k1 & 63;
                     let old1 = *bits.add(w1);
                     delta += ((old1 >> b1) & 1) as i64;
                     *bits.add(w1) = old1 & !(1u64 << b1);
-
                     let k2 = k + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
                     let old2 = *bits.add(w2);
                     delta += ((old2 >> b2) & 1) as i64;
                     *bits.add(w2) = old2 & !(1u64 << b2);
-
                     let k3 = k + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
                     let old3 = *bits.add(w3);
                     delta += ((old3 >> b3) & 1) as i64;
@@ -396,10 +600,10 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             }
             while k < seg_len {
                 unsafe {
-                    let w = k >> 6; let b = k & 63;
+                    let w = k >> 6; let bk = k & 63;
                     let old = *bits.add(w);
-                    delta += ((old >> b) & 1) as i64;
-                    *bits.add(w) = old & !(1u64 << b);
+                    delta += ((old >> bk) & 1) as i64;
+                    *bits.add(w) = old & !(1u64 << bk);
                 }
                 k += p;
             }
@@ -408,23 +612,19 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             b += 1;
         }
 
-        // Easy special leaves: π(√y) < b ≤ max_b (two-prime products)
         while b <= max_b && b < primes.len() {
             let prime = primes[b] as u64;
             let x_div_prime = x / prime;
             let l_max = std::cmp::min(
-                (x_div_prime / low1 as u64) as usize,
-                y
+                (x_div_prime / low1 as u64) as usize, y
             );
             let mut l = pi[std::cmp::min(l_max, y)] as usize;
             let min_m = std::cmp::max(
-                (x_div_prime / high as u64) as usize,
-                prime as usize
+                (x_div_prime / high as u64) as usize, prime as usize
             );
 
             if l < primes.len() && prime as usize >= primes[l] as usize { break; }
 
-            // q = primes[l] decreases => xpq increases => positions are ascending
             let mut prev_pos: Option<usize> = None;
             let mut running_count: i64 = 0;
             while l > 0 && l < primes.len() && (primes[l] as usize) > min_m {
@@ -437,10 +637,7 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                             running_count += sieve.count_delta(pp, pos);
                             running_count
                         }
-                        _ => {
-                            running_count = sieve.count(pos);
-                            running_count
-                        }
+                        _ => { running_count = sieve.count(pos); running_count }
                     };
                     s2 += phi[b] + count;
                     prev_pos = Some(pos);
@@ -463,17 +660,14 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                     let old0 = *bits.add(w0);
                     delta += ((old0 >> b0) & 1) as i64;
                     *bits.add(w0) = old0 & !(1u64 << b0);
-
                     let k1 = k + p; let w1 = k1 >> 6; let b1 = k1 & 63;
                     let old1 = *bits.add(w1);
                     delta += ((old1 >> b1) & 1) as i64;
                     *bits.add(w1) = old1 & !(1u64 << b1);
-
                     let k2 = k + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
                     let old2 = *bits.add(w2);
                     delta += ((old2 >> b2) & 1) as i64;
                     *bits.add(w2) = old2 & !(1u64 << b2);
-
                     let k3 = k + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
                     let old3 = *bits.add(w3);
                     delta += ((old3 >> b3) & 1) as i64;
@@ -483,10 +677,10 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
             }
             while k < seg_len {
                 unsafe {
-                    let w = k >> 6; let b = k & 63;
+                    let w = k >> 6; let bk = k & 63;
                     let old = *bits.add(w);
-                    delta += ((old >> b) & 1) as i64;
-                    *bits.add(w) = old & !(1u64 << b);
+                    delta += ((old >> bk) & 1) as i64;
+                    *bits.add(w) = old & !(1u64 << bk);
                 }
                 k += p;
             }

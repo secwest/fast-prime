@@ -18,41 +18,40 @@ Extension of V2: sieve primes only up to N^{1/3} (not N^{1/2}), then compute the
 
 ### V4 — Lagarias-Miller-Odlyzko (`src/bin/prime_count_v4.rs`)
 
-Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Concurrent S2+P2, parallel P2 lookups via rayon. Currently the fastest implementation, beating V3 by 10.9× at 10T.
+Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Parallel S2 via delta-phi correction, concurrent P2 via rayon. Currently the fastest implementation, beating V3 by 19.2× at 10T.
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
 ```
 ┌─────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────────┐
 │ Range       │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ Primes Found     │
-│             │ (24 threads) │ (1 thread)   │ (1 thread)   │ (1 thread)   │                  │
+│             │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │                  │
 ├─────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────────┤
-│ 1 Billion   │    0.00600s  │    0.00200s  │    0.00200s  │    0.00100s  │       50,847,534 │
-│ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00220s  │      455,052,511 │
-│ 100 Billion │    0.72087s  │    0.03500s  │    0.03400s  │    0.00670s  │    4,118,054,813 │
-│ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.02600s  │   37,607,912,018 │
-│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.10900s  │  346,065,536,839 │
+│ 1 Billion   │    0.00600s  │    0.00200s  │    0.00200s  │    0.00120s  │       50,847,534 │
+│ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │      455,052,511 │
+│ 100 Billion │    0.72087s  │    0.03500s  │    0.03400s  │    0.00400s  │    4,118,054,813 │
+│ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.01500s  │   37,607,912,018 │
+│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.06200s  │  346,065,536,839 │
 └─────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────────┘
 ```
 
 ### Best (V4) vs V1 Speedup
 
-| Range | V1 (24 threads) | V4 (1 thread) | V4 Speedup |
+| Range | V1 (24 threads) | V4 (parallel) | V4 Speedup |
 |---|---|---|---|
-| 1 Billion | 0.006s | 0.0010s | **6.0×** |
+| 1 Billion | 0.006s | 0.0012s | **5.0×** |
 | 10 Billion | 0.066s | 0.002s | **33.0×** |
-| 100 Billion | 0.721s | 0.007s | **103.0×** |
-| 1 Trillion | 8.640s | 0.026s | **332.3×** |
-| 10 Trillion | 127.13s | 0.109s | **1166.3×** |
-
+| 100 Billion | 0.721s | 0.004s | **180.3×** |
+| 1 Trillion | 8.640s | 0.015s | **576.0×** |
+| 10 Trillion | 127.13s | 0.062s | **2050.5×** |
 ### Comparison vs Strix Halo Reference
 
 | Range | V4 (Ultra 9 285K) | Strix Halo Reference | Speedup |
 |---|---|---|---|
-| 1 Billion | 0.0010s | 0.011s | **11.0×** |
+| 1 Billion | 0.0012s | 0.011s | **9.2×** |
 | 10 Billion | 0.002s | 0.109s | **54.5×** |
-| 100 Billion | 0.007s | 1.483s | **211.9×** |
-| 1 Trillion | 0.026s | 25.820s | **993.1×** |
+| 100 Billion | 0.004s | 1.483s | **370.8×** |
+| 1 Trillion | 0.015s | 25.820s | **1721.3×** |
 
 ## Key Optimizations
 
@@ -95,6 +94,7 @@ See [OPTIMIZATIONS_V4.md](OPTIMIZATIONS_V4.md) for the full optimization log.
 - **Monotonic max_b optimization** — Since max_b decreases across segments, primes beyond max_b are never processed in later segments. This eliminates O(π(y)) redundant work per segment (**2-3× speedup**).
 - **Alpha tuning** — y = x^{1/3} · 2.0 shifts work from expensive S2 to cheaper P2/S1.
 - **Concurrent S2+P2** — P2 runs in a background thread overlapping with S2 via `thread::scope`. Makes P2 essentially free (**18% speedup**).
+- **Parallel S2 via delta-phi correction** — Segments split across threads, each tracking local phi + correction coefficients. True phi reconstructed via prefix-sum after join. Exact correction, no approximation (**1.8× speedup**).
 - **Pre-sieve template** — 30030-bit precomputed pattern for primes 2,3,5,7,11,13 applied via word-aligned AND, replacing 6 individual cross-off loops (**1.9× speedup**).
 - **Parallel P2** — P2 computation parallelized via rayon. Each π(x/p) lookup is independent (**18% speedup**).
 - **Incremental count** — Positions in special leaf loops are monotonically increasing. `count_delta(prev, pos)` scans only the gap between consecutive positions instead of from 0 each time (**20% speedup at 10T**).
@@ -121,7 +121,7 @@ cargo build --release
 # Run V3 (Meissel-Lehmer, single-threaded)
 ./target/release/prime_count_v3
 
-# Run V4 (LMO, single-threaded — fastest)
+# Run V4 (LMO, parallel S2 — fastest)
 ./target/release/prime_count_v4
 ```
 

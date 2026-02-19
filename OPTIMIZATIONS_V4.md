@@ -420,18 +420,50 @@ Marginal improvement from breaking the total dependency chain.
 
 ---
 
+## Optimization 16: Parallel S2 via Delta-Phi Correction ✅ (MASSIVE WIN)
+
+**Hypothesis**: S2 is the dominant bottleneck (75ms of 110ms at 10T). The segment loop
+is sequential because `phi[b]` accumulates across segments. By splitting segments across
+threads and correcting the phi offsets afterwards, we can parallelize S2.
+
+**Technique**: Each thread processes a contiguous chunk of segments with local `phi[b]`
+starting at 0. Additionally, each thread tracks a "coefficient" per prime b:
+- For hard leaves: `coeff[b] -= mu[m]` for each leaf
+- For easy leaves: `coeff[b] += 1` for each leaf
+
+After all threads finish, the true phi at each thread's start is the prefix sum of
+phi contributions from earlier threads. The correction for thread k is:
+`Σ_b prefix_phi[b] × coeff[b]`
+
+This is exact — no approximation. O(num_primes × num_threads) correction work.
+
+**Implementation details**:
+- Cross-off starting positions computed from scratch per segment (no `next[b]` state)
+- Serial fallback for small inputs (≤2 segments)
+- All rayon threads utilized for both S2 and P2 concurrently
+
+**Result**:
+
+| Range       | Before   | After    | Speedup |
+|-------------|----------|----------|---------|
+| 100 Billion | 0.007s   | 0.004s   | **1.8×** |
+| 1 Trillion  | 0.026s   | 0.015s   | **1.7×** |
+| 10 Trillion | 0.109s   | 0.062s   | **1.8×** |
+
+---
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
-| 1 Billion   | 0.0010s  | 0.002s   | 2.0×           |
+| 1 Billion   | 0.0012s  | 0.002s   | 1.7×           |
 | 10 Billion  | 0.002s   | 0.007s   | 3.5×           |
-| 100 Billion | 0.007s   | 0.034s   | **4.9×**       |
-| 1 Trillion  | 0.026s   | 0.168s   | **6.5×**       |
-| 10 Trillion | 0.109s   | 1.190s   | **10.9×**      |
+| 100 Billion | 0.004s   | 0.034s   | **8.5×**       |
+| 1 Trillion  | 0.015s   | 0.168s   | **11.2×**      |
+| 10 Trillion | 0.062s   | 1.190s   | **19.2×**      |
 
 ### Remaining Optimization Opportunities
 
-1. **Parallel S2 segments**: Split segment range across threads (complex phi precomputation)
-2. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
-3. **Position-group iteration**: Iterate easy leaves by floor(X/q) groups instead of individual primes
+1. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
+2. **Position-group iteration**: Iterate easy leaves by floor(X/q) groups instead of individual primes
+3. **Thread count tuning**: Currently using all rayon threads; may benefit from P-core-only configuration
