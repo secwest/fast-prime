@@ -148,6 +148,21 @@ throughput — 4 independent multiplies keep the pipeline full).
 
 ---
 
+## Optimization #10: Small Update 4× Unroll
+
+Unroll the small[] reverse update loop by 4. The Barrett multiply (u64 × u64 >> 40)
+has 3-cycle latency — unrolling exposes 4 independent multiply chains for the CPU
+to pipeline. Also unroll the p=2 shift path. Dramatic improvement because the small
+update loop is 24% of total runtime.
+
+| Range | Before | After | Speedup |
+|---|---|---|---|
+| 100 Billion | 0.043s | 0.035s | 19% |
+| 1 Trillion | 0.212s | 0.185s | **13%** |
+| 10 Trillion | 1.37s | 1.24s | **10%** |
+
+---
+
 ## Failed Attempts
 
 - **Skip delta==0 blocks in branch 2**: Extra branch misprediction outweighed savings.
@@ -168,7 +183,7 @@ throughput — 4 independent multiplies keep the pipeline full).
 | Range | Time | vs Sieve V1 (24 threads) |
 |---|---|---|
 | 1 Billion | 0.002s | 3.0× faster |
-| 10 Billion | 0.010s | 6.6× faster |
-| 100 Billion | 0.043s | 16.8× faster |
-| 1 Trillion | 0.212s | **40.8× faster** |
-| 10 Trillion | 1.37s | **92.8× faster** |
+| 10 Billion | 0.009s | 7.3× faster |
+| 100 Billion | 0.035s | 20.6× faster |
+| 1 Trillion | 0.185s | **46.7× faster** |
+| 10 Trillion | 1.24s | **102.5× faster** |

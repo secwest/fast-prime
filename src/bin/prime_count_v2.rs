@@ -178,21 +178,45 @@ fn count_primes(n: u64) -> u64 {
             }
         }
 
-        // Update small values (reverse order)
+        // Update small values (reverse order, 4× unroll)
         if p * p <= v {
             let pcnt32 = pcnt as i32;
             if p == 2 {
                 unsafe {
-                    for j in (4..=v).rev() {
+                    let mut j = v;
+                    while j >= 7 {
                         *small.get_unchecked_mut(j) -= *small.get_unchecked(j >> 1) - pcnt32;
+                        *small.get_unchecked_mut(j-1) -= *small.get_unchecked((j-1) >> 1) - pcnt32;
+                        *small.get_unchecked_mut(j-2) -= *small.get_unchecked((j-2) >> 1) - pcnt32;
+                        *small.get_unchecked_mut(j-3) -= *small.get_unchecked((j-3) >> 1) - pcnt32;
+                        j -= 4;
+                    }
+                    while j >= 4 {
+                        *small.get_unchecked_mut(j) -= *small.get_unchecked(j >> 1) - pcnt32;
+                        j -= 1;
                     }
                 }
             } else {
                 let recip_p = ((1u64 << 40) + p as u64 - 1) / p as u64;
                 unsafe {
-                    for j in (p * p..=v).rev() {
+                    let pp = p * p;
+                    let mut j = v;
+                    let end4 = pp + 3;
+                    while j >= end4 {
+                        let q0 = ((j as u64 * recip_p) >> 40) as usize;
+                        let q1 = (((j-1) as u64 * recip_p) >> 40) as usize;
+                        let q2 = (((j-2) as u64 * recip_p) >> 40) as usize;
+                        let q3 = (((j-3) as u64 * recip_p) >> 40) as usize;
+                        *small.get_unchecked_mut(j) -= *small.get_unchecked(q0) - pcnt32;
+                        *small.get_unchecked_mut(j-1) -= *small.get_unchecked(q1) - pcnt32;
+                        *small.get_unchecked_mut(j-2) -= *small.get_unchecked(q2) - pcnt32;
+                        *small.get_unchecked_mut(j-3) -= *small.get_unchecked(q3) - pcnt32;
+                        j -= 4;
+                    }
+                    while j >= pp {
                         let q = ((j as u64 * recip_p) >> 40) as usize;
                         *small.get_unchecked_mut(j) -= *small.get_unchecked(q) - pcnt32;
+                        j -= 1;
                     }
                 }
             }
