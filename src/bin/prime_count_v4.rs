@@ -162,8 +162,26 @@ impl ParallelPiSieve {
                     let first_bit = (first_num - 1) / 2;
                     if first_bit >= bit_start + chunk_len * 64 { continue; }
                     let mut idx = if first_bit >= bit_start { first_bit - bit_start } else { continue };
-                    while idx < chunk_len * 64 {
-                        chunk[idx / 64] &= !(1u64 << (idx % 64));
+                    let chunk_bits = chunk_len * 64;
+                    let ptr = chunk.as_mut_ptr();
+                    while idx + p * 3 < chunk_bits {
+                        unsafe {
+                            let w0 = idx >> 6; let b0 = idx & 63;
+                            *ptr.add(w0) &= !(1u64 << b0);
+                            let i1 = idx + p; let w1 = i1 >> 6; let b1 = i1 & 63;
+                            *ptr.add(w1) &= !(1u64 << b1);
+                            let i2 = idx + p * 2; let w2 = i2 >> 6; let b2 = i2 & 63;
+                            *ptr.add(w2) &= !(1u64 << b2);
+                            let i3 = idx + p * 3; let w3 = i3 >> 6; let b3 = i3 & 63;
+                            *ptr.add(w3) &= !(1u64 << b3);
+                        }
+                        idx += p * 4;
+                    }
+                    while idx < chunk_bits {
+                        unsafe {
+                            let w = idx >> 6; let b = idx & 63;
+                            *ptr.add(w) &= !(1u64 << b);
+                        }
                         idx += p;
                     }
                 }
