@@ -27,11 +27,11 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 │ Range       │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ Primes Found     │
 │             │ (24 threads) │ (1 thread)   │ (1 thread)   │ (1 thread)   │                  │
 ├─────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────────┤
-│ 1 Billion   │    0.00600s  │    0.00200s  │    0.00200s  │    0.00150s  │       50,847,534 │
-│ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00550s  │      455,052,511 │
-│ 100 Billion │    0.72087s  │    0.03500s  │    0.03400s  │    0.02000s  │    4,118,054,813 │
-│ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.08400s  │   37,607,912,018 │
-│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.37000s  │  346,065,536,839 │
+│ 1 Billion   │    0.00600s  │    0.00200s  │    0.00200s  │    0.00120s  │       50,847,534 │
+│ 10 Billion  │    0.06570s  │    0.00900s  │    0.00700s  │    0.00510s  │      455,052,511 │
+│ 100 Billion │    0.72087s  │    0.03500s  │    0.03400s  │    0.01900s  │    4,118,054,813 │
+│ 1 Trillion  │    8.64000s  │    0.17600s  │    0.16800s  │    0.07800s  │   37,607,912,018 │
+│ 10 Trillion │  127.13000s  │    1.23000s  │    1.19000s  │    0.34000s  │  346,065,536,839 │
 └─────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────────┘
 ```
 
@@ -39,20 +39,20 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 
 | Range | V1 (24 threads) | V4 (1 thread) | V4 Speedup |
 |---|---|---|---|
-| 1 Billion | 0.006s | 0.0015s | **4.0×** |
-| 10 Billion | 0.066s | 0.006s | **11.0×** |
-| 100 Billion | 0.721s | 0.020s | **36.1×** |
-| 1 Trillion | 8.640s | 0.084s | **102.9×** |
-| 10 Trillion | 127.13s | 0.370s | **343.6×** |
+| 1 Billion | 0.006s | 0.0012s | **5.0×** |
+| 10 Billion | 0.066s | 0.005s | **13.2×** |
+| 100 Billion | 0.721s | 0.019s | **37.9×** |
+| 1 Trillion | 8.640s | 0.078s | **110.8×** |
+| 10 Trillion | 127.13s | 0.340s | **373.9×** |
 
 ### Comparison vs Strix Halo Reference
 
 | Range | V4 (Ultra 9 285K) | Strix Halo Reference | Speedup |
 |---|---|---|---|
-| 1 Billion | 0.0015s | 0.011s | **7.3×** |
-| 10 Billion | 0.006s | 0.109s | **18.2×** |
-| 100 Billion | 0.020s | 1.483s | **74.2×** |
-| 1 Trillion | 0.084s | 25.820s | **307.4×** |
+| 1 Billion | 0.0012s | 0.011s | **9.2×** |
+| 10 Billion | 0.005s | 0.109s | **21.8×** |
+| 100 Billion | 0.019s | 1.483s | **78.1×** |
+| 1 Trillion | 0.078s | 25.820s | **331.0×** |
 
 ## Key Optimizations
 

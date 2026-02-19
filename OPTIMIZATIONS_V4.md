@@ -215,19 +215,41 @@ to mu[] and lpf[] arrays is more cache-friendly.
 
 ---
 
+## Optimization 6: Re-tune Alpha to 2.5 ✅
+
+**Hypothesis**: With P2 now parallelized, higher α values (larger y) are more
+attractive because the increased P2 cost is absorbed by multiple threads.
+
+**Results** (with all optimizations):
+
+| Alpha | 1T Time | 10T Time |
+|-------|---------|----------|
+| 2.0   | 0.084s  | 0.370s   |
+| 2.5   | 0.078s  | 0.340s   |
+| 2.75  | 0.081s  | 0.338s   |
+| 3.0   | 0.082s  | 0.343s   |
+| 3.25  | 0.080s  | 0.340s   |
+| 4.0   | 0.091s  | 0.388s   |
+
+α = 2.5 is optimal for 1T; α = 2.5-3.0 is flat for 10T. Choosing α = 2.5.
+
+**Adopted**: α = 2.5
+
+---
+
 ## Current Best Performance
 
 | Range       | V4 Time  | V3 Time  | Speedup vs V3 |
 |-------------|----------|----------|----------------|
-| 1 Billion   | 0.0015s  | 0.002s   | 1.3×           |
-| 10 Billion  | 0.006s   | 0.007s   | 1.2×           |
-| 100 Billion | 0.020s   | 0.034s   | 1.7×           |
-| 1 Trillion  | 0.084s   | 0.168s   | **2.0×**       |
-| 10 Trillion | 0.370s   | 1.190s   | **3.2×**       |
+| 1 Billion   | 0.0012s  | 0.002s   | 1.7×           |
+| 10 Billion  | 0.005s   | 0.007s   | 1.4×           |
+| 100 Billion | 0.019s   | 0.034s   | 1.8×           |
+| 1 Trillion  | 0.078s   | 0.168s   | **2.2×**       |
+| 10 Trillion | 0.340s   | 1.190s   | **3.5×**       |
 
 ### Remaining Optimization Opportunities
 
 1. **Parallel S2**: Split segments across rayon threads with phi_vector initialization
 2. **Wheel-30 sieve**: Skip multiples of 2/3/5 in the sieve (8 bits per 30 numbers)
-3. **Precompute valid m indices**: Skip composite m values in the inner loop
+3. **Batch sieve for cross-off**: Process multiple primes in combined passes
 4. **Batch cross_off_count**: Combined sieve+counter update for large segments
