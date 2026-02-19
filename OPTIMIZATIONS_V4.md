@@ -689,6 +689,52 @@ reduces total S2 work. At 1Q, even α=6.0 gives 3200+ segments — plenty for pa
 
 ---
 
+## Failed: P2 Pre-sieve Template ✗
+
+**Hypothesis**: Apply a 15015-period template (primes 3,5,7,11,13) to the P2 odd-number
+bitmap, skipping ~77% of small-prime cross-offs.
+
+**Result**: Wash. Template tiling overhead (get_word per word) cancels the cross-off
+savings. Sequential tiling was even worse due to memory bandwidth for large sieves (1.67B
+at 1Q). Parallel tiling per chunk was break-even.
+
+**Reverted**.
+
+---
+
+## Failed: Dedicated Rayon Thread Pools ✗
+
+**Hypothesis**: Give P2 and S2 separate rayon thread pools to eliminate work-stealing
+contention.
+
+**Result**: 40-85% WORSE. The shared global pool's work-stealing naturally balances load
+between P2 and S2. Separate pools prevent this, and pool creation adds ~1ms overhead.
+
+**Reverted**.
+
+---
+
+## Optimization 28: Skip Cross-off for Primes > √high ✅
+
+**Insight**: When prime p > √(segment_high), every composite multiple of p in the
+segment has already been cleared by a smaller prime. The only bit to clear is p itself
+(if it's in the segment). This replaces O(segment_size/p) cross-off iterations with
+a single O(1) bit check.
+
+**Proof**: For composite c = k·p in [low, high), k ≥ 2. Since c < high, we have
+c ≤ high-1. The smallest prime factor of c is ≤ √c ≤ √(high-1) < p. So this factor
+has already been crossed off.
+
+**Profiling** (1Q): At α=6.0, S2=797ms dominates. Components:
+- S2 chunk 0 (segments 0-2): ~49K primes per segment
+- Primes > √4M ≈ 2000: ~47K primes skip full cross-off loop
+- Savings: ~22.8M iterations/segment avoided for large primes
+
+**Result**: Marginal improvement at 100T scale (~3-7%); within noise at other scales.
+Kept for architectural correctness.
+
+---
+
 ## Current Best Performance
 
 | Range         | V4 Time  | V3 Time  | Speedup vs V3 |
@@ -698,13 +744,12 @@ reduces total S2 work. At 1Q, even α=6.0 gives 3200+ segments — plenty for pa
 | 100 Billion   | 0.003s   | 0.034s   | **11.3×**      |
 | 1 Trillion    | 0.006s   | 0.168s   | **28.0×**      |
 | 10 Trillion   | 0.022s   | 1.190s   | **54.1×**      |
-| 100 Trillion  | 0.099s   |    —     |       —        |
+| 100 Trillion  | 0.096s   |    —     |       —        |
 | 1 Quadrillion | 0.793s   |    —     |       —        |
 
 ### Remaining Optimization Opportunities
 
-1. **P2 pre-sieve template**: Apply pre-sieve (primes 2,3,5,7,11,13) to P2 bitmap
-2. **Extend pi-formula to more segments**: Currently only segment 0
-3. **Extended pre-sieve to prime 17**: Requires decoupling template c from PhiTiny c
-4. **Correction pass vectorization**: SIMD dot-product for the sequential correction loop
-5. **Dedicated rayon thread pools**: Separate pools for P2 and S2 to avoid contention
+1. **Extend pi-formula to more segments**: Build per-segment pi tables from frozen sieve state
+2. **Gourdon's algorithm**: O(x^{2/3} / log²x), fundamentally better complexity
+3. **SIMD correction pass**: AVX2 dot-product for the sequential correction loop
+4. **Bucket sieve**: Maintain prime-to-segment mapping to avoid per-segment startup cost
