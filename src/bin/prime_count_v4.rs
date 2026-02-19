@@ -458,23 +458,30 @@ fn compute_s2(x: u64, y: usize, c: usize, primes: &[u32],
                 if use_pi_formula && b > 1 && (primes[b - 1] as u64) * (primes[b - 1] as u64) >= high as u64 {
                     // Pi-formula fast path: phi(n, b-1) = 1 + max(pi(n) - (b-1), 0)
                     let bm1 = b as i64 - 1;
-                    // When xpq < primes[b-1], pi(xpq) < b-1, so phi = 1.
-                    // xpq < primes[b-1] ↔ primes[l] > x_div_prime / primes[b-1]
-                    let threshold_q = (x_div_prime / primes[b - 1] as u64) as usize;
-                    let l_phi1_bound = if threshold_q <= y {
-                        pi[threshold_q] as usize
-                    } else {
-                        pi_y // no phi=1 leaves
-                    };
-                    // Batch phi=1 leaves: l from current l down to max(l_phi1_bound, l_end) + 1
                     let l_end_bound = if min_m <= y { pi[min_m] as usize } else { pi_y };
-                    let l_batch_stop = std::cmp::max(l_phi1_bound, l_end_bound);
-                    if l > l_batch_stop && l_batch_stop > 0 {
-                        // All these leaves contribute phi=1, and are in [low, high)
-                        let batch = (l - l_batch_stop) as i64;
-                        s2_local += batch;
-                        coeff[b] += batch;
-                        l = l_batch_stop;
+
+                    // When p³ ≥ x, ALL easy leaves have xpq < p ≈ primes[b-1], so phi=1
+                    let p_cubed = (prime as u128) * (prime as u128) * (prime as u128);
+                    if p_cubed >= x as u128 {
+                        let total_leaves = if l > l_end_bound { (l - l_end_bound) as i64 } else { 0 };
+                        s2_local += total_leaves;
+                        coeff[b] += total_leaves;
+                        l = l_end_bound;
+                    } else {
+                        // Split into phi=1 batch and phi>1 individual lookups
+                        let threshold_q = (x_div_prime / primes[b - 1] as u64) as usize;
+                        let l_phi1_bound = if threshold_q <= y {
+                            pi[threshold_q] as usize
+                        } else {
+                            pi_y // no phi=1 leaves
+                        };
+                        let l_batch_stop = std::cmp::max(l_phi1_bound, l_end_bound);
+                        if l > l_batch_stop && l_batch_stop > 0 {
+                            let batch = (l - l_batch_stop) as i64;
+                            s2_local += batch;
+                            coeff[b] += batch;
+                            l = l_batch_stop;
+                        }
                     }
                     // Remaining leaves: pi lookup, bounds guaranteed for segment 0
                     while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
