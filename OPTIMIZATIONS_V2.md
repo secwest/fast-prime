@@ -134,6 +134,19 @@ increment per q-step is ≤ 2, making multiply+compare cheaper than division).
 
 ---
 
+## Optimization #9: Phase A 4× Unroll
+
+Unroll the Phase A loop by 4 to allow the CPU to pipeline independent u128
+reciprocal multiplies (MULQ has 3-cycle latency, 1-cycle throughput — 4
+independent multiplies keep the pipeline full).
+
+| Range | Before | After | Speedup |
+|---|---|---|---|
+| 1 Trillion | 0.232s | 0.231s | ~0.5% |
+| 10 Trillion | 1.48s | 1.45s | **2%** |
+
+---
+
 ## Failed Attempts
 
 - **Skip delta==0 blocks in branch 2**: Extra branch misprediction outweighed savings.
@@ -144,6 +157,8 @@ increment per q-step is ≤ 2, making multiply+compare cheaper than division).
 - **Magic number for p=3 small update**: Barrett already equivalent. No gain.
 - **Carry-forward last_j for ALL Phase B primes**: Too many increments per step for larger primes. 14% slower.
 - **Reciprocal table for setup divisions**: Only 2 divisions per prime; u128 overhead > savings.
+- **Uniform reciprocal table (remove p≤7 hybrid)**: Slightly worse — carry-forward helps small primes.
+- **Reverse Phase A iteration**: No cache benefit; hardware prefetcher already effective.
 
 ---
 
@@ -154,5 +169,5 @@ increment per q-step is ≤ 2, making multiply+compare cheaper than division).
 | 1 Billion | 0.002s | 3.0× faster |
 | 10 Billion | 0.010s | 6.6× faster |
 | 100 Billion | 0.048s | 15.0× faster |
-| 1 Trillion | 0.232s | **37.2× faster** |
-| 10 Trillion | 1.48s | **85.9× faster** |
+| 1 Trillion | 0.231s | **37.4× faster** |
+| 10 Trillion | 1.45s | **87.7× faster** |

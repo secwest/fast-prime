@@ -46,13 +46,14 @@ fn count_primes(n: u64) -> u64 {
 
     // Sieve: for each prime p, update S values
     let prime_sieve = Sieve::new(v);
-    for p in prime_sieve.primes_from(2) {
+    let primes: Vec<usize> = prime_sieve.primes_from(2)
+        .take_while(|&p| (p as u64) * (p as u64) <= n)
+        .collect();
+    for &p in &primes {
 
         let pcnt = small[p - 1] as i64;
-        let p2 = p as u64 * p as u64;
-        if p2 > n { break; }
 
-        let j_end = std::cmp::min(v, (n / p2) as usize);
+        let j_end = std::cmp::min(v, (n / (p as u64 * p as u64)) as usize);
         let crossover = v / p;
         let n_div_p = n / p as u64;
 
@@ -72,14 +73,28 @@ fn count_primes(n: u64) -> u64 {
             let phase_a_end = std::cmp::min(sqrt_x, j_end);
             if crossover < phase_a_end {
                 unsafe {
-                    for j in (crossover + 1)..=phase_a_end {
+                    let mut j = crossover + 1;
+                    let end4 = phase_a_end.saturating_sub(3);
+                    while j <= end4 {
+                        let q0 = ((n_div_p as u128 * *recip.get_unchecked(j) as u128) >> 64) as usize;
+                        let q1 = ((n_div_p as u128 * *recip.get_unchecked(j+1) as u128) >> 64) as usize;
+                        let q2 = ((n_div_p as u128 * *recip.get_unchecked(j+2) as u128) >> 64) as usize;
+                        let q3 = ((n_div_p as u128 * *recip.get_unchecked(j+3) as u128) >> 64) as usize;
+                        *large.get_unchecked_mut(j) -= *small.get_unchecked(q0) as i64 - pcnt;
+                        *large.get_unchecked_mut(j+1) -= *small.get_unchecked(q1) as i64 - pcnt;
+                        *large.get_unchecked_mut(j+2) -= *small.get_unchecked(q2) as i64 - pcnt;
+                        *large.get_unchecked_mut(j+3) -= *small.get_unchecked(q3) as i64 - pcnt;
+                        j += 4;
+                    }
+                    while j <= phase_a_end {
                         let q = ((n_div_p as u128 * *recip.get_unchecked(j) as u128) >> 64) as usize;
                         *large.get_unchecked_mut(j) -= *small.get_unchecked(q) as i64 - pcnt;
+                        j += 1;
                     }
                 }
             }
 
-            // Phase B: j > √(n/p), iterate q downward — 1 division per q (carry first_j)
+            // Phase B: j > √(n/p), iterate q downward
             if phase_a_end < j_end {
                 let q_start = if phase_a_end >= crossover + 1 {
                     (n_div_p / (phase_a_end + 1) as u64) as usize
