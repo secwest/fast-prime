@@ -426,19 +426,18 @@ fn run(limit: u64, stop: Arc<AtomicBool>) -> io::Result<()> {
     let mut last_frame = Instant::now();
     let mut speed_window_start = Instant::now();
     let mut numbers_in_window: u64 = 0;
-    let mut primes_in_window: u64 = 0;
     let mut speed: u64 = 0;
     let mut primes_per_sec: u64 = 0;
+    let mut last_window_prime_count: u64 = 0;
     const FRAME_INTERVAL_MS: u128 = 42; // ~24 fps
 
-    // Buffer a prime (no I/O — just push to ring buffer)
+    // Buffer a prime (used only for small/bootstrap primes — few calls)
     macro_rules! emit {
         ($n:expr) => {{
             recent_primes.push_back($n);
             if recent_primes.len() > visible_rows {
                 recent_primes.pop_front();
             }
-            primes_in_window += 1;
         }};
     }
 
@@ -457,6 +456,29 @@ fn run(limit: u64, stop: Arc<AtomicBool>) -> io::Result<()> {
         }};
     }
 
+    // Extract the last visible_rows primes from a sieve segment (walks backward)
+    macro_rules! extract_recent {
+        ($sieve:expr, $seg_start:expr, $seg_len:expr, $lim:expr) => {{
+            recent_primes.clear();
+            let mut found = 0usize;
+            'outer: for byte_idx in (0..$seg_len).rev() {
+                let byte = $sieve[byte_idx];
+                if byte == 0xFF { continue; }
+                let base = $seg_start + byte_idx as u64 * 30;
+                for bit_idx in (0..8usize).rev() {
+                    if byte & BITS[bit_idx] == 0 {
+                        let n = base + OFFSETS[bit_idx] as u64;
+                        if n <= $lim {
+                            recent_primes.push_front(n);
+                            found += 1;
+                            if found >= visible_rows { break 'outer; }
+                        }
+                    }
+                }
+            }
+        }};
+    }
+
     // Conditionally render if a frame interval has elapsed
     macro_rules! maybe_render {
         () => {{
@@ -465,9 +487,9 @@ fn run(limit: u64, stop: Arc<AtomicBool>) -> io::Result<()> {
                 let window_secs = now.duration_since(speed_window_start).as_secs_f64();
                 if window_secs >= 0.5 {
                     speed = (numbers_in_window as f64 / window_secs) as u64;
-                    primes_per_sec = (primes_in_window as f64 / window_secs) as u64;
+                    primes_per_sec = ((prime_count - last_window_prime_count) as f64 / window_secs) as u64;
                     numbers_in_window = 0;
-                    primes_in_window = 0;
+                    last_window_prime_count = prime_count;
                     speed_window_start = now;
                 }
                 render_frame!();
@@ -552,6 +574,8 @@ fn run(limit: u64, stop: Arc<AtomicBool>) -> io::Result<()> {
     let num_segs = (total_bytes + seg_bytes - 1) / seg_bytes;
 
     // ── Main sieve loop ───────────────────────────────────────────────────────
+    let mut last_seg_start: u64 = sieve_start;
+    let mut last_seg_len: usize = 0;
     'seg: for seg_idx in 0..num_segs {
         if stop.load(Ordering::Relaxed) { break 'seg; }
 
@@ -559,6 +583,8 @@ fn run(limit: u64, stop: Arc<AtomicBool>) -> io::Result<()> {
         let seg_start_num  = sieve_start + byte_offset as u64 * 30;
         let seg_byte_count = (total_bytes - byte_offset).min(seg_bytes);
         let sieve          = &mut sieve_buf[..seg_byte_count];
+        last_seg_start = seg_start_num;
+        last_seg_len   = seg_byte_count;
 
         // ── Pre-sieve ─────────────────────────────────────────────────────────
         let pat_off = (presieve_base_off + byte_offset) % PRESIEVE_PERIOD;
@@ -595,27 +621,59 @@ fn run(limit: u64, stop: Arc<AtomicBool>) -> io::Result<()> {
             unsafe { sieve_large(sieve, &s); }
         }
 
-        // ── Extract primes from this segment ──────────────────────────────────
-        for byte_idx in 0..seg_byte_count {
-            let byte = sieve[byte_idx];
-            if byte == 0xFF { continue; }
-            let base = seg_start_num + byte_idx as u64 * 30;
-
-            for (bit_idx, &off) in OFFSETS.iter().enumerate() {
-                if byte & BITS[bit_idx] == 0 {
-                    let n = base + off as u64;
-                    if n > limit { break; }
-                    prime_count += 1;
-                    emit!(n);
+        // ── Count primes via popcount (no per-prime overhead) ─────────────────
+        {
+            let mut seg_primes: u64 = 0;
+            // Process 8 bytes at a time using 64-bit popcount
+            let whole_u64s = seg_byte_count / 8;
+            let sieve_ptr = sieve.as_ptr() as *const u64;
+            for i in 0..whole_u64s {
+                let word = unsafe { sieve_ptr.add(i).read_unaligned() };
+                seg_primes += (!word).count_ones() as u64;
+            }
+            for byte_idx in (whole_u64s * 8)..seg_byte_count {
+                seg_primes += (!sieve[byte_idx]).count_ones() as u64;
+            }
+            // Correct for candidates beyond limit in last segment's last byte
+            if seg_idx == num_segs - 1 && seg_byte_count > 0 {
+                let last_byte = sieve[seg_byte_count - 1];
+                let base = seg_start_num + (seg_byte_count - 1) as u64 * 30;
+                for bit_idx in 0..8 {
+                    if last_byte & BITS[bit_idx] == 0 {
+                        let n = base + OFFSETS[bit_idx] as u64;
+                        if n > limit { seg_primes -= 1; }
+                    }
                 }
             }
+            prime_count += seg_primes;
         }
 
         numbers_in_window += seg_byte_count as u64 * 30;
-        maybe_render!();
+
+        // ── Render frame with lazy prime extraction ───────────────────────────
+        {
+            let now = Instant::now();
+            if now.duration_since(last_frame).as_millis() >= FRAME_INTERVAL_MS {
+                let window_secs = now.duration_since(speed_window_start).as_secs_f64();
+                if window_secs >= 0.5 {
+                    speed = (numbers_in_window as f64 / window_secs) as u64;
+                    primes_per_sec = ((prime_count - last_window_prime_count) as f64 / window_secs) as u64;
+                    numbers_in_window = 0;
+                    last_window_prime_count = prime_count;
+                    speed_window_start = now;
+                }
+                extract_recent!(sieve, seg_start_num, seg_byte_count, limit);
+                render_frame!();
+                last_frame = now;
+            }
+        }
     }
 
-    // ── Final frame ────────────────────────────────────────────────────────────
+    // ── Final frame (extract from last segment's sieve data) ────────────────
+    if last_seg_len > 0 {
+        let sieve = &sieve_buf[..last_seg_len];
+        extract_recent!(sieve, last_seg_start, last_seg_len, limit);
+    }
     render_frame!();
 
     // Wait for keypress before exiting (so the user can read the screen)
