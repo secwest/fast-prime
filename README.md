@@ -25,7 +25,7 @@ Extension of V2: sieve primes only up to N^{1/3} (not N^{1/2}), then compute the
 │ 1 Billion   │    0.00600s              │    0.00200s              │    0.00200s              │       50,847,534 │
 │ 10 Billion  │    0.06570s              │    0.00900s              │    0.00700s              │      455,052,511 │
 │ 100 Billion │    0.72087s              │    0.03500s              │    0.03400s              │    4,118,054,813 │
-│ 1 Trillion  │    8.64000s              │    0.17600s              │    0.17000s              │   37,607,912,018 │
+│ 1 Trillion  │    8.64000s              │    0.17600s              │    0.16800s              │   37,607,912,018 │
 │ 10 Trillion │  127.13000s              │    1.23000s              │    1.19000s              │  346,065,536,839 │
 └─────────────┴──────────────────────────┴──────────────────────────┴──────────────────────────┴──────────────────┘
 ```
@@ -37,7 +37,7 @@ Extension of V2: sieve primes only up to N^{1/3} (not N^{1/2}), then compute the
 | 1 Billion | 0.006s | 0.002s | **3.0×** |
 | 10 Billion | 0.066s | 0.007s | **9.4×** |
 | 100 Billion | 0.721s | 0.034s | **21.2×** |
-| 1 Trillion | 8.640s | 0.170s | **50.8×** |
+| 1 Trillion | 8.640s | 0.168s | **51.4×** |
 | 10 Trillion | 127.13s | 1.190s | **106.8×** |
 
 ### Comparison vs Strix Halo Reference
@@ -47,7 +47,7 @@ Extension of V2: sieve primes only up to N^{1/3} (not N^{1/2}), then compute the
 | 1 Billion | 0.002s | 0.011s | **5.5×** |
 | 10 Billion | 0.007s | 0.109s | **15.6×** |
 | 100 Billion | 0.034s | 1.483s | **43.6×** |
-| 1 Trillion | 0.170s | 25.820s | **151.9×** |
+| 1 Trillion | 0.168s | 25.820s | **153.7×** |
 
 ## Key Optimizations
 

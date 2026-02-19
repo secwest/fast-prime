@@ -59,9 +59,6 @@ fn count_primes(n: u64) -> u64 {
     let sieve_primes: Vec<usize> = prime_sieve.primes_from(2)
         .take_while(|&p| p <= cbrt_n)
         .collect();
-    let all_primes: Vec<usize> = prime_sieve.primes_from(2)
-        .take_while(|&p| (p as u64) * (p as u64) <= n)
-        .collect();
 
     for &p in &sieve_primes {
         let pcnt = small[p - 1] as i64;
@@ -248,13 +245,14 @@ fn count_primes(n: u64) -> u64 {
     // where S_a values are frozen (proven: p > N^{1/3} → no prime between
     // p_a and p modifies large[p], since j_end < p for all such primes).
     let mut p2: i64 = 0;
+    let mut idx = sieve_primes.len();
 
-    for (idx, &p) in all_primes.iter().enumerate() {
-        if p <= cbrt_n { continue; }
-        let pcnt = idx as i64; // π(p-1) = idx (0-based)
+    for p in prime_sieve.primes_from(cbrt_n + 1).take_while(|&p| (p as u64) * (p as u64) <= n) {
+        let pcnt = idx as i64;
         unsafe {
             p2 += *large.get_unchecked(p) - pcnt;
         }
+        idx += 1;
     }
 
     (large[1] - p2) as u64
