@@ -1,6 +1,6 @@
 # fast-prime
 
-A highly optimized prime counting toolkit in Rust, featuring four independent implementations targeting modern hybrid-core CPUs.
+A highly optimized prime counting toolkit in Rust, featuring five independent implementations targeting modern hybrid-core CPUs.
 
 ## Implementations
 
@@ -20,25 +20,29 @@ Extension of V2: sieve primes only up to N^{1/3} (not N^{1/2}), then compute the
 
 Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log N) time, O(N^{1/3}) space. Parallel S2 via delta-phi correction, parallel P2 via custom multi-threaded sieve. Currently the fastest implementation, beating V3 by 54× at 10T.
 
+### V5 — Deleglise-Rivat (`src/bin/prime_count_v5.rs`)
+
+Deleglise-Rivat prime counting: splits special leaves into easy (π-table lookup) and hard (sieve-based), reducing sieve work. Same O(N^{2/3} / log N) complexity but fewer sieve iterations for large N. Currently slower than V4 (unoptimized baseline), but provides the foundation for further improvements.
+
 ## Benchmarks — Intel Core Ultra 9 285K
 
 ```
-┌───────────────┬──────────────┬──────────────┬──────────────┬──────────────┬───────────────────┐
-│ Range         │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ Primes Found      │
-│               │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │                   │
-├───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼───────────────────┤
-│ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │        50,847,534 │
-│ 10 Billion    │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │       455,052,511 │
-│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │     4,118,054,813 │
-│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    37,607,912,018 │
-│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │   346,065,536,839 │
-│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │ 3,204,941,750,802 │
-│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │29,844,570,422,669 │
-│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │279,238,341,033,925│
-│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │2,623,557,157,654,233│
-│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │216,289,611,853,439,384│
-└───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
+┌───────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬───────────────────┐
+│ Range         │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ V5 DR        │ Primes Found      │
+│               │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │ (parallel)   │                   │
+├───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼───────────────────┤
+│ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │    0.00080s  │        50,847,534 │
+│ 10 Billion    │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │    0.00300s  │       455,052,511 │
+│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │     4,118,054,813 │
+│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    37,607,912,018 │
+│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.08000s  │   346,065,536,839 │
+│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.34100s  │ 3,204,941,750,802 │
+│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    1.55800s  │29,844,570,422,669 │
+│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    8.70100s  │279,238,341,033,925│
+│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   53.17600s  │2,623,557,157,654,233│
+│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  422.74500s  │24,739,954,287,740,860│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │216,289,611,853,439,384│
+└───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
 
 ### Best (V4) vs V1 Speedup
@@ -113,6 +117,16 @@ See [OPTIMIZATIONS_V4.md](OPTIMIZATIONS_V4.md) for the full optimization log.
 - **mimalloc allocator** — Replaces Windows default heap with mimalloc for 8.6× faster multi-threaded allocation. Reduces parallel S2 allocation overhead from 129ms to ~15ms (**5% speedup at 10T**).
 - **Pi-formula for easy leaves** — For segment 0, when primes[b-1]² ≥ segment_size, uses identity phi(n,b-1) = 1 + max(pi(n)-(b-1), 0) with a precomputed pi table. Eliminates sieve counting for 4.7M easy leaf iterations. Batch-counts trivial phi=1 leaves in O(1) per prime (**10% speedup at 10T**).
 
+### V5 — Deleglise-Rivat
+
+See [OPTIMIZATIONS_V5.md](OPTIMIZATIONS_V5.md) for the full optimization log.
+
+- **Easy/hard leaf split** — Special leaves classified into easy (π-table lookup) and hard (sieve-based). For large x, most leaves are easy, bypassing the expensive segmented sieve entirely.
+- **S2_easy π-table identity** — φ(n, b-1) = π(n) - b + 2 when n < p_b², computed via precomputed π table. O(1) per leaf vs O(segment) sieve work.
+- **Clustered batch evaluation** — Consecutive easy leaves sharing the same π(x/pq) value are counted in a single multiply, reducing per-leaf overhead.
+- **Parallel S2_easy** — Easy leaf computation parallelized across b values via rayon. Each b is independent (no sieve state to share).
+- **All V4 infrastructure** — PhiTiny cache, parallel P2 sieve, pre-sieve template, BitSieve with incremental counting, Barrett fast division.
+
 ## Building
 
 Requires [Rust](https://rustup.rs/) (1.70+).
@@ -132,6 +146,9 @@ cargo build --release
 
 # Run V4 (LMO, parallel S2 — fastest)
 ./target/release/prime_count_v4
+
+# Run V5 (Deleglise-Rivat, parallel easy leaves)
+./target/release/prime_count_v5
 ```
 
 The build is configured with aggressive optimizations in `Cargo.toml`:
@@ -194,6 +211,21 @@ rustflags = ["-C", "target-cpu=native"]
    - Progressive cross-off maintains sieve state φ(pos, b-1)
 4. **P2 (prime pairs)** — Σ π(x/p) for primes p in (y, √x], using primal sieve
 5. **Result** — π(x) = S1 + S2 + π(y) - 1 - P2
+
+### V5 — Deleglise-Rivat Method
+
+1. **Precompute tables** — Same as V4: primes, lpf, μ, π lookup tables up to y = x^{1/3} · α
+2. **S1 (ordinary leaves)** — Same as V4: Σ μ(n)·φ(x/n, c) using PhiTiny cache
+3. **S2_easy (easy special leaves)** — For b > π(√y), leaves where x/(p_b·p_l) ≤ y:
+   - Uses identity φ(n, b-1) = π(n) - b + 2 (valid since p_b > √y → p_b² > y ≥ n)
+   - Clusters consecutive l values with same π value for batch computation
+   - Handles trivial leaves (φ=1 when x/(p·q) < p_b) separately
+   - Parallelized across b values via rayon
+4. **S2_hard (hard special leaves)** — Segmented sieve over [0, x/y]:
+   - Type 1 (b ≤ π(√y)): All leaves via sieve, same as V4
+   - Type 2 (π(√y) < b ≤ π(√z)): Only hard leaves (x/(p·q) ≥ y) via sieve
+5. **P2 (prime pairs)** — Same as V4
+6. **Result** — π(x) = S1 + S2_easy + S2_hard + π(y) - 1 - P2
 
 ## Dependencies
 
