@@ -56,10 +56,14 @@ V5 is correct but slower than V4 — this is expected since V5 uses V4's alpha p
 - Added serial fallback for small inputs (≤2 segments)
 - Added large-prime optimization: for p > √high, only clear the prime itself (not composites)
 - Added sqrt_high optimization for type 2 cross-off
-- Results:
+
+### Opt 2: Alpha retuning + concurrent S2_easy (**34% speedup at 10Q**)
+- Steeper alpha ramp at 10^14: α = 2.2 + 0.8*(log-13) → hits α=3.0 at 100T (was 2.4)
+- S2_easy runs concurrently with S2_hard via thread::scope (previously sequential)
+- At 10Q: S2_easy takes ~2s, completely hidden behind S2_hard
+- Results (cumulative from Opt 0 baseline):
   - 10T: 0.080s → 0.028s (2.9× faster)
-  - 100T: 0.341s → 0.154s (2.2× faster)
-  - 1Q: 1.558s → 0.717s (2.2× faster, now FASTER than V4!)
-  - 10Q: 8.70s → 5.61s (1.6× faster)
-  - 100Q: 53.18s → 33.76s (1.6× faster, matches V4)
-  - 1 Quintillion: 422.7s → 251.2s (1.7× faster)
+  - 100T: 0.341s → 0.135s (2.5× faster)
+  - 1Q: 1.558s → 0.636s (2.4× faster, now 1.19× FASTER than V4!)
+  - 10Q: 8.70s → 3.74s (2.3× faster, now 1.45× FASTER than V4!)
+  - 100Q: 53.18s → 23.88s (2.2× faster, now 1.41× FASTER than V4!)

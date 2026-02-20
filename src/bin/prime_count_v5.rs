@@ -835,14 +835,14 @@ fn count_primes(x: u64) -> u64 {
         return Sieve::new(x as usize).prime_pi(x as usize) as u64;
     }
 
-    // Adaptive alpha — tuned for DR (may differ from LMO optimal)
+    // Adaptive alpha — tuned for DR
     let log_x = (x as f64).log10();
     let alpha = if log_x <= 13.0 {
         2.2
     } else if log_x <= 14.0 {
-        2.2 + 0.2 * (log_x - 13.0)
+        2.2 + 0.8 * (log_x - 13.0)
     } else if log_x <= 15.0 {
-        2.4 + 3.6 * (log_x - 14.0)
+        3.0 + 3.0 * (log_x - 14.0)
     } else if log_x <= 16.0 {
         6.0 + 7.0 * (log_x - 15.0)
     } else {
@@ -871,14 +871,15 @@ fn count_primes(x: u64) -> u64 {
         }
     }
 
-    // S2 = S2_easy + S2_hard, P2 runs concurrently
+    // S2 = S2_easy + S2_hard, P2 — all concurrent
     let (s2_easy, s2_hard, p2) = std::thread::scope(|s| {
         let p2_handle = s.spawn(|| compute_p2(x, y, pi_y));
+        let s2_easy_handle = s.spawn(|| compute_s2_easy(x, y, z, c, &primes, &pi));
 
-        let s2_easy = compute_s2_easy(x, y, z, c, &primes, &pi);
         let s2_hard = compute_s2_hard(x, y, z, c, &primes, &lpf, &mu, &pi);
 
         let p2 = p2_handle.join().unwrap();
+        let s2_easy = s2_easy_handle.join().unwrap();
         (s2_easy, s2_hard, p2)
     });
 
