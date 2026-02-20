@@ -257,8 +257,27 @@ fn compute_s2_easy(x: u64, y: usize, z: usize, c: usize,
         // Non-trivial easy leaves: φ = π(x/pq) - b + 2
         let nt_max_l = std::cmp::min(nontrivial_end_l, pi_y);
         let mut l = nt_max_l;
+        // Prefetch pi-table entries ahead to hide memory latency
+        const PREFETCH_DIST: usize = 8;
+        for d in 0..std::cmp::min(PREFETCH_DIST, l.saturating_sub(min_l)) {
+            let pl = l - d;
+            if pl > 0 && pl < primes.len() {
+                let pf_xpq = fast_div_easy(xp, primes[pl] as u64, recip[pl]) as usize;
+                unsafe { std::arch::x86_64::_mm_prefetch(
+                    (pi.as_ptr().add(std::cmp::min(pf_xpq, y))) as *const i8,
+                    std::arch::x86_64::_MM_HINT_T0); }
+            }
+        }
         while l > min_l && l < primes.len() {
             let xpq = fast_div_easy(xp, primes[l] as u64, recip[l]) as usize;
+            // Prefetch PREFETCH_DIST iterations ahead
+            let pf_l = l.wrapping_sub(PREFETCH_DIST);
+            if pf_l > min_l && pf_l < primes.len() {
+                let pf_xpq = fast_div_easy(xp, primes[pf_l] as u64, recip[pf_l]) as usize;
+                unsafe { std::arch::x86_64::_mm_prefetch(
+                    (pi.as_ptr().add(std::cmp::min(pf_xpq, y))) as *const i8,
+                    std::arch::x86_64::_MM_HINT_T0); }
+            }
             let pi_xpq = pi[std::cmp::min(xpq, y)] as usize;
             let phi_val = pi_xpq as i64 - b as i64 + 2;
             let next_pi = pi_xpq + 1;

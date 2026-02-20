@@ -91,3 +91,14 @@ V5 is correct but slower than V4 — this is expected since V5 uses V4's alpha p
 - Results (cumulative):
   - 100Q: 24.58s → 24.81s (~same, no cap applied)
   - 1 Quintillion: 206.45s → 172.52s (**16% faster**, now 10% FASTER than V4's 192s!)
+
+### Opt 5: Software prefetch for pi-table lookups (**16% speedup at 100Q**)
+- Root cause: S2_easy's inner loop accesses pi[xpq] randomly — cache misses for large pi tables
+- Added `_mm_prefetch` intrinsic with PREFETCH_DIST=8 to prefetch pi entries 8 iterations ahead
+- Prefetch hides ~8× loop iteration latency (~120 cycles of DRAM latency)
+- Also adds reciprocal multiplication to avoid u64 division in S2_easy
+- Most effective at 100Q (pi table = 30MB, straddling L3 capacity)
+- Results (cumulative):
+  - 10Q: 3.55s → 3.41s (4% faster, now 1.65× FASTER than V4!)
+  - 100Q: 24.81s → 21.00s (**16% faster**, now 1.70× FASTER than V4!)
+  - 1 Quintillion: 172.52s → 172.36s (~same, pi table fully in DRAM at this scale)
