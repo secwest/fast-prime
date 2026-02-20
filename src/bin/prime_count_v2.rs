@@ -10,11 +10,12 @@ use std::time::Instant;
 // This set has O(√N) elements. We iteratively sieve these values.
 
 /// Barrett reciprocal division: floor(n/d) using precomputed ceil(2^64/d).
-/// Barrett can overestimate by 1; the correction check costs ~1 extra cycle.
+/// Barrett can overestimate by 1; the u64 correction check costs ~1 extra cycle.
 #[inline(always)]
 fn div_recip(n: u64, d: usize, recip: u64) -> usize {
     let q = ((n as u128 * recip as u128) >> 64) as usize;
-    q - (q as u128 * d as u128 > n as u128) as usize
+    // q*d can't overflow u64: q ≈ n/d, so q*d ≈ n < 2^64
+    q - (q as u64 * d as u64 > n) as usize
 }
 
 /// Integer square root (exact).

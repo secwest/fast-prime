@@ -479,3 +479,18 @@ Multiple micro-optimizations tried, all slower: u32 division (no difference), fu
 | 1 Trillion | 119.618s | 8.60s | **13.9×** |
 
 vs Strix Halo reference (25.82s at 1T): **3.0× faster**.
+
+---
+
+## Barrett Correction Fix for 100T+
+
+**Problem**: At 100T (10^14), `fast_div(n, recip)` can overestimate `floor(n/p)` by 1 for large sieving primes. The Barrett condition `n*(p-1) < 2^64` is violated when p > ~184K and n ≈ 10^14, causing 99,919 composites to be missed (99,919 false primes).
+
+**Fix**: Added Barrett correction: `q - (q*p > n) as u64`. The u64 check can't overflow since q*p ≈ n.
+
+**Results**: V1 100T now correct: 3,204,941,750,802 primes in 2389.2s (39.8 minutes). Zero performance regression at smaller scales.
+
+| Range | Time | Status |
+|---|---|---|
+| 10 Trillion | 132.42s | ✓ (no regression) |
+| 100 Trillion | 2389.23s | ✓ **NEW** — correct |

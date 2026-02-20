@@ -73,12 +73,13 @@ fn precompute_sieve_primes(primes: &[u32]) -> Vec<SievePrime> {
     }).collect()
 }
 
-/// Fast approximate division: floor(n / p) using precomputed reciprocal.
+/// Fast division: floor(n / p) using precomputed reciprocal.
 /// Uses the identity: floor(n / p) = mulhi(n, ceil(2^64/p))
-/// This is exact for n < 2^63 and p < 2^32.
+/// Barrett can overestimate by 1 when n*(p-1) >= 2^64; correction check handles this.
 #[inline(always)]
-fn fast_div(n: u64, recip: u64) -> u64 {
-    ((n as u128 * recip as u128) >> 64) as u64
+fn fast_div(n: u64, p: u64, recip: u64) -> u64 {
+    let q = ((n as u128 * recip as u128) >> 64) as u64;
+    q - (q * p > n) as u64
 }
 
 static PRESIEVE_PATTERN: OnceLock<Vec<u8>> = OnceLock::new();
@@ -159,7 +160,7 @@ fn compute_starts(sp: &SievePrime, seg_start: u64, seg_bytes_len: usize) -> [usi
     let p = sp.p as u64;
     let mut starts = [usize::MAX; 8];
 
-    let k_min = fast_div(seg_start + p - 1, sp.recip);
+    let k_min = fast_div(seg_start + p - 1, p, sp.recip);
     let k_rem = (k_min % 30) as usize;
     let base_diff = k_min * p - seg_start;
     let dks = &DK_TABLE[sp.p_idx as usize][k_rem];
