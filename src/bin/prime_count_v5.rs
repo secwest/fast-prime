@@ -437,6 +437,25 @@ fn compute_s2_hard(x: u64, y: usize, z: usize, c: usize,
                                        segment_size, &template, &prime_recip, fast_div);
     }
 
+    // Build pi lookup table for segment 0: phi(n,b-1) = 1 + max(pi(n)-(b-1), 0) when primes[b-1]² > n
+    // Only worthwhile when segment_size fits in cache; skip for huge segments
+    let use_global_pi = segment_size <= (1 << 24); // 16M max
+    let global_pi: Vec<u32> = if use_global_pi {
+        let n = segment_size;
+        let mut is_p = vec![true; n + 1];
+        is_p[0] = false;
+        if n > 0 { is_p[1] = false; }
+        let sqrtn = isqrt(n as u64) as usize;
+        for p in 2..=sqrtn {
+            if is_p[p] { for k in (p * p..=n).step_by(p) { is_p[k] = false; } }
+        }
+        let mut tab = vec![0u32; n + 1];
+        for i in 1..=n { tab[i] = tab[i - 1] + is_p[i] as u32; }
+        tab
+    } else {
+        vec![]
+    };
+
     let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 6);
 
     let results: Vec<(i64, Vec<i64>, Vec<i64>, usize)> = (0..nchunks).into_par_iter().map(|tid| {
@@ -537,6 +556,7 @@ fn compute_s2_hard(x: u64, y: usize, z: usize, c: usize,
 
             // Type 2: π(√y) < b ≤ π(√z), HARD leaves only (xpq >= y)
             let sqrt_high = isqrt(high as u64) as usize;
+            let use_pi_formula = low == 0 && seg_idx == seg_start;
             while b <= cur_max_b && b < nprimes {
                 let prime = primes[b] as u64;
                 let x_div_prime = x / prime;
@@ -548,30 +568,61 @@ fn compute_s2_hard(x: u64, y: usize, z: usize, c: usize,
 
                 if l < nprimes && prime as usize >= primes[l] as usize { break; }
 
-                let mut prev_pos: Option<usize> = None;
-                let mut running_count: i64 = 0;
-                while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
-                    let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
-                    if xpq >= y {
-                        if xpq > low && xpq < high {
-                            let pos = int_to_odd_bp(xpq, low);
-                            let count = match prev_pos {
-                                Some(pp) if pos == pp => running_count,
-                                Some(pp) if pos > pp => {
-                                    running_count += sieve.count_delta(pp, pos);
-                                    running_count
-                                }
-                                _ => { running_count = sieve.count(pos); running_count }
-                            };
-                            s2_local += phi[b] + count;
-                            coeff[b] += 1;
-                            prev_pos = Some(pos);
-                        } else if xpq == low {
-                            s2_local += phi[b];
-                            coeff[b] += 1;
+                if use_global_pi && use_pi_formula && b > 1 && (primes[b - 1] as u64) * (primes[b - 1] as u64) >= high as u64 {
+                    // Pi-formula fast path: φ(n, b-1) = 1 + max(π(n) - (b-1), 0)
+                    let bm1 = b as i64 - 1;
+                    // Batch trivial phi=1 leaves: when p³ >= x, all leaves have phi=1
+                    let p_cubed = (prime as u128) * (prime as u128) * (prime as u128);
+                    let l_end_bound = if min_m <= y { pi[min_m] as usize } else { pi_y };
+                    if p_cubed >= x as u128 {
+                        // All hard leaves contribute 1 each
+                        let mut count = 0i64;
+                        let mut ll = l;
+                        while ll > l_end_bound && ll > 0 && ll < nprimes && (primes[ll] as usize) > min_m {
+                            let xpq = fast_div(x_div_prime, primes[ll] as u64, prime_recip[ll]) as usize;
+                            if xpq >= y { count += 1; }
+                            ll -= 1;
+                        }
+                        s2_local += count;
+                        coeff[b] += count;
+                        l = ll;
+                    } else {
+                        while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
+                            let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
+                            if xpq >= y && xpq < high {
+                                let pi_n = unsafe { *global_pi.get_unchecked(xpq) } as i64;
+                                s2_local += 1 + std::cmp::max(pi_n - bm1, 0);
+                                coeff[b] += 1;
+                            }
+                            l -= 1;
                         }
                     }
-                    l -= 1;
+                } else {
+                    let mut prev_pos: Option<usize> = None;
+                    let mut running_count: i64 = 0;
+                    while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
+                        let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
+                        if xpq >= y {
+                            if xpq > low && xpq < high {
+                                let pos = int_to_odd_bp(xpq, low);
+                                let count = match prev_pos {
+                                    Some(pp) if pos == pp => running_count,
+                                    Some(pp) if pos > pp => {
+                                        running_count += sieve.count_delta(pp, pos);
+                                        running_count
+                                    }
+                                    _ => { running_count = sieve.count(pos); running_count }
+                                };
+                                s2_local += phi[b] + count;
+                                coeff[b] += 1;
+                                prev_pos = Some(pos);
+                            } else if xpq == low {
+                                s2_local += phi[b];
+                                coeff[b] += 1;
+                            }
+                        }
+                        l -= 1;
+                    }
                 }
 
                 phi[b] += sieve.count_total();

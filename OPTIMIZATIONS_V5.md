@@ -67,3 +67,17 @@ V5 is correct but slower than V4 — this is expected since V5 uses V4's alpha p
   - 1Q: 1.558s → 0.636s (2.4× faster, now 1.19× FASTER than V4!)
   - 10Q: 8.70s → 3.74s (2.3× faster, now 1.45× FASTER than V4!)
   - 100Q: 53.18s → 23.88s (2.2× faster, now 1.41× FASTER than V4!)
+
+### Opt 3: Pi-formula fast path for segment 0 (**32% speedup at 100T**)
+- Precomputes global π(n) lookup table for n ∈ [0, segment_size] (only when ≤16M)
+- For segment 0, type 2 leaves with primes[b-1]² ≥ high use identity:
+  φ(n, b-1) = 1 + max(π(n) - (b-1), 0) — avoids sieve counting entirely
+- Batch optimization for p³ ≥ x: all leaves have φ=1, counted in O(leaves) without π-lookup
+- Table capped at 16M entries to avoid multi-GB allocation at very large scales
+- Biggest impact at 100T where segment 0 dominates (all primes contribute)
+- Results (cumulative):
+  - 10T: 0.028s → 0.026s (7% faster)
+  - 100T: 0.135s → 0.092s (**32% faster**, now 1.22× FASTER than V4!)
+  - 1Q: 0.636s → 0.539s (15% faster, now 1.43× FASTER than V4!)
+  - 10Q: 3.74s → 3.55s (5% faster, now 1.59× FASTER than V4!)
+  - 100Q: 23.88s → 24.58s (~same, 1.46× FASTER than V4)
