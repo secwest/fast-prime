@@ -869,3 +869,40 @@ position mapping (`int_to_wheel_bp`), and modified template (period=8008 bits fo
 4. **Diminishing returns at scale** — Degradation is worst at smaller scales (21% at 10T)
    where per-iteration overhead dominates. At larger scales (4% at 100Q) the iteration
    reduction starts to compensate, but never enough to break even.
+
+---
+
+## Failed: Batch Counting Extension to All Segments ✗
+
+**Hypothesis**: The pi-formula batch counting (p³ ≥ x → all leaves have φ=1, counted in O(1))
+is currently only applied on segment 0. Extending it to all segments should reduce easy leaf
+iterations.
+
+**Result**: 2-79% SLOWER. The p³ ≥ x condition rarely triggers at scales < 10Q (requires
+p > x^{1/3} but primes only go up to y ≈ x^{1/3}·α). The added condition check
+(u128 multiply + comparison) runs for every prime on every segment with zero benefit.
+
+---
+
+## Failed: Segment Size Cap (L2 Cache Fit) ✗
+
+**Hypothesis**: At large scales (10Q+), segment_size grows to ~64M (odd-only sieve = 4MB),
+exceeding L2 cache (2MB per P-core). Capping segment_size to fit L2 should improve cross-off
+cache locality.
+
+**Results**: Caps at 2^22 (sieve=256KB) and 2^24 (sieve=1MB) both tested.
+- 2^22 cap: 100Q 5% faster, but 1Q 2%, 10Q 11%, 10T 68% SLOWER.
+- 2^24 cap: 1Q 34% SLOWER, everything else worse or neutral.
+- The increased segment count adds overhead (template init, phi updates, correction pass)
+  that overwhelms any cache benefit.
+
+---
+
+## Failed: Chunk Count Tuning ✗
+
+**Hypothesis**: The parallel S2 uses `nchunks = threads × 6`. More chunks (× 16) could improve
+work-stealing for skewed workloads. Fewer chunks (× 4) could reduce correction pass overhead.
+
+**Result**: Both directions worse. × 16 gives 9-89% regression (correction pass overhead
+dominates). × 4 gives 9-13% regression (insufficient work-stealing for skewed early segments).
+The original × 6 multiplier is the optimal sweet spot.
