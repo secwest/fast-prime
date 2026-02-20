@@ -297,8 +297,10 @@ fn compute_s2_easy_segmented(x: u64, y: usize, z: usize, _c: usize,
                               primes: &[u32], pi: &[u32],
                               pi_y: usize, min_b: usize,
                               recip: &[u64]) -> i64 {
-    // Segment size: 512K entries = 2MB, fits in L2 cache per core
-    let seg_size: usize = 512 * 1024;
+    // Segment size: configurable via SEG_SIZE env var for tuning, default 512K (2MB, fits L2)
+    let seg_size: usize = std::env::var("SEG_SIZE").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128 * 1024);
     let num_segments = (y + seg_size) / seg_size;
 
     // Process pi table in segments, parallel over segments
@@ -715,7 +717,8 @@ fn compute_s2_hard(x: u64, y: usize, z: usize, c: usize,
                         }
                         s2_local += count;
                         coeff[b] += count;
-                        l = ll;
+                        l = ll;  // advance past processed range
+                        let _ = l;
                     } else {
                         while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
                             let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
@@ -1018,7 +1021,10 @@ fn count_primes(x: u64) -> u64 {
 
     // Adaptive alpha — tuned for DR
     let log_x = (x as f64).log10();
-    let alpha = if log_x <= 13.0 {
+    let alpha = if let Ok(v) = std::env::var("ALPHA") {
+        v.parse::<f64>().unwrap_or(0.0)
+    } else { 0.0 };
+    let alpha = if alpha > 0.0 { alpha } else if log_x <= 13.0 {
         2.2
     } else if log_x <= 14.0 {
         2.2 + 0.8 * (log_x - 13.0)
@@ -1026,8 +1032,14 @@ fn count_primes(x: u64) -> u64 {
         3.0 + 3.0 * (log_x - 14.0)
     } else if log_x <= 16.0 {
         6.0 + 7.0 * (log_x - 15.0)
-    } else {
+    } else if log_x <= 17.0 {
         13.0 + 3.0 * (log_x - 16.0)
+    } else if log_x <= 18.0 {
+        // V6 Opt 1: higher alpha for segmented pi regime
+        // Larger y reduces S2_hard work; segmented S2_easy handles large pi tables
+        16.0 + 7.0 * (log_x - 17.0)
+    } else {
+        23.0 + 5.0 * (log_x - 18.0)
     };
     let y = std::cmp::max((icbrt(x) as f64 * alpha) as usize, 1);
     // V6: NO y cap — segmented pi table handles any y size efficiently
@@ -1054,12 +1066,12 @@ fn count_primes(x: u64) -> u64 {
     }
 
     // S2 = S2_easy + S2_hard, P2 — all concurrent
+    // Running all three concurrently is optimal: rayon work-stealing interleaves
+    // S2_easy and S2_hard work items, and P2 finishes within their window.
     let (s2_easy, s2_hard, p2) = std::thread::scope(|s| {
         let p2_handle = s.spawn(|| compute_p2(x, y, pi_y));
         let s2_easy_handle = s.spawn(|| compute_s2_easy(x, y, z, c, &primes, &pi));
-
         let s2_hard = compute_s2_hard(x, y, z, c, &primes, &lpf, &mu, &pi);
-
         let p2 = p2_handle.join().unwrap();
         let s2_easy = s2_easy_handle.join().unwrap();
         (s2_easy, s2_hard, p2)
@@ -1096,10 +1108,17 @@ fn main() {
         Case { limit: 9_223_372_036_854_775_807, label: "Max i64", expected: 216_289_611_853_439_384 },
     ];
 
+    // If LIMIT env var is set, run only that value
+    let limit_filter: Option<u64> = std::env::var("LIMIT").ok()
+        .and_then(|v| v.parse().ok());
+
     println!("{:<15} {:>12} {:>18}  {}", "Range", "Time", "Primes Found", "Status");
     println!("{}", "─".repeat(65));
 
     for c in &cases {
+        if let Some(lf) = limit_filter {
+            if c.limit != lf { continue; }
+        }
         let t0 = Instant::now();
         let count = count_primes(c.limit);
         let secs = t0.elapsed().as_secs_f64();

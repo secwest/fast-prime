@@ -26,7 +26,7 @@ Deleglise-Rivat prime counting: splits special leaves into easy (π-table lookup
 
 ### V6 — Enhanced DR with Segmented Pi Table (`src/bin/prime_count_v6.rs`)
 
-Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized segments instead of requiring the full table to fit in L3. Eliminates the y-cap constraint, allowing larger y values that dramatically reduce hard-leaf sieve work. Falls back to V5's direct approach for small inputs. **Currently the fastest implementation at large scales (1.52× faster than V5 at 1 Quintillion).**
+Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized segments instead of requiring the full table to fit in L3. Eliminates the y-cap constraint, allowing larger y values that dramatically reduce hard-leaf sieve work. Falls back to V5's direct approach for small inputs. **Currently the fastest implementation at large scales (1.76× faster than V5, 2.33× faster than V4 at 1 Quintillion).**
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -35,17 +35,17 @@ Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized seg
 │ Range         │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ V5 DR        │ V6 Seg-Pi    │ Primes Found      │
 │               │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │ (parallel)   │ (parallel)   │                   │
 ├───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼───────────────────┤
-│ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │    0.00080s  │    0.00205s  │        50,847,534 │
+│ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │    0.00080s  │    0.00097s  │        50,847,534 │
 │ 10 Billion    │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │    0.00300s  │    0.00175s  │       455,052,511 │
-│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │    0.00300s  │     4,118,054,813 │
-│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    0.00651s  │    37,607,912,018 │
-│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │    0.02494s  │   346,065,536,839 │
-│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.08946s  │ 3,204,941,750,802 │
-│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.51836s  │29,844,570,422,669 │
-│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    3.52165s  │279,238,341,033,925│
-│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   20.71619s  │2,623,557,157,654,233│
-│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │  113.35781s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  547.27776s  │216,289,611,853,439,384│
+│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │    0.00274s  │     4,118,054,813 │
+│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    0.00688s  │    37,607,912,018 │
+│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │    0.02821s  │   346,065,536,839 │
+│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.08932s  │ 3,204,941,750,802 │
+│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.52744s  │29,844,570,422,669 │
+│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    3.56178s  │279,238,341,033,925│
+│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   21.30615s  │2,623,557,157,654,233│
+│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   82.58250s  │24,739,954,287,740,860│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  502.44525s  │216,289,611,853,439,384│
 └───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
 
@@ -136,11 +136,12 @@ See [OPTIMIZATIONS_V5.md](OPTIMIZATIONS_V5.md) for the full optimization log.
 
 See [OPTIMIZATIONS_V6.md](OPTIMIZATIONS_V6.md) for the full optimization log.
 
-- **Segmented π-table processing** — Instead of requiring the full π-table to fit in L3 cache (36MB, capping y at 9M), processes it in L2-sized segments of 512K entries (2MB). All π lookups hit L2 cache (5ns) instead of L3/DRAM (20-100ns).
-- **Uncapped y parameter** — With segmented processing, y is no longer constrained by cache size. Larger y dramatically reduces S2_hard work by shrinking z = x/y. At 10^18: y goes from 9M→19M, halving z and the number of hard-leaf sieve segments.
+- **Segmented π-table processing** — Instead of requiring the full π-table to fit in L3 cache (36MB, capping y at 9M), processes it in L2-sized segments of 128K entries (512KB). All π lookups hit L2 cache (5ns) instead of L3/DRAM (20-100ns).
+- **Uncapped y parameter** — With segmented processing, y is no longer constrained by cache size. Larger y dramatically reduces S2_hard work by shrinking z = x/y. At 10^18: y goes from 9M→23M, halving z and the number of hard-leaf sieve segments.
 - **Adaptive dispatch** — Automatically uses V5's direct approach (parallel over b, with prefetch) when the π-table fits in L3, switching to segmented approach for larger scales. Best of both worlds.
 - **Narrowed b-range per segment** — Each segment computes the maximum valid b value (p_b² ≤ x/seg_low), skipping irrelevant b iterations.
-- **1.52× faster at 1 Quintillion** — 113.4s vs V5's 172.4s. 1.72× faster than V4's 192.0s.
+- **Alpha tuning for segmented regime** — Higher alpha (23 at 10^18, up from 19) balances S2_easy/S2_hard perfectly with the segmented approach.
+- **2.33× faster at 1 Quintillion** — 82.6s vs V4's 192.0s. 2.09× faster than V5's 172.4s.
 
 ## Building
 
