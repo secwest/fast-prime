@@ -112,100 +112,130 @@ impl PhiTinyCache {
     }
 }
 
-// ── P2: Pairs of large primes (parallel sieve) ──────────────────────────────
-
-struct ParallelPiSieve {
-    bitmap: Vec<u64>,
-    prefix: Vec<u64>,
-}
-
-impl ParallelPiSieve {
-    fn new(limit: usize) -> Self {
-        if limit < 3 {
-            return ParallelPiSieve { bitmap: vec![0], prefix: vec![0, 0] };
-        }
-        let half = limit / 2 + 1;
-        let nwords = (half + 63) / 64;
-        let sqrt_limit = isqrt(limit as u64) as usize;
-        let small_sieve = Sieve::new(sqrt_limit);
-        let cross_primes: Vec<usize> = small_sieve.primes_from(3)
-            .take_while(|&p| p <= sqrt_limit).collect();
-
-        let mut bitmap = vec![!0u64; nwords];
-        let last_bits = half % 64;
-        if last_bits > 0 && nwords > 0 { bitmap[nwords - 1] &= (1u64 << last_bits) - 1; }
-
-        let chunk_words = std::cmp::max(nwords / rayon::current_num_threads(), 512);
-        bitmap.par_chunks_mut(chunk_words).enumerate().for_each(|(chunk_idx, chunk)| {
-            let word_start = chunk_idx * chunk_words;
-            let bit_start = word_start * 64;
-            let chunk_len = chunk.len();
-            let num_start = 2 * bit_start + 1;
-            if bit_start == 0 && chunk_len > 0 { chunk[0] &= !1u64; }
-            for &p in &cross_primes {
-                let pp = p * p;
-                let first_num = if pp > num_start { pp } else {
-                    let m = ((num_start + p - 1) / p) * p;
-                    if m % 2 == 0 { m + p } else { m }
-                };
-                let first_bit = (first_num - 1) / 2;
-                if first_bit >= bit_start + chunk_len * 64 { continue; }
-                let mut idx = if first_bit >= bit_start { first_bit - bit_start } else { continue };
-                let chunk_bits = chunk_len * 64;
-                let ptr = chunk.as_mut_ptr();
-                while idx + p * 3 < chunk_bits {
-                    unsafe {
-                        let w0 = idx >> 6; let b0 = idx & 63;
-                        *ptr.add(w0) &= !(1u64 << b0);
-                        let i1 = idx + p; let w1 = i1 >> 6; let b1 = i1 & 63;
-                        *ptr.add(w1) &= !(1u64 << b1);
-                        let i2 = idx + p * 2; let w2 = i2 >> 6; let b2 = i2 & 63;
-                        *ptr.add(w2) &= !(1u64 << b2);
-                        let i3 = idx + p * 3; let w3 = i3 >> 6; let b3 = i3 & 63;
-                        *ptr.add(w3) &= !(1u64 << b3);
-                    }
-                    idx += p * 4;
-                }
-                while idx < chunk_bits {
-                    unsafe { let w = idx >> 6; let b = idx & 63; *ptr.add(w) &= !(1u64 << b); }
-                    idx += p;
-                }
-            }
-        });
-
-        let mut prefix = vec![0u64; nwords + 1];
-        for i in 0..nwords { prefix[i + 1] = prefix[i] + bitmap[i].count_ones() as u64; }
-        ParallelPiSieve { bitmap, prefix }
-    }
-
-    #[inline]
-    fn prime_pi(&self, n: usize) -> usize {
-        if n < 2 { return 0; }
-        let count_2 = 1usize;
-        if n < 3 { return count_2; }
-        let largest_odd = if n % 2 == 1 { n } else { n - 1 };
-        let bit_idx = (largest_odd - 1) / 2;
-        let word = bit_idx / 64;
-        let bit = bit_idx % 64;
-        let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
-        count_2 + self.prefix[word] as usize + (self.bitmap[word] & mask).count_ones() as usize
-    }
-}
+// ── P2: Segmented sieve for π(x/p) computation ──────────────────────────────
+//
+// Cache-friendly segmented approach: process 1M-number segments sequentially,
+// maintaining a running π count. Queries are sorted by x/p value and resolved
+// as we sweep through segments. Memory: ~2-4MB vs 5.4GB for full sieve at 1Q.
 
 fn compute_p2(x: u64, y: usize, pi_y: usize) -> i64 {
     let sqrt_x = isqrt(x) as usize;
     if y >= sqrt_x { return 0; }
-    let max_val = (x / (y as u64 + 1)) as usize;
-    let sieve_limit = std::cmp::max(max_val, sqrt_x);
-    let p2_sieve = ParallelPiSieve::new(sieve_limit);
-    let pi_sqrt_x = p2_sieve.prime_pi(sqrt_x);
+
+    // Collect P2 primes: those in (y, √x]
     let small_sieve = Sieve::new(sqrt_x);
-    let p2_primes: Vec<usize> = small_sieve.primes_from(y + 1)
-        .take_while(|&p| p <= sqrt_x).collect();
-    let p2: i64 = p2_primes.par_iter()
-        .map(|&p| p2_sieve.prime_pi((x / p as u64) as usize) as i64).sum();
+    let p2_primes: Vec<u64> = small_sieve.primes_from(y + 1)
+        .take_while(|&p| p <= sqrt_x).map(|p| p as u64).collect();
+    let pi_sqrt_x = (pi_y + p2_primes.len()) as i64;
+
+    if p2_primes.is_empty() {
+        let choose2 = |n: i64| n * (n - 1) / 2;
+        return -choose2(pi_sqrt_x) + choose2(pi_y as i64);
+    }
+
+    // Compute x/p for each P2 prime, and sort by value for segment processing
+    let mut xp_pairs: Vec<(usize, usize)> = p2_primes.iter().enumerate()
+        .map(|(i, &p)| (i, (x / p) as usize)).collect();
+    xp_pairs.sort_unstable_by_key(|&(_, xp)| xp);
+
+    // Segmented sieve to compute π(x/p) for all P2 primes
+    let max_xp = xp_pairs.last().unwrap().1;
+    let sieve_limit = std::cmp::max(max_xp + 1, 3);
+    let sqrt_limit = isqrt(sieve_limit as u64) as usize;
+    let cross_sieve = Sieve::new(sqrt_limit);
+    let cross_primes: Vec<usize> = cross_sieve.primes_from(3)
+        .take_while(|&p| p <= sqrt_limit).collect();
+
+    // Segment size: fits in L2 cache (2MB per P-core)
+    const P2_SEG_SIZE: usize = 1 << 20; // 1M numbers per segment
+
+    let mut pi_values: Vec<i64> = vec![0; p2_primes.len()];
+    let mut running_pi: i64 = 1; // count prime 2
+    let mut pair_idx = 0; // index into sorted xp_pairs
+
+    // Round up to ensure even max_xp falls in a valid segment
+    let sieve_end: usize = (max_xp | 1) + 1; // smallest even number > max_xp
+    let mut seg_low: usize = 0;
+    while seg_low < sieve_end {
+        let seg_high = std::cmp::min(seg_low + P2_SEG_SIZE, sieve_end);
+        let odd_count = (seg_high - seg_low) / 2;
+        if odd_count == 0 { break; }
+        let nwords = (odd_count + 63) / 64;
+
+        // Init sieve: all odd numbers initially prime
+        let mut bitmap = vec![!0u64; nwords];
+        let excess = nwords * 64 - odd_count;
+        if excess > 0 { bitmap[nwords - 1] &= u64::MAX >> excess; }
+        if seg_low == 0 { bitmap[0] &= !1u64; } // 1 is not prime
+
+        // Sieve with all cross primes
+        for &p in &cross_primes {
+            let pp = p * p;
+            let first_num = if pp > seg_low {
+                pp
+            } else {
+                let m = ((std::cmp::max(seg_low, 1) + p - 1) / p) * p;
+                if m % 2 == 0 { m + p } else { m }
+            };
+            if first_num >= seg_high { continue; }
+            let mut idx = (first_num - seg_low - 1) / 2;
+            while idx + p * 3 < odd_count {
+                unsafe {
+                    let w0 = idx >> 6; let b0 = idx & 63;
+                    *bitmap.get_unchecked_mut(w0) &= !(1u64 << b0);
+                    let i1 = idx + p; let w1 = i1 >> 6; let b1 = i1 & 63;
+                    *bitmap.get_unchecked_mut(w1) &= !(1u64 << b1);
+                    let i2 = idx + p * 2; let w2 = i2 >> 6; let b2 = i2 & 63;
+                    *bitmap.get_unchecked_mut(w2) &= !(1u64 << b2);
+                    let i3 = idx + p * 3; let w3 = i3 >> 6; let b3 = i3 & 63;
+                    *bitmap.get_unchecked_mut(w3) &= !(1u64 << b3);
+                }
+                idx += p * 4;
+            }
+            while idx < odd_count {
+                let w = idx >> 6; let b = idx & 63;
+                unsafe { *bitmap.get_unchecked_mut(w) &= !(1u64 << b); }
+                idx += p;
+            }
+        }
+
+        // Build prefix sums within segment
+        let mut seg_prefix = vec![0u32; nwords + 1];
+        for i in 0..nwords {
+            seg_prefix[i + 1] = seg_prefix[i] + bitmap[i].count_ones();
+        }
+
+        // Process any x/p values that fall in this segment
+        while pair_idx < xp_pairs.len() {
+            let (orig_idx, xp_val) = xp_pairs[pair_idx];
+            if xp_val >= seg_high { break; }
+            if xp_val < seg_low { pair_idx += 1; continue; }
+
+            // Compute π(xp_val) = running_pi + primes_in_segment_up_to(xp_val)
+            let largest_odd = if xp_val % 2 == 1 { xp_val } else { xp_val - 1 };
+            if largest_odd <= seg_low {
+                // xp_val is at or below segment start; all its primes are in running_pi
+                pi_values[orig_idx] = running_pi;
+            } else {
+                let bit_idx = (largest_odd - seg_low - 1) / 2;
+                let word = bit_idx / 64;
+                let bit = bit_idx % 64;
+                let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
+                let local_count = seg_prefix[word] as i64
+                    + (bitmap[word] & mask).count_ones() as i64;
+                pi_values[orig_idx] = running_pi + local_count;
+            }
+            pair_idx += 1;
+        }
+
+        // Add segment's prime count to running total
+        running_pi += seg_prefix[nwords] as i64;
+        seg_low = seg_high;
+    }
+
+    let p2: i64 = pi_values.iter().sum();
     let choose2 = |n: i64| n * (n - 1) / 2;
-    p2 - choose2(pi_sqrt_x as i64) + choose2(pi_y as i64)
+    p2 - choose2(pi_sqrt_x) + choose2(pi_y as i64)
 }
 
 // ── S2_easy: adaptive approach ───────────────────────────────────────────────
@@ -1045,6 +1075,7 @@ fn count_primes(x: u64) -> u64 {
     // V6: NO y cap — segmented pi table handles any y size efficiently
     let z = (x / y as u64) as usize;
 
+    let t_tables = Instant::now();
     let prime_sieve = Sieve::new(y);
     let mut primes: Vec<u32> = vec![0];
     primes.extend(prime_sieve.primes_from(2).take_while(|&p| p <= y).map(|p| p as u32));
@@ -1055,8 +1086,10 @@ fn count_primes(x: u64) -> u64 {
     let lpf = generate_lpf(y);
     let mu = generate_mu(y);
     let pi = generate_pi(y, &prime_sieve);
+    let tables_time = t_tables.elapsed().as_secs_f64();
 
     // S1: ordinary leaves
+    let t_s1 = Instant::now();
     let pc = primes[c];
     let mut s1: i64 = 0;
     for n in 1..=y {
@@ -1064,18 +1097,36 @@ fn count_primes(x: u64) -> u64 {
             s1 += mu[n] as i64 * phi_cache.phi(x / n as u64);
         }
     }
+    let s1_time = t_s1.elapsed().as_secs_f64();
 
     // S2 = S2_easy + S2_hard, P2 — all concurrent
     // Running all three concurrently is optimal: rayon work-stealing interleaves
     // S2_easy and S2_hard work items, and P2 finishes within their window.
-    let (s2_easy, s2_hard, p2) = std::thread::scope(|s| {
-        let p2_handle = s.spawn(|| compute_p2(x, y, pi_y));
-        let s2_easy_handle = s.spawn(|| compute_s2_easy(x, y, z, c, &primes, &pi));
+    let t_s2 = Instant::now();
+    let (s2_easy, s2_hard, p2, s2e_time, s2h_time, p2_time) = std::thread::scope(|s| {
+        let p2_handle = s.spawn(|| {
+            let t = Instant::now();
+            let r = compute_p2(x, y, pi_y);
+            (r, t.elapsed().as_secs_f64())
+        });
+        let s2_easy_handle = s.spawn(|| {
+            let t = Instant::now();
+            let r = compute_s2_easy(x, y, z, c, &primes, &pi);
+            (r, t.elapsed().as_secs_f64())
+        });
+        let t_h = Instant::now();
         let s2_hard = compute_s2_hard(x, y, z, c, &primes, &lpf, &mu, &pi);
-        let p2 = p2_handle.join().unwrap();
-        let s2_easy = s2_easy_handle.join().unwrap();
-        (s2_easy, s2_hard, p2)
+        let s2h_time = t_h.elapsed().as_secs_f64();
+        let (p2, p2_time) = p2_handle.join().unwrap();
+        let (s2_easy, s2e_time) = s2_easy_handle.join().unwrap();
+        (s2_easy, s2_hard, p2, s2e_time, s2h_time, p2_time)
     });
+    let s2_wall = t_s2.elapsed().as_secs_f64();
+
+    if log_x >= 16.0 {
+        eprintln!("  [profile] y={y} z={z} alpha={alpha:.1} pi_y={pi_y}");
+        eprintln!("  [profile] tables={tables_time:.3}s S1={s1_time:.3}s S2_easy={s2e_time:.3}s S2_hard={s2h_time:.3}s P2={p2_time:.3}s wall={s2_wall:.3}s");
+    }
 
     let s2 = s2_easy + s2_hard;
     let result = s1 + s2 + pi_y as i64 - 1 - p2;

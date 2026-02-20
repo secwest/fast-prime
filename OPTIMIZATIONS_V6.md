@@ -156,3 +156,66 @@ At Max i64: **8% faster** (547.3s → 502.4s).
 - Fenwick tree optimization (cache-aware layout)
 - Improved sieve crossing patterns
 - Better load balancing across segments in S2_hard
+
+---
+
+## Opt 2 — Segmented P2 (Cache-Friendly π Computation)
+
+**What**: Replaced the monolithic ParallelPiSieve (5.4GB at 1Q) with a cache-friendly
+segmented sieve that processes 1M-number segments sequentially.
+
+### The Problem
+
+The old P2 computation allocated a full sieve covering all numbers up to z = x/y:
+- At 1 Quintillion: z = 43.5B → 2.7GB bitmap + 2.7GB prefix sums = **5.4GB**
+- At Max i64: z = 158B → 9.8GB bitmap + 9.8GB prefix sums = **19.6GB**
+- Used rayon parallelism, stealing threads from concurrent S2_easy/S2_hard work
+- Massive memory bandwidth pressure, poor cache utilization
+
+### The Solution
+
+Sort all x/p queries by value, then sweep a 1M-number segmented sieve from 0 upward,
+resolving queries as each segment completes:
+
+1. Pre-compute all (index, x/p) pairs and sort by x/p
+2. For each 1M segment: sieve composites, build prefix sums, resolve pending queries
+3. Maintain running π count across segments
+
+**Memory**: ~2-4MB vs 5.4GB (1350× reduction at 1Q)
+**Threading**: Sequential (no rayon), freeing all threads for S2_easy/S2_hard
+
+### Bug Fixes
+
+Two boundary bugs fixed during development:
+
+1. **Segment boundary edge case**: When x/p falls exactly at a segment boundary (even,
+   multiple of segment size), `largest_odd = xp_val - 1` falls below the segment start.
+   The original code incorrectly used `bit_idx = 0`, counting the first odd number in
+   the segment. Fix: check `largest_odd <= seg_low` and use `running_pi` directly.
+
+2. **Last segment termination**: When max_xp is even and exactly at a segment boundary,
+   `odd_count = 0` caused early loop exit without processing the final query.
+   Fix: round `sieve_end` up to `(max_xp | 1) + 1` to ensure valid last segment.
+
+### Results (Opt 2 vs Opt 1)
+
+| Range | V6 Opt 1 | V6 Opt 2 | Speedup | P2 old→new |
+|-------|----------|----------|---------|------------|
+| 1 Billion | 0.001s | 0.001s | same | — |
+| 100 Trillion | 0.089s | 0.089s | same | — |
+| 10 Quadrillion | 3.56s | 2.71s | 1.31× | 1.8→0.9s |
+| 100 Quadrillion | 21.31s | 14.30s | 1.49× | 7.6→4.2s |
+| **1 Quintillion** | **82.6s** | **61.6s** | **1.34×** | 48.6→31.0s |
+| **Max i64** | **502.4s** | **400.8s** | **1.25×** | 158→135s |
+
+**Profiling at 1 Quintillion** (Opt 2):
+- S1: 0.05s
+- S2_easy: 24.6s (freed from P2 thread pressure)
+- S2_hard: 60.7s ← **bottleneck** (improved from 81.7s due to no P2 thread contention)
+- P2: 31.0s (was 48.6s)
+- Wall time: 61.6s ≈ S2_hard time
+
+**Key insight**: The segmented P2 has a double benefit:
+1. Direct speedup: P2 itself is faster (sequential cache-friendly vs parallel scattered)
+2. Indirect speedup: No rayon thread contention with S2_easy/S2_hard — all 24 threads
+   available for the parallel S2 computation from the start
