@@ -420,6 +420,7 @@ fn main() {
         Case { limit:    100_000_000_000, label: "100 Billion",  expected:   4_118_054_813 },
         Case { limit:  1_000_000_000_000, label: "1 Trillion",   expected: 37_607_912_018 },
         Case { limit: 10_000_000_000_000, label: "10 Trillion",  expected: 346_065_536_839 },
+        Case { limit: 100_000_000_000_000, label: "100 Trillion", expected: 3_204_941_750_802 },
     ];
 
     println!("{:<15} {:>12} {:>18}  {}", "Range", "Time", "Primes Found", "Status");

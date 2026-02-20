@@ -201,3 +201,27 @@ which is significantly more complex to implement correctly.
 | 100 Billion | 0.034s | 21.2× faster | 3% |
 | 1 Trillion | 0.168s | **51.4× faster** | 4.5% |
 | 10 Trillion | 1.190s | **106.8× faster** | 3.3% |
+| 100 Trillion | 7.91s | — | 4.4% faster |
+| 1 Quadrillion | 41.76s | — | 4.3% faster |
+| 10 Quadrillion | 215.26s | — | — (V2 too slow) |
+
+---
+
+## Opt — Barrett correction for large-scale correctness
+
+**Problem**: At 100T+, two overflow/precision bugs caused incorrect prime counts:
+
+1. **small[] update overflow**: The 40-bit reciprocal `(j * recip_p) >> 40` overflows u64 when `j > 2^24 * p` (~50M for p=3). At 100T (v=10^7), this is borderline; at 10Q (v=10^8), massive overflow.
+2. **large[] update Barrett error**: The 64-bit reciprocal `(n_div_p * recip[j]) >> 64` can overestimate `floor(n_div_p/j)` by 1 when the Barrett condition `n*(d-1) < 2^64` is violated.
+
+**Pre-fix errors**: 100T off by 2, 1Q off by 17, 10Q off by 50 trillion (initial), then 30 (after small[] fix only).
+
+**Fix**: (1) Changed small[] reciprocal from 40-bit to 48-bit with u128 multiply. (2) Added `div_recip()` helper with Barrett correction check: verify `q*d ≤ n` after reciprocal divide, decrement if overestimated.
+
+**Results**: All cases now correct through 10 Quadrillion. ~3-5% overhead from correction checks.
+
+| Range | Before (broken) | After (correct) |
+|---|---|---|
+| 100 Trillion | 3,204,941,750,800 ✗ | 3,204,941,750,802 ✓ |
+| 1 Quadrillion | 29,844,570,422,686 ✗ | 29,844,570,422,669 ✓ |
+| 10 Quadrillion | 329,078,366,273,976 ✗ | 279,238,341,033,925 ✓ |

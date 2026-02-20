@@ -9,6 +9,14 @@ use std::time::Instant;
 // Key insight: we only need π(v) for v in the set {1..√N} ∪ {⌊N/k⌋ : k=1..√N}.
 // This set has O(√N) elements. We iteratively sieve these values.
 
+/// Barrett reciprocal division: floor(n/d) using precomputed ceil(2^64/d).
+/// Barrett can overestimate by 1; the correction check costs ~1 extra cycle.
+#[inline(always)]
+fn div_recip(n: u64, d: usize, recip: u64) -> usize {
+    let q = ((n as u128 * recip as u128) >> 64) as usize;
+    q - (q as u128 * d as u128 > n as u128) as usize
+}
+
 /// Integer square root (exact).
 fn isqrt(n: u64) -> u64 {
     if n < 2 { return n; }
@@ -76,10 +84,10 @@ fn count_primes(n: u64) -> u64 {
                     let mut j = crossover + 1;
                     let end4 = phase_a_end.saturating_sub(3);
                     while j <= end4 {
-                        let q0 = ((n_div_p as u128 * *recip.get_unchecked(j) as u128) >> 64) as usize;
-                        let q1 = ((n_div_p as u128 * *recip.get_unchecked(j+1) as u128) >> 64) as usize;
-                        let q2 = ((n_div_p as u128 * *recip.get_unchecked(j+2) as u128) >> 64) as usize;
-                        let q3 = ((n_div_p as u128 * *recip.get_unchecked(j+3) as u128) >> 64) as usize;
+                        let q0 = div_recip(n_div_p, j, *recip.get_unchecked(j));
+                        let q1 = div_recip(n_div_p, j+1, *recip.get_unchecked(j+1));
+                        let q2 = div_recip(n_div_p, j+2, *recip.get_unchecked(j+2));
+                        let q3 = div_recip(n_div_p, j+3, *recip.get_unchecked(j+3));
                         *large.get_unchecked_mut(j) -= *small.get_unchecked(q0) as i64 - pcnt;
                         *large.get_unchecked_mut(j+1) -= *small.get_unchecked(q1) as i64 - pcnt;
                         *large.get_unchecked_mut(j+2) -= *small.get_unchecked(q2) as i64 - pcnt;
@@ -87,7 +95,7 @@ fn count_primes(n: u64) -> u64 {
                         j += 4;
                     }
                     while j <= phase_a_end {
-                        let q = ((n_div_p as u128 * *recip.get_unchecked(j) as u128) >> 64) as usize;
+                        let q = div_recip(n_div_p, j, *recip.get_unchecked(j));
                         *large.get_unchecked_mut(j) -= *small.get_unchecked(q) as i64 - pcnt;
                         j += 1;
                     }
@@ -133,10 +141,10 @@ fn count_primes(n: u64) -> u64 {
                         let mut q = q_start;
                         let end4 = q_end.saturating_add(4); // scalar tail handles q_end..q_end+3
                         while q >= end4 {
-                            let lj0 = ((n_div_p as u128 * *recip.get_unchecked(q) as u128) >> 64) as usize;
-                            let lj1 = ((n_div_p as u128 * *recip.get_unchecked(q-1) as u128) >> 64) as usize;
-                            let lj2 = ((n_div_p as u128 * *recip.get_unchecked(q-2) as u128) >> 64) as usize;
-                            let lj3 = ((n_div_p as u128 * *recip.get_unchecked(q-3) as u128) >> 64) as usize;
+                            let lj0 = div_recip(n_div_p, q, *recip.get_unchecked(q));
+                            let lj1 = div_recip(n_div_p, q-1, *recip.get_unchecked(q-1));
+                            let lj2 = div_recip(n_div_p, q-2, *recip.get_unchecked(q-2));
+                            let lj3 = div_recip(n_div_p, q-3, *recip.get_unchecked(q-3));
                             if first_j <= lj0 {
                                 let d = *small.get_unchecked(q) as i64 - pcnt;
                                 for jj in first_j..=lj0 { *large.get_unchecked_mut(jj) -= d; }
@@ -162,7 +170,7 @@ fn count_primes(n: u64) -> u64 {
                         }
                         while q >= q_end {
                             let last_j = std::cmp::min(
-                                ((n_div_p as u128 * *recip.get_unchecked(q) as u128) >> 64) as usize,
+                                div_recip(n_div_p, q, *recip.get_unchecked(q)),
                                 j_end);
                             if first_j <= last_j {
                                 let delta = *small.get_unchecked(q) as i64 - pcnt;
@@ -198,16 +206,16 @@ fn count_primes(n: u64) -> u64 {
                     }
                 }
             } else {
-                let recip_p = ((1u64 << 40) + p as u64 - 1) / p as u64;
+                let recip_p = ((1u128 << 48) / p as u128 + 1) as u64;
                 unsafe {
                     let pp = p * p;
                     let mut j = v;
                     let end4 = pp + 3;
                     while j >= end4 {
-                        let q0 = ((j as u64 * recip_p) >> 40) as usize;
-                        let q1 = (((j-1) as u64 * recip_p) >> 40) as usize;
-                        let q2 = (((j-2) as u64 * recip_p) >> 40) as usize;
-                        let q3 = (((j-3) as u64 * recip_p) >> 40) as usize;
+                        let q0 = ((j as u128 * recip_p as u128) >> 48) as usize;
+                        let q1 = (((j-1) as u128 * recip_p as u128) >> 48) as usize;
+                        let q2 = (((j-2) as u128 * recip_p as u128) >> 48) as usize;
+                        let q3 = (((j-3) as u128 * recip_p as u128) >> 48) as usize;
                         *small.get_unchecked_mut(j) -= *small.get_unchecked(q0) - pcnt32;
                         *small.get_unchecked_mut(j-1) -= *small.get_unchecked(q1) - pcnt32;
                         *small.get_unchecked_mut(j-2) -= *small.get_unchecked(q2) - pcnt32;
@@ -215,7 +223,7 @@ fn count_primes(n: u64) -> u64 {
                         j -= 4;
                     }
                     while j >= pp {
-                        let q = ((j as u64 * recip_p) >> 40) as usize;
+                        let q = ((j as u128 * recip_p as u128) >> 48) as usize;
                         *small.get_unchecked_mut(j) -= *small.get_unchecked(q) - pcnt32;
                         j -= 1;
                     }
@@ -243,6 +251,8 @@ fn main() {
         Case { limit:    100_000_000_000, label: "100 Billion",  expected:   4_118_054_813 },
         Case { limit:  1_000_000_000_000, label: "1 Trillion",   expected: 37_607_912_018 },
         Case { limit: 10_000_000_000_000, label: "10 Trillion",  expected: 346_065_536_839 },
+        Case { limit: 100_000_000_000_000, label: "100 Trillion", expected: 3_204_941_750_802 },
+        Case { limit: 1_000_000_000_000_000, label: "1 Quadrillion", expected: 29_844_570_422_669 },
     ];
 
     println!("{:<15} {:>12} {:>18}  {}", "Range", "Time", "Primes Found", "Status");
