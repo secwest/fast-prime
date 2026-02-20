@@ -1,6 +1,6 @@
 # fast-prime
 
-A highly optimized prime counting toolkit in Rust, featuring five independent implementations targeting modern hybrid-core CPUs.
+A highly optimized prime counting toolkit in Rust, featuring six independent implementations targeting modern hybrid-core CPUs.
 
 ## Implementations
 
@@ -22,48 +22,52 @@ Full LMO prime counting with segmented sieve for special leaves. O(N^{2/3} / log
 
 ### V5 — Deleglise-Rivat (`src/bin/prime_count_v5.rs`)
 
-Deleglise-Rivat prime counting: splits special leaves into easy (π-table lookup) and hard (sieve-based), reducing sieve work. Same O(N^{2/3} / log N) complexity but fewer sieve iterations for large N. Currently slower than V4 (unoptimized baseline), but provides the foundation for further improvements.
+Deleglise-Rivat prime counting: splits special leaves into easy (π-table lookup) and hard (sieve-based), reducing sieve work. Same O(N^{2/3} / log N) complexity but fewer sieve iterations for large N.
+
+### V6 — Enhanced DR with Segmented Pi Table (`src/bin/prime_count_v6.rs`)
+
+Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized segments instead of requiring the full table to fit in L3. Eliminates the y-cap constraint, allowing larger y values that dramatically reduce hard-leaf sieve work. Falls back to V5's direct approach for small inputs. **Currently the fastest implementation at large scales (1.52× faster than V5 at 1 Quintillion).**
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
 ```
-┌───────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬───────────────────┐
-│ Range         │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ V5 DR        │ Primes Found      │
-│               │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │ (parallel)   │                   │
-├───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼───────────────────┤
-│ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │    0.00080s  │        50,847,534 │
-│ 10 Billion    │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │    0.00300s  │       455,052,511 │
-│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │     4,118,054,813 │
-│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    37,607,912,018 │
-│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │   346,065,536,839 │
-│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │ 3,204,941,750,802 │
-│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │29,844,570,422,669 │
-│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │279,238,341,033,925│
-│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │2,623,557,157,654,233│
-│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │216,289,611,853,439,384│
-└───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
+┌───────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬───────────────────┐
+│ Range         │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ V5 DR        │ V6 Seg-Pi    │ Primes Found      │
+│               │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │ (parallel)   │ (parallel)   │                   │
+├───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼───────────────────┤
+│ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │    0.00080s  │    0.00205s  │        50,847,534 │
+│ 10 Billion    │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │    0.00300s  │    0.00175s  │       455,052,511 │
+│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │    0.00300s  │     4,118,054,813 │
+│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    0.00651s  │    37,607,912,018 │
+│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │    0.02494s  │   346,065,536,839 │
+│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.08946s  │ 3,204,941,750,802 │
+│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.51836s  │29,844,570,422,669 │
+│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    3.52165s  │279,238,341,033,925│
+│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   20.71619s  │2,623,557,157,654,233│
+│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │  113.35781s  │24,739,954,287,740,860│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  547.27776s  │216,289,611,853,439,384│
+└───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
 
-### Best (V5) vs V1 Speedup
+### Best (V6) vs V1 Speedup
 
-| Range | V1 (24 threads) | V5 DR (parallel) | V5 Speedup |
+| Range | V1 (24 threads) | V6 Seg-Pi (parallel) | V6 Speedup |
 |---|---|---|---|
-| 1 Billion | 0.006s | 0.0008s | **7.5×** |
-| 10 Billion | 0.066s | 0.002s | **33.0×** |
+| 1 Billion | 0.006s | 0.002s | **3.0×** |
+| 10 Billion | 0.066s | 0.002s | **37.5×** |
 | 100 Billion | 0.721s | 0.003s | **240.3×** |
-| 1 Trillion | 8.640s | 0.007s | **1234.3×** |
-| 10 Trillion | 127.13s | 0.026s | **4889.6×** |
-| 100 Trillion | 2389.23s | 0.092s | **25970.0×** |
+| 1 Trillion | 8.640s | 0.007s | **1327.0×** |
+| 10 Trillion | 127.13s | 0.025s | **5095.7×** |
+| 100 Trillion | 2389.23s | 0.089s | **26844.2×** |
 
 ### Comparison vs Strix Halo Reference
 
-| Range | V5 (Ultra 9 285K) | Strix Halo Reference | Speedup |
+| Range | V6 (Ultra 9 285K) | Strix Halo Reference | Speedup |
 |---|---|---|---|
-| 1 Billion | 0.0008s | 0.011s | **13.8×** |
-| 10 Billion | 0.002s | 0.109s | **54.5×** |
+| 1 Billion | 0.002s | 0.011s | **5.5×** |
+| 10 Billion | 0.002s | 0.109s | **62.3×** |
 | 100 Billion | 0.003s | 1.483s | **494.3×** |
-| 1 Trillion | 0.007s | 25.820s | **3688.6×** |
+| 1 Trillion | 0.007s | 25.820s | **3966.2×** |
 
 ## Key Optimizations
 
@@ -128,6 +132,16 @@ See [OPTIMIZATIONS_V5.md](OPTIMIZATIONS_V5.md) for the full optimization log.
 - **Parallel S2_easy** — Easy leaf computation parallelized across b values via rayon. Each b is independent (no sieve state to share).
 - **All V4 infrastructure** — PhiTiny cache, parallel P2 sieve, pre-sieve template, BitSieve with incremental counting, Barrett fast division.
 
+### V6 — Enhanced DR with Segmented Pi Table
+
+See [OPTIMIZATIONS_V6.md](OPTIMIZATIONS_V6.md) for the full optimization log.
+
+- **Segmented π-table processing** — Instead of requiring the full π-table to fit in L3 cache (36MB, capping y at 9M), processes it in L2-sized segments of 512K entries (2MB). All π lookups hit L2 cache (5ns) instead of L3/DRAM (20-100ns).
+- **Uncapped y parameter** — With segmented processing, y is no longer constrained by cache size. Larger y dramatically reduces S2_hard work by shrinking z = x/y. At 10^18: y goes from 9M→19M, halving z and the number of hard-leaf sieve segments.
+- **Adaptive dispatch** — Automatically uses V5's direct approach (parallel over b, with prefetch) when the π-table fits in L3, switching to segmented approach for larger scales. Best of both worlds.
+- **Narrowed b-range per segment** — Each segment computes the maximum valid b value (p_b² ≤ x/seg_low), skipping irrelevant b iterations.
+- **1.52× faster at 1 Quintillion** — 113.4s vs V5's 172.4s. 1.72× faster than V4's 192.0s.
+
 ## Building
 
 Requires [Rust](https://rustup.rs/) (1.70+).
@@ -150,6 +164,9 @@ cargo build --release
 
 # Run V5 (Deleglise-Rivat, parallel easy leaves)
 ./target/release/prime_count_v5
+
+# Run V6 (Enhanced DR with segmented pi table — fastest at large scales)
+./target/release/prime_count_v6
 ```
 
 The build is configured with aggressive optimizations in `Cargo.toml`:
@@ -226,6 +243,19 @@ rustflags = ["-C", "target-cpu=native"]
    - Type 1 (b ≤ π(√y)): All leaves via sieve, same as V4
    - Type 2 (π(√y) < b ≤ π(√z)): Only hard leaves (x/(p·q) ≥ y) via sieve
 5. **P2 (prime pairs)** — Same as V4
+6. **Result** — π(x) = S1 + S2_easy + S2_hard + π(y) - 1 - P2
+
+### V6 — Enhanced DR with Segmented Pi Table
+
+Same algorithmic formula as V5, with a key implementation innovation:
+
+1. **Precompute tables** — Same as V5, but y is NOT capped at 9M. Larger y reduces z = x/y, cutting S2_hard work
+2. **S1 (ordinary leaves)** — Same as V5
+3. **S2_easy (adaptive)** — Dispatches based on π-table size:
+   - **Small tables (≤ L3)**: V5's direct approach — parallel over b values, software prefetch, clustering
+   - **Large tables (> L3)**: Segmented approach — divides π[0..y] into 2MB segments, processes each segment in parallel. For each segment, finds all (b, l) pairs where x/(p_b·p_l) falls in that segment range, ensuring all π lookups hit L2 cache
+4. **S2_hard (hard special leaves)** — Same as V5, benefits from smaller z
+5. **P2 (prime pairs)** — Same as V5
 6. **Result** — π(x) = S1 + S2_easy + S2_hard + π(y) - 1 - P2
 
 ## Dependencies
