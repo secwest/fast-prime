@@ -798,6 +798,21 @@ sieve memory is wasted on guaranteed-zero bits.
 
 ---
 
+## Optimization 31: P2 Prefix u32→u64 + Max i64 Benchmark ✅
+
+**Problem**: `ParallelPiSieve` stored prefix counts as `Vec<u32>`. At large inputs where
+π(z) > 4.3B (z > ~115B), the prefix overflows u32 max. This blocks computing π(2^63-1)
+where z ≈ 200B and π(z) ≈ 7.7B.
+
+**Fix**: Changed `prefix: Vec<u32>` → `Vec<u64>` in struct, construction, and accumulation.
+Memory doubles for prefix table (12.5GB at 2^63-1 scale), but 96GB RAM is sufficient.
+
+**Result**: π(2^63-1) = π(9,223,372,036,854,775,807) = **216,289,611,853,439,384** primes,
+computed in **939.2 seconds** (~15.65 minutes). Consistent with Li(2^63-1) ≈ 2.17 × 10^17.
+All existing benchmarks verified correct (no regression).
+
+---
+
 ## Current Best Performance
 
 | Range          | V4 Time  | V3 Time  | Speedup vs V3 |
@@ -812,10 +827,12 @@ sieve memory is wasted on guaranteed-zero bits.
 | 10 Quadrillion | 5.430s   |    —     |       —        |
 | 100 Quadrillion| 33.63s   |    —     |       —        |
 | 1 Quintillion  | 192.0s   |    —     |       —        |
+| Max i64 (2⁶³-1)| 939.2s  |    —     |       —        |
 
 ### Remaining Optimization Opportunities
 
-1. **Extend pi-formula to more segments**: Build per-segment pi tables from frozen sieve state
-2. **Gourdon's algorithm**: O(x^{2/3} / log²x), fundamentally better complexity
-3. **SIMD correction pass**: AVX2 dot-product for the sequential correction loop
-4. **Bucket sieve**: Maintain prime-to-segment mapping to avoid per-segment startup cost
+1. **Wheel-30 S2 sieve**: Replace odd-only with mod-30 wheel. 8/30 vs 1/2 → ~47% less cross-off
+2. **Extend pi-formula to more segments**: Build per-segment pi tables from frozen sieve state
+3. **Gourdon's algorithm**: O(x^{2/3} / log²x), fundamentally better complexity
+4. **SIMD correction pass**: AVX2 dot-product for the sequential correction loop
+5. **Bucket sieve**: Maintain prime-to-segment mapping to avoid per-segment startup cost

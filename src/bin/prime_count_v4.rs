@@ -112,7 +112,7 @@ impl PhiTinyCache {
 /// Replaces primal::Sieve for P2 to enable multi-threaded sieve construction.
 struct ParallelPiSieve {
     bitmap: Vec<u64>,   // bit i = is_prime(2i+1)
-    prefix: Vec<u32>,   // prefix[w] = count of set bits in bitmap[0..w]
+    prefix: Vec<u64>,   // prefix[w] = count of set bits in bitmap[0..w]
 }
 
 impl ParallelPiSieve {
@@ -187,9 +187,9 @@ impl ParallelPiSieve {
                 }
             });
 
-        let mut prefix = vec![0u32; nwords + 1];
+        let mut prefix = vec![0u64; nwords + 1];
         for i in 0..nwords {
-            prefix[i + 1] = prefix[i] + bitmap[i].count_ones();
+            prefix[i + 1] = prefix[i] + bitmap[i].count_ones() as u64;
         }
 
         ParallelPiSieve { bitmap, prefix }
@@ -1005,6 +1005,7 @@ fn main() {
         Case { limit: 10_000_000_000_000_000, label: "10 Quadrillion", expected: 279_238_341_033_925 },
         Case { limit: 100_000_000_000_000_000, label: "100 Quadrillion", expected: 2_623_557_157_654_233 },
         Case { limit: 1_000_000_000_000_000_000, label: "1 Quintillion", expected: 24_739_954_287_740_860 },
+        Case { limit: 9_223_372_036_854_775_807, label: "Max i64", expected: 216_289_611_853_439_384 },
     ];
 
     println!("{:<15} {:>12} {:>18}  {}", "Range", "Time", "Primes Found", "Status");
@@ -1014,11 +1015,12 @@ fn main() {
         let t0 = Instant::now();
         let count = count_primes(c.limit);
         let secs = t0.elapsed().as_secs_f64();
-        let check = if count == c.expected { "✓" } else { "✗ MISMATCH" };
+        let check = if c.expected == 0 { "?" } else if count == c.expected { "✓" } else { "✗ MISMATCH" };
 
         println!(
             "{:<15} {:>10.5}s   {:>16}  {}  (expected: {})",
-            c.label, secs, count, check, c.expected
+            c.label, secs, count, check,
+            if c.expected == 0 { "unknown".to_string() } else { c.expected.to_string() }
         );
     }
 }
