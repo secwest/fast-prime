@@ -223,18 +223,26 @@ fn compute_s2_easy(x: u64, y: usize, z: usize, c: usize,
     let min_b = std::cmp::max(c, pi_sqrty) + 1;
     if min_b > pi_y { return 0; }
 
+    // Precompute reciprocals for all primes
+    let recip: Vec<u64> = primes.iter().map(|&p| {
+        if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
+    }).collect();
+
+    #[inline(always)]
+    fn fast_div_easy(n: u64, d: u64, recip_d: u64) -> u64 {
+        let q = ((n as u128 * recip_d as u128) >> 64) as u64;
+        q + (n - q.wrapping_mul(d) >= d) as u64
+    }
+
     // Parallel over b
     let sum: i64 = (min_b..=pi_y).into_par_iter().map(|b| {
         let prime = primes[b] as u64;
         let xp = x / prime;
 
-        // Easy/hard boundary: l > π(z/p) → x/(p·p_l) < y (easy leaf)
         let z_over_p = (z as u64 / prime) as usize;
         let easy_start_l = pi[std::cmp::min(z_over_p, y)] as usize;
-        let min_l = std::cmp::max(easy_start_l, b); // must have l > b
+        let min_l = std::cmp::max(easy_start_l, b);
 
-        // Non-trivial/trivial boundary: l ≤ π(x/p²) → x/(p·p_l) ≥ p → use formula
-        // l > π(x/p²) → x/(p·p_l) < p → φ = 1 (trivial)
         let xpp = std::cmp::min((xp / prime) as usize, y);
         let nontrivial_end_l = pi[xpp] as usize;
 
@@ -250,14 +258,12 @@ fn compute_s2_easy(x: u64, y: usize, z: usize, c: usize,
         let nt_max_l = std::cmp::min(nontrivial_end_l, pi_y);
         let mut l = nt_max_l;
         while l > min_l && l < primes.len() {
-            let xpq = (xp / primes[l] as u64) as usize;
-            // Clustering: consecutive l values may give the same π(x/pq)
+            let xpq = fast_div_easy(xp, primes[l] as u64, recip[l]) as usize;
             let pi_xpq = pi[std::cmp::min(xpq, y)] as usize;
             let phi_val = pi_xpq as i64 - b as i64 + 2;
-            // Find next threshold where π changes
             let next_pi = pi_xpq + 1;
             if next_pi < primes.len() && primes[next_pi] as usize <= y {
-                let threshold = (xp / primes[next_pi] as u64) as usize;
+                let threshold = fast_div_easy(xp, primes[next_pi] as u64, recip[next_pi]) as usize;
                 let lmin = std::cmp::max(pi[std::cmp::min(threshold, y)] as usize, min_l);
                 if lmin < l {
                     local_sum += phi_val * (l - lmin) as i64;
@@ -900,6 +906,8 @@ fn count_primes(x: u64) -> u64 {
         13.0 + 3.0 * (log_x - 16.0)
     };
     let y = std::cmp::max((icbrt(x) as f64 * alpha) as usize, 1);
+    // Cap y so pi table (4*y bytes) fits in L3 cache (36MB)
+    let y = std::cmp::min(y, 9_000_000);
     let z = (x / y as u64) as usize;
 
     let prime_sieve = Sieve::new(y);

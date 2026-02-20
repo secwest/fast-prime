@@ -81,3 +81,13 @@ V5 is correct but slower than V4 — this is expected since V5 uses V4's alpha p
   - 1Q: 0.636s → 0.539s (15% faster, now 1.43× FASTER than V4!)
   - 10Q: 3.74s → 3.55s (5% faster, now 1.59× FASTER than V4!)
   - 100Q: 23.88s → 24.58s (~same, 1.46× FASTER than V4)
+
+### Opt 4: Y-cap for L3 cache efficiency (**16% speedup at 1 Quintillion**)
+- Problem: at 10^18, y=19M makes pi table 76MB (> 36MB L3), causing DRAM cache misses
+- Solution: cap y at 9M so pi table (36MB) fits in L3 cache
+- Shifts work from S2_easy (bottleneck at 10^18) to S2_hard, balancing the two concurrent tasks
+- S2_easy/S2_hard balance at 10^18: 172.2s/166.7s (was 206s/~100s — severely imbalanced)
+- Only activates at 10^18+ scales (y < 9M at all lower scales)
+- Results (cumulative):
+  - 100Q: 24.58s → 24.81s (~same, no cap applied)
+  - 1 Quintillion: 206.45s → 172.52s (**16% faster**, now 10% FASTER than V4's 192s!)
