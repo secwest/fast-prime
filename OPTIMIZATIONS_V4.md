@@ -831,8 +831,41 @@ All existing benchmarks verified correct (no regression).
 
 ### Remaining Optimization Opportunities
 
-1. **Wheel-30 S2 sieve**: Replace odd-only with mod-30 wheel. 8/30 vs 1/2 → ~47% less cross-off
-2. **Extend pi-formula to more segments**: Build per-segment pi tables from frozen sieve state
-3. **Gourdon's algorithm**: O(x^{2/3} / log²x), fundamentally better complexity
-4. **SIMD correction pass**: AVX2 dot-product for the sequential correction loop
-5. **Bucket sieve**: Maintain prime-to-segment mapping to avoid per-segment startup cost
+1. **Extend pi-formula to more segments**: Build per-segment pi tables from frozen sieve state
+2. **Gourdon's algorithm**: O(x^{2/3} / log²x), fundamentally better complexity
+3. **SIMD correction pass**: AVX2 dot-product for the sequential correction loop
+4. **Bucket sieve**: Maintain prime-to-segment mapping to avoid per-segment startup cost
+
+---
+
+## Failed: Wheel-30 S2 Sieve ✗
+
+**Hypothesis**: Replace odd-only sieve (1 bit per 2 integers) with wheel-30 sieve (8 bits per
+30 integers). Only represents numbers coprime to {2,3,5}, reducing sieve memory and cross-off
+by ~47% (8/30 vs 1/2 density).
+
+**Implementation**: Full wheel-30 with precomputed step tables (`compute_wheel_steps`), wheel
+position mapping (`int_to_wheel_bp`), and modified template (period=8008 bits for primes
+{7,11,13}). Segment size rounded to multiple of 30. All correctness tests pass.
+
+**Results**: 3-21% SLOWER across all scales.
+
+| Range          | Odd-only | Wheel-30 | Change    |
+|----------------|----------|----------|-----------|
+| 10 Trillion    | 0.019s   | 0.023s   | +21% ✗   |
+| 100 Trillion   | 0.091s   | 0.109s   | +20% ✗   |
+| 1 Quadrillion  | 0.755s   | 0.776s   | +3% ✗    |
+| 10 Quadrillion | 5.430s   | 5.683s   | +5% ✗    |
+| 100 Quadrillion| 33.63s   | 34.90s   | +4% ✗    |
+
+**Why it failed**:
+1. **Variable stride defeats prefetcher** — Odd-only uses constant step `k += p` which the
+   hardware prefetcher learns instantly. Wheel-30 uses `k += steps[ci]` with 8 different
+   step sizes, breaking stride prediction.
+2. **Expensive position mapping** — `int_to_wheel_bp` requires division/modulo by 30 (compiled
+   to multiply+shift, ~5 instructions). Odd-only uses shift-by-1 (~1 instruction).
+3. **Loss of 4× unrolling** — The 4× unrolled odd-only loop cannot be trivially adapted to
+   variable-stride wheel-30 stepping.
+4. **Diminishing returns at scale** — Degradation is worst at smaller scales (21% at 10T)
+   where per-iteration overhead dominates. At larger scales (4% at 100Q) the iteration
+   reduction starts to compensate, but never enough to break even.
