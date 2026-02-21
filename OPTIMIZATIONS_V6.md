@@ -219,3 +219,75 @@ Two boundary bugs fixed during development:
 1. Direct speedup: P2 itself is faster (sequential cache-friendly vs parallel scattered)
 2. Indirect speedup: No rayon thread contention with S2_easy/S2_hard — all 24 threads
    available for the parallel S2 computation from the start
+
+---
+
+## Opt 3 — ValidM List + Alpha Re-tune
+
+**What**: Precompute a filtered list of valid m values for S2_hard Type 1 leaves,
+reducing inner loop iteration by ~8.5×. Re-tune alpha curve for the new cost profile.
+
+### The Problem
+
+The Type 1 inner loop in S2_hard iterates over ALL m in [min_m, max_m] (up to 23M values),
+checking `mu[m] != 0 && lpf[m] > prime` for each. At 1Q with 648 b values across all
+segments: ~15 billion iterations, most rejected. This dominates S2_hard at ~5ns/iteration.
+
+### ValidM List
+
+Pre-filter once: build a sorted list of m values where:
+1. `mu[m] != 0` (m is squarefree — eliminates 39% of values)
+2. `lpf[m] > primes[c+1]` (lpf exceeds minimum Type 1 threshold — eliminates another ~55%)
+
+Combined: list has ~14% of all m ≤ y (2.7M entries at 1Q vs 23M).
+Packed as 8-byte structs (m:u32, lpf:u16, mu:i8), the list is ~21MB — fits in L3 cache.
+
+In the Type 1 loop, binary search (`partition_point`) finds the m range, then iterate
+only valid entries. The lpf check against prime[b] still runs per-entry but hits ~55%
+(entries already pre-filtered by minimum threshold).
+
+**Iteration reduction**: 15B → ~1.75B iterations = **8.5× fewer**
+
+### Alpha Re-tune
+
+The ValidM optimization makes Type 1 leaves cheaper per unit, shifting the optimal balance.
+Re-swept alpha at 1Q and Max i64:
+
+| Alpha | 1Q time | Max i64 time |
+|-------|---------|-------------|
+| 18 | 63.2s | — |
+| 20 | **51.6s** | — |
+| 21 | **51.9s** | — |
+| 23 | 53.4s | — |
+| 24 | — | 360.2s |
+| 28 | — | **351.2s** |
+| 30 | — | 359.4s |
+
+Updated alpha curve:
+- log_x 17-18: `16.0 + 5.0 * (log_x - 17)` → ramps 16→21 (was 16→23)
+- log_x > 18: `21.0 + 7.0 * (log_x - 18)` → at Max i64: alpha=27.7 (similar to before)
+
+### Results (Opt 3 vs Opt 2)
+
+| Range | V6 Opt 2 | V6 Opt 3 | Speedup |
+|-------|----------|----------|---------|
+| 1 Billion | 0.001s | 0.001s | same |
+| 100 Trillion | 0.089s | 0.089s | same |
+| 10 Quadrillion | 2.71s | 2.31s | 1.17× |
+| 100 Quadrillion | 14.30s | 13.95s | 1.03× |
+| **1 Quintillion** | **61.6s** | **52.0s** | **1.18×** |
+| **Max i64** | **400.8s** | **368.1s** | **1.09×** |
+
+**Profiling at 1 Quintillion** (Opt 3):
+- S1: 0.04s
+- S2_easy: 51.0s (now balanced with S2_hard!)
+- S2_hard: 51.1s (was 60.7s — ValidM saves ~10s)
+- P2: 32.3s
+- Wall time: 52.0s
+
+### Cumulative Optimization Progress
+
+| Range | V6 Opt 0 | V6 Opt 3 | Total Speedup |
+|-------|----------|----------|---------------|
+| 1 Quintillion | 113.4s | 52.0s | **2.18×** |
+| Max i64 | 547.3s | 368.1s | **1.49×** |

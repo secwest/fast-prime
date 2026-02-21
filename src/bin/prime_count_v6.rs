@@ -579,6 +579,33 @@ fn compute_s2_hard(x: u64, y: usize, z: usize, c: usize,
 
     if c >= pi_sqrtz { return 0; }
 
+    // Precompute filtered list for Type 1 leaves: only squarefree m with
+    // lpf > primes[c+1] (minimum threshold for any Type 1 prime).
+    // At 1Q this reduces iteration from ~23M to ~2.7M entries (~12MB, fits in L3).
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    struct ValidM {
+        m: u32,
+        lpf: u16,    // clamped at u16::MAX (only compared against primes ≤ √y)
+        mu_val: i8,
+        _pad: u8,
+    }
+
+    let min_lpf_threshold = if c + 1 < primes.len() { primes[c + 1] as i32 } else { i32::MAX };
+    let valid_m_list: Vec<ValidM> = if pi_sqrty > c {
+        (1..=y)
+            .filter(|&m| mu[m] != 0 && lpf[m] > min_lpf_threshold)
+            .map(|m| ValidM {
+                m: m as u32,
+                lpf: std::cmp::min(lpf[m] as u32, u16::MAX as u32) as u16,
+                mu_val: mu[m],
+                _pad: 0,
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
     let target_segs = rayon::current_num_threads() * 32;
     let segment_size = std::cmp::max(z / target_segs, 1 << 17).next_power_of_two();
     let template = PreSieveTemplate::new(primes, std::cmp::min(c, primes.len() - 1));
@@ -650,7 +677,7 @@ fn compute_s2_hard(x: u64, y: usize, z: usize, c: usize,
 
             let mut b = c + 1;
 
-            // Type 1: b ≤ π(√y), ALL leaves
+            // Type 1: b ≤ π(√y), ALL leaves — using precomputed valid_m_list
             while b <= std::cmp::min(pi_sqrty, cur_max_b) && b < nprimes {
                 let prime = primes[b] as u64;
                 let x_div_prime = x / prime;
@@ -661,10 +688,15 @@ fn compute_s2_hard(x: u64, y: usize, z: usize, c: usize,
 
                 if prime as usize >= max_m { break; }
 
+                // Binary search for m range in precomputed list
+                let vm_start = valid_m_list.partition_point(|v| (v.m as usize) <= min_m);
+                let vm_end = valid_m_list.partition_point(|v| (v.m as usize) <= max_m);
+
                 let mut prev_pos: Option<usize> = None;
                 let mut running_count: i64 = 0;
-                for m in (min_m + 1..=max_m).rev() {
-                    if mu[m] != 0 && (prime as i32) < lpf[m] {
+                for v in valid_m_list[vm_start..vm_end].iter().rev() {
+                    if prime < v.lpf as u64 {
+                        let m = v.m as usize;
                         let xpm = (x_div_prime / m as u64) as usize;
                         if xpm > low && xpm < high {
                             let pos = int_to_odd_bp(xpm, low);
@@ -673,12 +705,12 @@ fn compute_s2_hard(x: u64, y: usize, z: usize, c: usize,
                                 Some(pp) if pos == pp => running_count,
                                 Some(pp) => { running_count += sieve.count_delta(pp, pos); running_count }
                             };
-                            s2_local -= mu[m] as i64 * (phi[b] + count);
-                            coeff[b] -= mu[m] as i64;
+                            s2_local -= v.mu_val as i64 * (phi[b] + count);
+                            coeff[b] -= v.mu_val as i64;
                             prev_pos = Some(pos);
                         } else if xpm == low {
-                            s2_local -= mu[m] as i64 * phi[b];
-                            coeff[b] -= mu[m] as i64;
+                            s2_local -= v.mu_val as i64 * phi[b];
+                            coeff[b] -= v.mu_val as i64;
                         }
                     }
                 }
@@ -1065,11 +1097,11 @@ fn count_primes(x: u64) -> u64 {
     } else if log_x <= 17.0 {
         13.0 + 3.0 * (log_x - 16.0)
     } else if log_x <= 18.0 {
-        // V6 Opt 1: higher alpha for segmented pi regime
-        // Larger y reduces S2_hard work; segmented S2_easy handles large pi tables
-        16.0 + 7.0 * (log_x - 17.0)
+        // V6 Opt 3: ValidM list makes Type 1 cheaper, optimal alpha=20-21 at 1Q
+        16.0 + 5.0 * (log_x - 17.0)
     } else {
-        23.0 + 5.0 * (log_x - 18.0)
+        // At Max i64 (log_x≈18.96): alpha≈27.7 (optimal ~28)
+        21.0 + 7.0 * (log_x - 18.0)
     };
     let y = std::cmp::max((icbrt(x) as f64 * alpha) as usize, 1);
     // V6: NO y cap — segmented pi table handles any y size efficiently

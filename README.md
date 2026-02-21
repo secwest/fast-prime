@@ -26,7 +26,7 @@ Deleglise-Rivat prime counting: splits special leaves into easy (π-table lookup
 
 ### V6 — Enhanced DR with Segmented Pi Table (`src/bin/prime_count_v6.rs`)
 
-Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized segments instead of requiring the full table to fit in L3. Eliminates the y-cap constraint, allowing larger y values that dramatically reduce hard-leaf sieve work. Segmented P2 replaces the multi-GB monolithic sieve with a 2-4MB cache-friendly approach. Falls back to V5's direct approach for small inputs. **Currently the fastest implementation at large scales (2.79× faster than V5, 3.11× faster than V4 at 1 Quintillion).**
+Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized segments instead of requiring the full table to fit in L3. Eliminates the y-cap constraint, allowing larger y values that dramatically reduce hard-leaf sieve work. Segmented P2 replaces the multi-GB monolithic sieve with a 2-4MB cache-friendly approach. ValidM list pre-filters squarefree numbers for 8.5× fewer Type 1 iterations. Falls back to V5's direct approach for small inputs. **Currently the fastest implementation at large scales (3.31× faster than V5, 3.69× faster than V4 at 1 Quintillion).**
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -42,10 +42,10 @@ Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized seg
 │ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │    0.02821s  │   346,065,536,839 │
 │ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.08932s  │ 3,204,941,750,802 │
 │ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.52744s  │29,844,570,422,669 │
-│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.70560s  │279,238,341,033,925│
-│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.29931s  │2,623,557,157,654,233│
-│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   61.62849s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  400.76988s  │216,289,611,853,439,384│
+│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.30969s  │279,238,341,033,925│
+│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   13.94732s  │2,623,557,157,654,233│
+│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   52.00455s  │24,739,954,287,740,860│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  368.14410s  │216,289,611,853,439,384│
 └───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
 
