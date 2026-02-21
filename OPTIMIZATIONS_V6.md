@@ -338,3 +338,60 @@ contention allows S2_hard to benefit from freed CPU resources: 365s → 347s.
 | 100 Trillion | 0.089s | 0.217s | 0.41× (direct path overhead) |
 | 1 Quintillion | 113.4s | 51.6s | **2.20×** |
 | Max i64 | 547.3s | 350.2s | **1.56×** |
+
+---
+
+## Opt 5: Alpha Curve Re-tune for Max i64
+
+### Problem
+
+With V6 Opt 4, the alpha curve for log_x > 18 used slope 7.0, giving alpha ≈ 27.8
+at Max i64 (log_x ≈ 18.965). Profiling showed S2_easy and S2_hard unbalanced at
+certain scales, and an alpha sweep at Max i64 revealed:
+
+| Alpha | Max i64 Wall |
+|-------|-------------|
+| 21 | 408.4s |
+| 23 | 354.6s |
+| 25 | 374.5s |
+| 27 | 367.2s |
+| 29 | 343.2s |
+| 31 | **339.5s** |
+| 32 | 350.9s |
+| 33 | 352.3s |
+
+Alpha=31 is the sweet spot — S2_easy and S2_hard perfectly balanced at ~339s each.
+
+### Fix
+
+Changed the log_x > 18 slope from 7.0 to 10.4:
+- Old: `21.0 + 7.0 * (log_x - 18.0)` → alpha=27.8 at Max i64
+- New: `21.0 + 10.4 * (log_x - 18.0)` → alpha=31.0 at Max i64
+
+The alpha at 1Q (log_x=18.0) remains 21.0 — only the ramp above 1Q changes.
+
+### Results (Opt 5 vs Opt 4)
+
+| Range | Opt 4 | Opt 5 | Improvement |
+|-------|-------|-------|-------------|
+| 1 Quintillion | 51.6s | 51.8s | same |
+| **Max i64** | **362.8s** | **342.5s** | **5.6%** |
+
+### Cumulative Progress (V6 Opt 0 → V6 Opt 5)
+
+| Range | V6 Opt 0 | V6 Opt 5 | Total Speedup |
+|-------|----------|----------|---------------|
+| 100 Trillion | 0.089s | 0.22s | 0.40× (direct path overhead) |
+| 1 Quintillion | 113.4s | 51.8s | **2.19×** |
+| Max i64 | 547.3s | 342.5s | **1.60×** |
+
+### Failed Experiment: Word-Mask Sieve Crossing
+
+Also tested word-level bitmask crossing for small primes (p < 32) in S2_hard/S2_easy.
+The idea: precompute per-word masks for primes 17, 19, 23, 29, 31 and clear all
+composites per word at once (popcount + mask) instead of bit-by-bit.
+
+Result: **no measurable improvement**. The sieve crossing for small primes accounts
+for < 1% of S2_hard's total time — the m-loop and sieve counting dominate. The
+word-level approach also touched every word sequentially vs the 4x-unrolled stride
+pattern, adding cache pressure without benefit. Reverted.

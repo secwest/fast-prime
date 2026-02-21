@@ -1141,8 +1141,8 @@ fn count_primes(x: u64) -> u64 {
         // V6 Opt 3: ValidM list makes Type 1 cheaper, optimal alpha=20-21 at 1Q
         16.0 + 5.0 * (log_x - 17.0)
     } else {
-        // At Max i64 (log_x≈18.96): alpha≈27.7 (optimal ~28)
-        21.0 + 7.0 * (log_x - 18.0)
+        // V6 Opt 5: steeper ramp to alpha=31 at Max i64 (log_x≈18.96)
+        21.0 + 10.4 * (log_x - 18.0)
     };
     let y = std::cmp::max((icbrt(x) as f64 * alpha) as usize, 1);
     // V6: NO y cap — segmented pi table handles any y size efficiently
