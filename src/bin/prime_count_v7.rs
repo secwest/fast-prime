@@ -183,7 +183,7 @@ fn get_x_star(x: u64, y: u64) -> u64 {
 
 struct BigPiTable {
     bits: Vec<u64>,     // bit k = is_prime(2k+1)
-    prefix: Vec<u32>,   // prefix[w] = prime count in odd numbers for words 0..w-1
+    prefix: Vec<u64>,   // prefix[w] = prime count in odd numbers for words 0..w-1
 }
 
 impl BigPiTable {
@@ -252,25 +252,25 @@ impl BigPiTable {
         }
         bits.truncate(nwords);
 
-        let mut prefix = vec![0u32; nwords + 1];
+        let mut prefix = vec![0u64; nwords + 1];
         for i in 0..nwords {
-            prefix[i + 1] = prefix[i] + bits[i].count_ones();
+            prefix[i + 1] = prefix[i] + bits[i].count_ones() as u64;
         }
 
         BigPiTable { bits, prefix }
     }
 
     #[inline]
-    fn pi(&self, n: usize) -> u32 {
+    fn pi(&self, n: usize) -> u64 {
         if n < 2 { return 0; }
-        let mut count = 1u32; // prime 2
+        let mut count = 1u64; // prime 2
         if n < 3 { return count; }
         let odd_idx = (n - 1) / 2;
         let word = odd_idx / 64;
         let bit = odd_idx % 64;
         count += self.prefix[word];
         let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
-        count += (unsafe { *self.bits.get_unchecked(word) } & mask).count_ones();
+        count += (unsafe { *self.bits.get_unchecked(word) } & mask).count_ones() as u64;
         count
     }
 }
@@ -372,153 +372,29 @@ fn compute_phi0(x: u64, _y: usize, z: usize, k: usize,
 }
 
 // ── B: equivalent to P2 ─────────────────────────────────────────────────────
-// Sum of π(x/p) for primes y < p ≤ √x, minus combinatorial correction.
-// Reuses V6's segmented P2 sieve approach.
+// Sum of π(x/p) for primes y < p ≤ √x.
+// Uses a dedicated BigPiTable covering [0, max(x/p)] for parallel O(1) lookups.
 
-fn compute_b(x: u64, y: usize, pi_y: usize) -> i64 {
+fn compute_b(x: u64, y: usize, _pi_y: usize) -> i64 {
     let sqrt_x = isqrt(x) as usize;
     if y >= sqrt_x { return 0; }
 
     let small_sieve = Sieve::new(sqrt_x);
     let b_primes: Vec<u64> = small_sieve.primes_from(y + 1)
         .take_while(|&p| p <= sqrt_x).map(|p| p as u64).collect();
-    let pi_sqrt_x = (pi_y + b_primes.len()) as i64;
 
-    if b_primes.is_empty() {
-        let c2 = |n: i64| n * (n - 1) / 2;
-        return -c2(pi_sqrt_x) + c2(pi_y as i64);
-    }
+    if b_primes.is_empty() { return 0; }
 
-    // Sort x/p values for segment processing
-    let mut xp_pairs: Vec<(usize, usize)> = b_primes.iter().enumerate()
-        .map(|(i, &p)| (i, (x / p) as usize)).collect();
-    xp_pairs.sort_unstable_by_key(|&(_, xp)| xp);
+    // Largest x/p comes from smallest prime
+    let max_xp = (x / b_primes[0]) as usize;
 
-    let max_xp = xp_pairs.last().unwrap().1;
-    let sieve_limit = std::cmp::max(max_xp + 1, 3);
-    let sqrt_limit = isqrt(sieve_limit as u64) as usize;
-    let cross_sieve = Sieve::new(sqrt_limit);
-    let cross_primes: Vec<usize> = cross_sieve.primes_from(3)
-        .take_while(|&p| p <= sqrt_limit).collect();
+    // Build parallel sieve covering [0, max_xp] for O(1) π lookups
+    let b_pi = BigPiTable::new(max_xp);
 
-    const SEG_SIZE: usize = 1 << 20;
-
-    // Pre-sieve masks for primes 3, 5, 7
-    let build_masks = |p: usize| -> Vec<u64> {
-        (0..p).map(|off| {
-            let mut m = 0u64;
-            let mut pos = off;
-            while pos < 64 { m |= 1u64 << pos; pos += p; }
-            m
-        }).collect()
-    };
-    let masks3 = build_masks(3);
-    let masks5 = build_masks(5);
-    let masks7 = build_masks(7);
-
-    let first_odd_idx = |seg_low: usize, p: usize| -> usize {
-        if seg_low == 0 { (p - 1) / 2 }
-        else {
-            let m = ((seg_low + p - 1) / p) * p;
-            let first_num = if m % 2 == 0 { m + p } else { m };
-            (first_num - seg_low - 1) / 2
-        }
-    };
-
-    let mut pi_values: Vec<i64> = vec![0; b_primes.len()];
-    let mut running_pi: i64 = 1;
-    let mut pair_idx = 0;
-    let sieve_end: usize = (max_xp | 1) + 1;
-    let mut seg_low: usize = 0;
-
-    while seg_low < sieve_end {
-        let seg_high = std::cmp::min(seg_low + SEG_SIZE, sieve_end);
-        let odd_count = (seg_high - seg_low) / 2;
-        if odd_count == 0 { break; }
-        let nwords = (odd_count + 63) / 64;
-
-        let mut bitmap = vec![!0u64; nwords];
-        let excess = nwords * 64 - odd_count;
-        if excess > 0 { bitmap[nwords - 1] &= u64::MAX >> excess; }
-        if seg_low == 0 { bitmap[0] &= !1u64; }
-
-        {
-            let mut o3 = first_odd_idx(seg_low, 3) % 3;
-            let mut o5 = first_odd_idx(seg_low, 5) % 5;
-            let mut o7 = first_odd_idx(seg_low, 7) % 7;
-            for w in 0..nwords {
-                bitmap[w] &= !(masks3[o3] | masks5[o5] | masks7[o7]);
-                o3 = (o3 + 2) % 3;
-                o5 = (o5 + 1) % 5;
-                o7 = (o7 + 6) % 7;
-            }
-        }
-        if seg_low == 0 { bitmap[0] |= 0b1110; }
-
-        for &p in &cross_primes {
-            if p < 11 { continue; }
-            let pp = p * p;
-            let first_num = if pp > seg_low {
-                pp
-            } else {
-                let m = ((std::cmp::max(seg_low, 1) + p - 1) / p) * p;
-                if m % 2 == 0 { m + p } else { m }
-            };
-            if first_num >= seg_high { continue; }
-            let mut idx = (first_num - seg_low - 1) / 2;
-            while idx + p * 3 < odd_count {
-                unsafe {
-                    let w0 = idx >> 6; let b0 = idx & 63;
-                    *bitmap.get_unchecked_mut(w0) &= !(1u64 << b0);
-                    let i1 = idx + p; let w1 = i1 >> 6; let b1 = i1 & 63;
-                    *bitmap.get_unchecked_mut(w1) &= !(1u64 << b1);
-                    let i2 = idx + p * 2; let w2 = i2 >> 6; let b2 = i2 & 63;
-                    *bitmap.get_unchecked_mut(w2) &= !(1u64 << b2);
-                    let i3 = idx + p * 3; let w3 = i3 >> 6; let b3 = i3 & 63;
-                    *bitmap.get_unchecked_mut(w3) &= !(1u64 << b3);
-                }
-                idx += p * 4;
-            }
-            while idx < odd_count {
-                let w = idx >> 6; let b = idx & 63;
-                unsafe { *bitmap.get_unchecked_mut(w) &= !(1u64 << b); }
-                idx += p;
-            }
-        }
-
-        let mut seg_prefix = vec![0u32; nwords + 1];
-        for i in 0..nwords {
-            seg_prefix[i + 1] = seg_prefix[i] + bitmap[i].count_ones();
-        }
-
-        while pair_idx < xp_pairs.len() {
-            let (orig_idx, xp_val) = xp_pairs[pair_idx];
-            if xp_val >= seg_high { break; }
-            if xp_val < seg_low { pair_idx += 1; continue; }
-
-            let largest_odd = if xp_val % 2 == 1 { xp_val } else { xp_val - 1 };
-            if largest_odd <= seg_low {
-                pi_values[orig_idx] = running_pi;
-            } else {
-                let bit_idx = (largest_odd - seg_low - 1) / 2;
-                let word = bit_idx / 64;
-                let bit = bit_idx % 64;
-                let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
-                let local_count = seg_prefix[word] as i64
-                    + (bitmap[word] & mask).count_ones() as i64;
-                pi_values[orig_idx] = running_pi + local_count;
-            }
-            pair_idx += 1;
-        }
-
-        running_pi += seg_prefix[nwords] as i64;
-        seg_low = seg_high;
-    }
-
-    let b_val: i64 = pi_values.iter().sum();
-    // In Gourdon, B = raw sum of π(x/p), no combinatorial correction
-    // (the correction is in Sigma)
-    b_val
+    // Parallel sum of π(x/p)
+    b_primes.par_iter().map(|&p| {
+        b_pi.pi((x / p) as usize) as i64
+    }).sum()
 }
 
 // ── AC: combined A + C formulas ──────────────────────────────────────────────
@@ -1244,14 +1120,15 @@ fn count_primes(x: u64) -> u64 {
     // Phi0
     let phi0 = compute_phi0(x, y, z, k, &primes, &phi_cache);
 
-    // B, AC, D — concurrent
-    let (ac, b_val, d) = std::thread::scope(|s| {
+    // B uses its own BigPiTable (parallel construction + parallel lookups)
+    // Run B, D, AC all concurrently — they share the rayon pool
+    let (ac, d, b_val) = std::thread::scope(|s| {
         let b_handle = s.spawn(|| compute_b(x, y, pi_y));
         let ac_handle = s.spawn(|| compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi));
         let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth);
-        let b_val = b_handle.join().unwrap();
         let ac = ac_handle.join().unwrap();
-        (ac, b_val, d)
+        let b_val = b_handle.join().unwrap();
+        (ac, d, b_val)
     });
 
     (ac - b_val + d + phi0 + sigma) as u64
