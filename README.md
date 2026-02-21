@@ -1,6 +1,6 @@
 # fast-prime
 
-A highly optimized prime counting toolkit in Rust, featuring six independent implementations targeting modern hybrid-core CPUs.
+A highly optimized prime counting toolkit in Rust, featuring seven independent implementations targeting modern hybrid-core CPUs.
 
 ## Implementations
 
@@ -26,48 +26,63 @@ Deleglise-Rivat prime counting: splits special leaves into easy (π-table lookup
 
 ### V6 — Enhanced DR with Segmented Pi Table (`src/bin/prime_count_v6.rs`)
 
-Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized segments instead of requiring the full table to fit in L3. Eliminates the y-cap constraint, allowing larger y values that dramatically reduce hard-leaf sieve work. Segmented P2 replaces the multi-GB monolithic sieve with a 2-4MB cache-friendly approach. ValidM list pre-filters squarefree numbers for 8.5× fewer Type 1 iterations. Falls back to V5's direct approach for small inputs. **Currently the fastest implementation at large scales (3.31× faster than V5, 3.69× faster than V4 at 1 Quintillion).**
+Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized segments instead of requiring the full table to fit in L3. Eliminates the y-cap constraint, allowing larger y values that dramatically reduce hard-leaf sieve work. Segmented P2 replaces the multi-GB monolithic sieve with a 2-4MB cache-friendly approach. ValidM list pre-filters squarefree numbers for 8.5× fewer Type 1 iterations. Falls back to V5's direct approach for small inputs.
+
+### V7 — Gourdon's Algorithm (`src/bin/prime_count_v7.rs`)
+
+Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ. Uses two independent alpha parameters (α_y for y, α_z for z) instead of V6's single alpha, allowing independent tuning of the easy-leaf and hard-leaf domains. D (hard leaves) processes fewer iterations than V6's S2_hard by using tighter x* bounds. Parallel D via chunk-based phi correction. BigPiTable provides O(1) π(n) lookups for AC. **Currently the fastest implementation — 1.8× faster than V6 at Max i64.**
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
 ```
-┌───────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬───────────────────┐
-│ Range         │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ V5 DR        │ V6 Seg-Pi    │ Primes Found      │
-│               │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │ (parallel)   │ (parallel)   │                   │
-├───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼───────────────────┤
-│ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │    0.00080s  │    0.00097s  │        50,847,534 │
-│ 10 Billion    │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │    0.00300s  │    0.00175s  │       455,052,511 │
-│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │    0.00311s  │     4,118,054,813 │
-│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    0.01323s  │    37,607,912,018 │
-│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │    0.06099s  │   346,065,536,839 │
-│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.21665s  │ 3,204,941,750,802 │
-│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.51846s  │29,844,570,422,669 │
-│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.31895s  │279,238,341,033,925│
-│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │2,623,557,157,654,233│
-│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │216,289,611,853,439,384│
-└───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
+┌───────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬───────────────────┐
+│ Range         │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ V5 DR        │ V6 Seg-Pi    │ V7 Gourdon   │ Primes Found      │
+│               │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │ (parallel)   │ (parallel)   │ (parallel)   │                   │
+├───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼───────────────────┤
+│ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │    0.00080s  │    0.00097s  │    0.00171s  │        50,847,534 │
+│ 10 Billion    │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │    0.00300s  │    0.00175s  │    0.00170s  │       455,052,511 │
+│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │    0.00311s  │    0.00294s  │     4,118,054,813 │
+│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    0.01323s  │    0.00762s  │    37,607,912,018 │
+│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │    0.06099s  │    0.03103s  │   346,065,536,839 │
+│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.21665s  │    0.10788s  │ 3,204,941,750,802 │
+│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.51846s  │    0.44932s  │29,844,570,422,669 │
+│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.31895s  │    1.72982s  │279,238,341,033,925│
+│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    7.05340s  │2,623,557,157,654,233│
+│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │   32.41202s  │24,739,954,287,740,860│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │  202.09442s  │216,289,611,853,439,384│
+└───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
 
-### Best (V6) vs V1 Speedup
+### Best (V7) vs V1 Speedup
 
-| Range | V1 (24 threads) | V6 Seg-Pi (parallel) | V6 Speedup |
+| Range | V1 (24 threads) | V7 Gourdon (parallel) | Speedup |
 |---|---|---|---|
-| 1 Billion | 0.006s | 0.002s | **3.0×** |
-| 10 Billion | 0.066s | 0.002s | **37.5×** |
-| 100 Billion | 0.721s | 0.003s | **240.3×** |
-| 1 Trillion | 8.640s | 0.007s | **1327.0×** |
-| 10 Trillion | 127.13s | 0.025s | **5095.7×** |
-| 100 Trillion | 2389.23s | 0.089s | **26844.2×** |
+| 1 Billion | 0.006s | 0.002s | **3.5×** |
+| 10 Billion | 0.066s | 0.002s | **38.6×** |
+| 100 Billion | 0.721s | 0.003s | **245.3×** |
+| 1 Trillion | 8.640s | 0.008s | **1134.0×** |
+| 10 Trillion | 127.13s | 0.031s | **4101.3×** |
+| 100 Trillion | 2389.23s | 0.108s | **22122.5×** |
+
+### V7 vs V6 Speedup
+
+| Range | V6 Seg-Pi | V7 Gourdon | Speedup |
+|---|---|---|---|
+| 1 Trillion | 0.013s | 0.008s | **1.7×** |
+| 10 Trillion | 0.061s | 0.031s | **2.0×** |
+| 100 Trillion | 0.217s | 0.108s | **2.0×** |
+| 100 Quadrillion | 14.379s | 7.053s | **2.0×** |
+| 1 Quintillion | 51.840s | 32.412s | **1.6×** |
+| Max i64 | 342.460s | 202.094s | **1.7×** |
 
 ### Comparison vs Strix Halo Reference
 
-| Range | V6 (Ultra 9 285K) | Strix Halo Reference | Speedup |
+| Range | V7 (Ultra 9 285K) | Strix Halo Reference | Speedup |
 |---|---|---|---|
-| 1 Billion | 0.002s | 0.011s | **5.5×** |
-| 10 Billion | 0.002s | 0.109s | **62.3×** |
-| 100 Billion | 0.003s | 1.483s | **494.3×** |
-| 1 Trillion | 0.007s | 25.820s | **3966.2×** |
+| 1 Billion | 0.002s | 0.011s | **6.4×** |
+| 10 Billion | 0.002s | 0.109s | **64.1×** |
+| 100 Billion | 0.003s | 1.483s | **504.6×** |
+| 1 Trillion | 0.008s | 25.820s | **3389.8×** |
 
 ## Key Optimizations
 
@@ -143,6 +158,16 @@ See [OPTIMIZATIONS_V6.md](OPTIMIZATIONS_V6.md) for the full optimization log.
 - **Alpha tuning for segmented regime** — Higher alpha (23 at 10^18, up from 19) balances S2_easy/S2_hard perfectly with the segmented approach.
 - **2.33× faster at 1 Quintillion** — 82.6s vs V4's 192.0s. 2.09× faster than V5's 172.4s.
 
+### V7 — Gourdon's Algorithm
+
+- **Two-parameter alpha** — Independent α_y (controls y = x^{1/3}·α_y) and α_z (controls z = y·α_z) allow separate tuning of easy-leaf and hard-leaf domains. Walisch's polynomial fit: α_yz = 0.00527·ln³(x) - 0.4955·ln²(x) + 16.58·ln(x) - 183.8.
+- **Tighter x* bounds** — D (hard leaves) uses x* = max(x^{1/4}, ⌈x/y²⌉) instead of √y, processing fewer iterations than V6's S2_hard.
+- **BigPiTable** — O(1) π(n) lookups for AC via parallel segmented sieve with word-granularity prefix sums. Covers [0, √x] (~285MB at Max i64).
+- **Sigma corrections** — 7 arithmetic formulas (Σ₀-Σ₆) computed in O(x^{1/3}) time, replacing expensive sieve work.
+- **Parallel D with phi correction** — Segments split into chunks across threads. Each chunk tracks local phi + coefficients. True phi reconstructed via prefix-sum correction pass (same approach as V4's parallel S2).
+- **Concurrent B/AC/D** — B, AC, and D run concurrently via `thread::scope`, with D using rayon internally for further parallelism.
+- **1.7× faster than V6 at Max i64** — 202s vs 342s. Consistent 1.5-2.0× speedup across all scales ≥ 1T.
+
 ## Building
 
 Requires [Rust](https://rustup.rs/) (1.70+).
@@ -166,8 +191,11 @@ cargo build --release
 # Run V5 (Deleglise-Rivat, parallel easy leaves)
 ./target/release/prime_count_v5
 
-# Run V6 (Enhanced DR with segmented pi table — fastest at large scales)
+# Run V6 (Enhanced DR with segmented pi table)
 ./target/release/prime_count_v6
+
+# Run V7 (Gourdon's algorithm — fastest at all scales)
+./target/release/prime_count_v7
 ```
 
 The build is configured with aggressive optimizations in `Cargo.toml`:
@@ -258,6 +286,24 @@ Same algorithmic formula as V5, with a key implementation innovation:
 4. **S2_hard (hard special leaves)** — Same as V5, benefits from smaller z
 5. **P2 (prime pairs)** — Same as V5
 6. **Result** — π(x) = S1 + S2_easy + S2_hard + π(y) - 1 - P2
+
+### V7 — Gourdon's Algorithm
+
+1. **Parameters** — Two independent alpha values: y = x^{1/3}·α_y, z = y·α_z, x* = max(x^{1/4}, ⌈x/y²⌉)
+2. **Precompute tables** — Primes up to y, π table up to max(z, √(x/x*)), Möbius/lpf/y-smooth tables up to z, BigPiTable covering [0, √x]
+3. **Σ (Sigma)** — 7 cheap arithmetic correction formulas (Σ₀-Σ₆), O(x^{1/3}) time
+4. **Φ₀ (ordinary leaves)** — Recursive Möbius sum over squarefree numbers ≤ z with lpf > p_k, using PhiTiny cache
+5. **B (prime pairs)** — Σ π(x/p) for primes y < p ≤ √x, using parallel segmented sieve
+6. **AC (combined easy leaves)** — Three sub-formulas:
+   - C1: recursive Möbius-weighted leaves (b ≤ π(√z))
+   - C2: π-table-based easy leaves (π(√z) < b ≤ π(x*))
+   - A: simplest easy leaves (π(x*) < b ≤ π(x^{1/3}))
+   - All use BigPiTable for O(1) π lookups
+7. **D (hard leaves)** — Segmented sieve over [0, x/z]:
+   - Type 1 (b ≤ π(√z)): squarefree m leaves with μ(m)≠0, lpf(m)>p, all factors ≤ y
+   - Type 2 (π(√z) < b ≤ π(x*)): prime pair leaves
+   - Parallel via chunk-based phi correction
+8. **Result** — π(x) = AC - B + D + Φ₀ + Σ
 
 ## Dependencies
 
