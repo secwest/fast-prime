@@ -30,7 +30,7 @@ Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized seg
 
 ### V7 — Gourdon's Algorithm (`src/bin/prime_count_v7.rs`)
 
-Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ. Uses two independent alpha parameters (α_y for y, α_z for z) instead of V6's single alpha, allowing independent tuning of the easy-leaf and hard-leaf domains. D (hard leaves) processes fewer iterations than V6's S2_hard by using tighter x* bounds. Parallel D via chunk-based phi correction. BigPiTable provides O(1) π(n) lookups for AC. **Currently the fastest implementation — 1.8× faster than V6 at Max i64.**
+Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ. Uses two independent alpha parameters (α_y for y, α_z for z) instead of V6's single alpha, allowing independent tuning of the easy-leaf and hard-leaf domains. D (hard leaves) processes fewer iterations than V6's S2_hard by using tighter x* bounds. Parallel D via chunk-based phi correction. BigPiTable provides O(1) π(n) lookups for AC and B. ValidM list pre-filters D Type 1 for 8.5× fewer iterations. Piecewise-linear alpha lookup table tuned per-scale. **Currently the fastest implementation — 3.6× faster than V6 at Max i64.**
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -47,9 +47,9 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 │ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.21665s  │    0.10788s  │ 3,204,941,750,802 │
 │ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.51846s  │    0.44932s  │29,844,570,422,669 │
 │ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.31895s  │    1.72982s  │279,238,341,033,925│
-│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    7.05340s  │2,623,557,157,654,233│
-│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │   32.41202s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │  202.09442s  │216,289,611,853,439,384│
+│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    2.74131s  │2,623,557,157,654,233│
+│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │   10.82030s  │24,739,954,287,740,860│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │   95.37559s  │216,289,611,853,439,384│
 └───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
 
@@ -63,17 +63,23 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 | 1 Trillion | 8.640s | 0.008s | **1134.0×** |
 | 10 Trillion | 127.13s | 0.031s | **4101.3×** |
 | 100 Trillion | 2389.23s | 0.108s | **22122.5×** |
+| 1 Quadrillion | — | 0.143s | — |
+| 10 Quadrillion | — | 0.600s | — |
+| 100 Quadrillion | — | 2.741s | — |
+| 1 Quintillion | — | 10.820s | — |
 
 ### V7 vs V6 Speedup
 
 | Range | V6 Seg-Pi | V7 Gourdon | Speedup |
 |---|---|---|---|
-| 1 Trillion | 0.013s | 0.008s | **1.7×** |
-| 10 Trillion | 0.061s | 0.031s | **2.0×** |
-| 100 Trillion | 0.217s | 0.108s | **2.0×** |
-| 100 Quadrillion | 14.379s | 7.053s | **2.0×** |
-| 1 Quintillion | 51.840s | 32.412s | **1.6×** |
-| Max i64 | 342.460s | 202.094s | **1.7×** |
+| 1 Trillion | 0.013s | 0.005s | **2.8×** |
+| 10 Trillion | 0.061s | 0.014s | **4.2×** |
+| 100 Trillion | 0.217s | 0.039s | **5.6×** |
+| 1 Quadrillion | 0.518s | 0.143s | **3.6×** |
+| 10 Quadrillion | 2.319s | 0.600s | **3.9×** |
+| 100 Quadrillion | 14.379s | 2.741s | **5.2×** |
+| 1 Quintillion | 51.840s | 10.820s | **4.8×** |
+| Max i64 | 342.460s | 95.376s | **3.6×** |
 
 ### Comparison vs Strix Halo Reference
 
@@ -83,6 +89,8 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 | 10 Billion | 0.002s | 0.109s | **64.1×** |
 | 100 Billion | 0.003s | 1.483s | **504.6×** |
 | 1 Trillion | 0.008s | 25.820s | **3389.8×** |
+| 10 Trillion | 0.014s | — | — |
+| 100 Trillion | 0.039s | — | — |
 
 ## Key Optimizations
 
@@ -160,13 +168,15 @@ See [OPTIMIZATIONS_V6.md](OPTIMIZATIONS_V6.md) for the full optimization log.
 
 ### V7 — Gourdon's Algorithm
 
-- **Two-parameter alpha** — Independent α_y (controls y = x^{1/3}·α_y) and α_z (controls z = y·α_z) allow separate tuning of easy-leaf and hard-leaf domains. Walisch's polynomial fit: α_yz = 0.00527·ln³(x) - 0.4955·ln²(x) + 16.58·ln(x) - 183.8.
+- **Two-parameter alpha** — Independent α_y (controls y = x^{1/3}·α_y) and α_z (controls z = y·α_z) allow separate tuning of easy-leaf and hard-leaf domains. Piecewise-linear interpolation table with 9 data points tuned per-scale.
 - **Tighter x* bounds** — D (hard leaves) uses x* = max(x^{1/4}, ⌈x/y²⌉) instead of √y, processing fewer iterations than V6's S2_hard.
-- **BigPiTable** — O(1) π(n) lookups for AC via parallel segmented sieve with word-granularity prefix sums. Covers [0, √x] (~285MB at Max i64).
+- **BigPiTable** — O(1) π(n) lookups for AC and B via parallel segmented sieve with word-granularity prefix sums (u64 for large scales). Covers [0, √x] (~285MB at Max i64).
+- **Parallel B** — Builds dedicated BigPiTable covering [0, x/smallest_prime], then parallel π(x/p) lookups via rayon par_iter. Runs concurrently with D+AC.
+- **ValidM list for D** — Pre-filters squarefree y-smooth m values with lpf > primes[c+1]. Binary search for valid range per (b, segment). 8.5× fewer Type 1 iterations.
 - **Sigma corrections** — 7 arithmetic formulas (Σ₀-Σ₆) computed in O(x^{1/3}) time, replacing expensive sieve work.
 - **Parallel D with phi correction** — Segments split into chunks across threads. Each chunk tracks local phi + coefficients. True phi reconstructed via prefix-sum correction pass (same approach as V4's parallel S2).
 - **Concurrent B/AC/D** — B, AC, and D run concurrently via `thread::scope`, with D using rayon internally for further parallelism.
-- **1.7× faster than V6 at Max i64** — 202s vs 342s. Consistent 1.5-2.0× speedup across all scales ≥ 1T.
+- **3.6× faster than V6 at Max i64** — 95s vs 342s. Consistent 3.6-5.3× speedup across all scales ≥ 100Q.
 
 ## Building
 
