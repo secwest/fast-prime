@@ -291,3 +291,50 @@ Updated alpha curve:
 |-------|----------|----------|---------------|
 | 1 Quintillion | 113.4s | 52.0s | **2.18×** |
 | Max i64 | 547.3s | 368.1s | **1.49×** |
+
+---
+
+## Opt 4 — P2 Pre-sieve Masks for Primes 3, 5, 7
+
+**What**: Replace per-bit sieve crossings for small primes (3, 5, 7) in the P2
+segmented sieve with word-aligned bitmask operations — 64× fewer operations.
+
+### Implementation
+
+Pre-compute p masks for each prime p ∈ {3, 5, 7}, where mask[offset] has bits set
+at positions offset, offset+p, offset+2p, ... within a u64 word.
+
+For each segment, compute the starting alignment and apply all three masks per word:
+```
+for w in 0..nwords {
+    bitmap[w] &= !(masks3[o3] | masks5[o5] | masks7[o7]);
+    o3 = (o3 + 2) % 3;  // step derived from 64 mod p
+    o5 = (o5 + 1) % 5;
+    o7 = (o7 + 6) % 7;
+}
+```
+
+First segment: restore bits for primes 3, 5, 7 after mask application.
+Remaining cross primes (≥ 11) use the existing 4x-unrolled per-bit loop.
+
+### Results (Opt 4 vs Opt 3)
+
+| Range | Opt 3 | Opt 4 | P2 Speedup |
+|-------|-------|-------|------------|
+| 100 Trillion | 0.331s | 0.217s | 1.53× |
+| 1 Quadrillion | 0.806s | 0.518s | 1.56× |
+| 10 Quadrillion | 2.31s | 2.32s | same (S2 bottleneck) |
+| 100 Quadrillion | 13.95s | 14.38s | same (S2 bottleneck) |
+| 1 Quintillion | 52.0s | 51.6s | same (P2: 32→23s) |
+| **Max i64** | **368.1s** | **350.2s** | **1.05×** (P2: 156→98s) |
+
+P2 itself is 26-35% faster across all scales. At Max i64, the reduced P2 thread
+contention allows S2_hard to benefit from freed CPU resources: 365s → 347s.
+
+### Cumulative Progress
+
+| Range | V6 Opt 0 | V6 Opt 4 | Total Speedup |
+|-------|----------|----------|---------------|
+| 100 Trillion | 0.089s | 0.217s | 0.41× (direct path overhead) |
+| 1 Quintillion | 113.4s | 51.6s | **2.20×** |
+| Max i64 | 547.3s | 350.2s | **1.56×** |

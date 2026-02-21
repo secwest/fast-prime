@@ -149,6 +149,31 @@ fn compute_p2(x: u64, y: usize, pi_y: usize) -> i64 {
     // Segment size: fits in L2 cache (2MB per P-core)
     const P2_SEG_SIZE: usize = 1 << 20; // 1M numbers per segment
 
+    // Pre-compute word-aligned masks for primes 3, 5, 7
+    // Each mask[off] has bits set at positions off, off+p, off+2p, ... within a u64
+    let build_masks = |p: usize| -> Vec<u64> {
+        (0..p).map(|off| {
+            let mut m = 0u64;
+            let mut pos = off;
+            while pos < 64 { m |= 1u64 << pos; pos += p; }
+            m
+        }).collect()
+    };
+    let masks3 = build_masks(3);
+    let masks5 = build_masks(5);
+    let masks7 = build_masks(7);
+
+    // First odd multiple index for a prime p in a segment starting at seg_low
+    let first_odd_idx = |seg_low: usize, p: usize| -> usize {
+        if seg_low == 0 {
+            (p - 1) / 2  // first odd multiple is p itself
+        } else {
+            let m = ((seg_low + p - 1) / p) * p;
+            let first_num = if m % 2 == 0 { m + p } else { m };
+            (first_num - seg_low - 1) / 2
+        }
+    };
+
     let mut pi_values: Vec<i64> = vec![0; p2_primes.len()];
     let mut running_pi: i64 = 1; // count prime 2
     let mut pair_idx = 0; // index into sorted xp_pairs
@@ -168,8 +193,24 @@ fn compute_p2(x: u64, y: usize, pi_y: usize) -> i64 {
         if excess > 0 { bitmap[nwords - 1] &= u64::MAX >> excess; }
         if seg_low == 0 { bitmap[0] &= !1u64; } // 1 is not prime
 
-        // Sieve with all cross primes
+        // Apply word-aligned masks for primes 3, 5, 7 (64x fewer ops than per-bit)
+        {
+            let mut o3 = first_odd_idx(seg_low, 3) % 3;
+            let mut o5 = first_odd_idx(seg_low, 5) % 5;
+            let mut o7 = first_odd_idx(seg_low, 7) % 7;
+            for w in 0..nwords {
+                bitmap[w] &= !(masks3[o3] | masks5[o5] | masks7[o7]);
+                o3 = (o3 + 2) % 3;  // 64 % 3 = 1, step = 3-1 = 2
+                o5 = (o5 + 1) % 5;  // 64 % 5 = 4, step = 5-4 = 1
+                o7 = (o7 + 6) % 7;  // 64 % 7 = 1, step = 7-1 = 6
+            }
+        }
+        // Restore primes 3, 5, 7 in first segment (masks cleared them)
+        if seg_low == 0 { bitmap[0] |= 0b1110; }
+
+        // Sieve remaining cross primes (>= 11)
         for &p in &cross_primes {
+            if p < 11 { continue; }
             let pp = p * p;
             let first_num = if pp > seg_low {
                 pp
