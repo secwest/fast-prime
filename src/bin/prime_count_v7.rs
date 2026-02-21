@@ -138,22 +138,41 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
     }
 
     let logx = (x as f64).ln();
-    let logx2 = logx * logx;
-    let logx3 = logx2 * logx;
 
-    let alpha_yz = if (x as f64) <= 1e11 {
-        0.078173 * logx + 1.0
+    // Lookup table tuned for ValidM-optimized Gourdon on 24 threads
+    // (logx, alpha_y, alpha_z)
+    const TABLE: &[(f64, f64, f64)] = &[
+        (20.0,  2.0, 1.5),   // x ~ 5e8
+        (23.0,  3.0, 1.5),   // x ~ 1e10
+        (25.3,  4.0, 2.0),   // x ~ 1e11
+        (30.0,  6.0, 2.0),   // x ~ 1e13
+        (34.5,  8.0, 2.0),   // x ~ 1e15
+        (36.8, 10.0, 2.0),   // x ~ 1e16
+        (39.1, 14.0, 2.5),   // x ~ 1e17
+        (41.4, 15.0, 3.5),   // x ~ 1e18
+        (43.7, 19.0, 4.5),   // x ~ Max i64
+    ];
+
+    let (alpha_y, alpha_z) = if logx <= TABLE[0].0 {
+        (TABLE[0].1, TABLE[0].2)
+    } else if logx >= TABLE[TABLE.len() - 1].0 {
+        (TABLE[TABLE.len() - 1].1, TABLE[TABLE.len() - 1].2)
     } else {
-        0.00526934 * logx3 - 0.495545 * logx2 + 16.5791 * logx - 183.836
-    };
-
-    let alpha_z = {
-        let az = (alpha_yz / 5.0).min(2.0);
-        az.max(1.0)
+        let mut ay = TABLE[0].1;
+        let mut az = TABLE[0].2;
+        for i in 0..TABLE.len() - 1 {
+            if logx >= TABLE[i].0 && logx < TABLE[i + 1].0 {
+                let t = (logx - TABLE[i].0) / (TABLE[i + 1].0 - TABLE[i].0);
+                ay = TABLE[i].1 + t * (TABLE[i + 1].1 - TABLE[i].1);
+                az = TABLE[i].2 + t * (TABLE[i + 1].2 - TABLE[i].2);
+                break;
+            }
+        }
+        (ay, az)
     };
 
     let x16 = (x as f64).powf(1.0 / 6.0);
-    let alpha_y = (alpha_yz / alpha_z).max(1.0).min(x16);
+    let alpha_y = alpha_y.max(1.0).min(x16);
     let max_alpha_z = (x16 / alpha_y).max(1.0);
     let alpha_z = alpha_z.max(1.0).min(max_alpha_z);
 
