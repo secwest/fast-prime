@@ -738,6 +738,16 @@ fn cross_off_sieve(sieve: &mut BitSieve, prime: usize, low: usize, high: usize,
     sieve.total -= delta;
 }
 
+// Precomputed valid m values for D Type 1 (squarefree, y-smooth, lpf > min threshold)
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct ValidM {
+    m: u32,
+    lpf: u16,    // clamped at u16::MAX (primes[b] always < u16::MAX for Type 1)
+    mu_val: i8,
+    _pad: u8,
+}
+
 fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
              primes: &[u32], pi: &[u32],
              mu: &[i8], lpf: &[i32], y_smooth: &[bool]) -> i64 {
@@ -759,6 +769,18 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
     }).collect();
 
+    // Precompute ValidM list for Type 1 leaves
+    let min_lpf_threshold = if c + 1 < primes.len() { primes[c + 1] as i32 } else { i32::MAX };
+    let valid_m_list: Vec<ValidM> = if pi_sqrtz > c {
+        (1..=z).filter(|&m| m < mu.len() && mu[m] != 0 && lpf[m] > min_lpf_threshold && y_smooth[m])
+            .map(|m| ValidM {
+                m: m as u32,
+                lpf: std::cmp::min(lpf[m] as u32, u16::MAX as u32) as u16,
+                mu_val: mu[m],
+                _pad: 0,
+            }).collect()
+    } else { vec![] };
+
     let target_segs = rayon::current_num_threads() * 32;
     let segment_size = std::cmp::max(xz / std::cmp::max(target_segs, 1), 1 << 17).next_power_of_two();
     let num_segments = if xz == 0 { 1 } else { (xz / segment_size) + 1 };
@@ -766,7 +788,8 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     if num_segments <= 2 {
         return compute_d_serial(x, y, z, k, x_star, xz, primes, pi,
                                 mu, lpf, y_smooth, pi_sqrtz, pi_x_star,
-                                segment_size, &template, &prime_recip);
+                                segment_size, &template, &prime_recip,
+                                &valid_m_list);
     }
 
     let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 6);
@@ -798,7 +821,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
             let mut b = c + 1;
 
-            // Type 1: b ≤ π(√z), squarefree m leaves
+            // Type 1: b ≤ π(√z), squarefree m leaves (using precomputed ValidM list)
             while b <= std::cmp::min(pi_sqrtz, cur_max_b) && b < nprimes {
                 let prime = primes[b] as u64;
                 let x_div_prime = x / prime;
@@ -809,27 +832,29 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
                 if prime as usize >= max_m { break; }
 
-                // Iterate m from max_m down to min_m+1
-                let mut prev_pos: Option<usize> = None;
-                let mut running_count: i64 = 0;
-                for m in (min_m + 1..=max_m).rev() {
-                    if m >= mu.len() { continue; }
-                    // Check: mu(m) != 0, lpf(m) > prime, mpf(m) <= y (y_smooth)
-                    if mu[m] != 0 && (prime as i32) < lpf[m] && y_smooth[m] {
-                        let xpm = (x_div_prime / m as u64) as usize;
-                        if xpm > low && xpm < high {
-                            let pos = int_to_odd_bp(xpm, low);
-                            let count = match prev_pos {
-                                None => { running_count = sieve.count(pos); running_count }
-                                Some(pp) if pos == pp => running_count,
-                                Some(pp) => { running_count += sieve.count_delta(pp, pos); running_count }
-                            };
-                            d_local -= mu[m] as i64 * (phi[b] + count);
-                            coeff[b] -= mu[m] as i64;
-                            prev_pos = Some(pos);
-                        } else if xpm == low {
-                            d_local -= mu[m] as i64 * phi[b];
-                            coeff[b] -= mu[m] as i64;
+                if min_m < max_m {
+                    let vm_start = valid_m_list.partition_point(|v| (v.m as usize) <= min_m);
+                    let vm_end = valid_m_list.partition_point(|v| (v.m as usize) <= max_m);
+
+                    let mut prev_pos: Option<usize> = None;
+                    let mut running_count: i64 = 0;
+                    for v in valid_m_list[vm_start..vm_end].iter().rev() {
+                        if prime < v.lpf as u64 {
+                            let xpm = (x_div_prime / v.m as u64) as usize;
+                            if xpm > low && xpm < high {
+                                let pos = int_to_odd_bp(xpm, low);
+                                let count = match prev_pos {
+                                    None => { running_count = sieve.count(pos); running_count }
+                                    Some(pp) if pos == pp => running_count,
+                                    Some(pp) => { running_count += sieve.count_delta(pp, pos); running_count }
+                                };
+                                d_local -= v.mu_val as i64 * (phi[b] + count);
+                                coeff[b] -= v.mu_val as i64;
+                                prev_pos = Some(pos);
+                            } else if xpm == low {
+                                d_local -= v.mu_val as i64 * phi[b];
+                                coeff[b] -= v.mu_val as i64;
+                            }
                         }
                     }
                 }
@@ -906,10 +931,10 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
 fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: usize,
                     primes: &[u32], pi: &[u32],
-                    mu: &[i8], lpf: &[i32], y_smooth: &[bool],
+                    _mu: &[i8], _lpf: &[i32], _y_smooth: &[bool],
                     pi_sqrtz: usize, pi_x_star: usize,
                     segment_size: usize, template: &PreSieveTemplate,
-                    prime_recip: &[u64]) -> i64 {
+                    prime_recip: &[u64], valid_m_list: &[ValidM]) -> i64 {
     let nprimes = primes.len();
     let pi_limit = pi.len() - 1;
     let c = k;
@@ -945,23 +970,27 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
 
             if prime as usize >= max_m { break; }
 
-            let mut prev_pos: Option<usize> = None;
-            let mut running_count: i64 = 0;
-            for m in (min_m + 1..=max_m).rev() {
-                if m >= mu.len() { continue; }
-                if mu[m] != 0 && (prime as i32) < lpf[m] && y_smooth[m] {
-                    let xpm = (x_div_prime / m as u64) as usize;
-                    if xpm > low && xpm < high {
-                        let pos = int_to_odd_bp(xpm, low);
-                        let count = match prev_pos {
-                            None => { running_count = sieve.count(pos); running_count }
-                            Some(pp) if pos == pp => running_count,
-                            Some(pp) => { running_count += sieve.count_delta(pp, pos); running_count }
-                        };
-                        d -= mu[m] as i64 * (phi[b] + count);
-                        prev_pos = Some(pos);
-                    } else if xpm == low {
-                        d -= mu[m] as i64 * phi[b];
+            if min_m < max_m {
+                let vm_start = valid_m_list.partition_point(|v| (v.m as usize) <= min_m);
+                let vm_end = valid_m_list.partition_point(|v| (v.m as usize) <= max_m);
+
+                let mut prev_pos: Option<usize> = None;
+                let mut running_count: i64 = 0;
+                for v in valid_m_list[vm_start..vm_end].iter().rev() {
+                    if prime < v.lpf as u64 {
+                        let xpm = (x_div_prime / v.m as u64) as usize;
+                        if xpm > low && xpm < high {
+                            let pos = int_to_odd_bp(xpm, low);
+                            let count = match prev_pos {
+                                None => { running_count = sieve.count(pos); running_count }
+                                Some(pp) if pos == pp => running_count,
+                                Some(pp) => { running_count += sieve.count_delta(pp, pos); running_count }
+                            };
+                            d -= v.mu_val as i64 * (phi[b] + count);
+                            prev_pos = Some(pos);
+                        } else if xpm == low {
+                            d -= v.mu_val as i64 * phi[b];
+                        }
                     }
                 }
             }
