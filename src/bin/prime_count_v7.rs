@@ -211,7 +211,7 @@ impl BigPiTable {
             return BigPiTable { bits: vec![], prefix: vec![0] };
         }
 
-        let odd_count = (limit - 1) / 2 + 1; // number of odd numbers in [1, limit]
+        let odd_count = (limit - 1) / 2 + 1;
         let nwords = (odd_count + 63) / 64;
 
         // Parallel segmented sieve construction
@@ -220,7 +220,13 @@ impl BigPiTable {
         let small_primes: Vec<usize> = small_sieve.primes_from(3)
             .take_while(|&p| p <= sqrt_limit).collect();
 
-        let seg_words: usize = 4096; // ~256K odd numbers per segment
+        // Pre-sieve AND-masks for primes 3, 5, 7
+        // masks[p][offset] has 0-bits at positions offset, offset+p, offset+2p, ...
+        let masks3 = Self::build_presieve_masks(3);
+        let masks5 = Self::build_presieve_masks(5);
+        let masks7 = Self::build_presieve_masks(7);
+
+        let seg_words: usize = 4096;
         let seg_odd_count = seg_words * 64;
         let num_segs = (odd_count + seg_odd_count - 1) / seg_odd_count;
 
@@ -235,10 +241,31 @@ impl BigPiTable {
             if excess > 0 { local[seg_nw - 1] &= u64::MAX >> excess; }
             if seg == 0 { local[0] &= !1u64; } // number 1 is not prime
 
-            let low_num = 2 * start_idx + 1; // first odd number in segment
+            // Pre-sieve: clear multiples of 3, 5, 7 via word-level masks
+            // Odd multiples of p are at odd_idx ≡ (p-1)/2 (mod p)
+            let mut o3 = (1 + 3 - start_idx % 3) % 3;
+            let mut o5 = (2 + 5 - start_idx % 5) % 5;
+            let mut o7 = (3 + 7 - start_idx % 7) % 7;
+            for w in 0..seg_nw {
+                unsafe {
+                    *local.get_unchecked_mut(w) &=
+                        masks3[o3] & masks5[o5] & masks7[o7];
+                }
+                o3 = (o3 + 2) % 3;  // delta = 3 - 64%3 = 2
+                o5 = (o5 + 1) % 5;  // delta = 5 - 64%5 = 1
+                o7 = (o7 + 6) % 7;  // delta = 7 - 64%7 = 6
+            }
 
+            // Restore prime bits for 3, 5, 7 in first segment
+            if seg == 0 {
+                local[0] |= (1u64 << 1) | (1u64 << 2) | (1u64 << 3);
+            }
+
+            // Cross off remaining primes (>= 11) with per-bit loop
             for &p in &small_primes {
+                if p <= 7 { continue; }
                 let pp = (p as u64) * (p as u64);
+                let low_num = 2 * start_idx + 1;
                 let first_num = if pp >= low_num as u64 {
                     pp as usize
                 } else {
@@ -277,6 +304,18 @@ impl BigPiTable {
         }
 
         BigPiTable { bits, prefix }
+    }
+
+    fn build_presieve_masks(p: usize) -> Vec<u64> {
+        let mut masks = vec![!0u64; p];
+        for off in 0..p {
+            let mut pos = off;
+            while pos < 64 {
+                masks[off] &= !(1u64 << pos);
+                pos += p;
+            }
+        }
+        masks
     }
 
     #[inline]
