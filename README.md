@@ -168,7 +168,9 @@ See [OPTIMIZATIONS_V6.md](OPTIMIZATIONS_V6.md) for the full optimization log.
 
 ### V7 — Gourdon's Algorithm
 
-- **Two-parameter alpha** — Independent α_y (controls y = x^{1/3}·α_y) and α_z (controls z = y·α_z) allow separate tuning of easy-leaf and hard-leaf domains. Piecewise-linear interpolation table with 9 data points tuned per-scale.
+See [OPTIMIZATIONS_V7.md](OPTIMIZATIONS_V7.md) for the full optimization log.
+
+- **Two-parameter alpha**— Independent α_y (controls y = x^{1/3}·α_y) and α_z (controls z = y·α_z) allow separate tuning of easy-leaf and hard-leaf domains. Piecewise-linear interpolation table with 9 data points tuned per-scale.
 - **Tighter x* bounds** — D (hard leaves) uses x* = max(x^{1/4}, ⌈x/y²⌉) instead of √y, processing fewer iterations than V6's S2_hard.
 - **BigPiTable** — O(1) π(n) lookups for AC and B via parallel segmented sieve with word-granularity prefix sums (u64 for large scales). Covers [0, √x] (~285MB at Max i64).
 - **Parallel B** — Builds dedicated BigPiTable covering [0, x/smallest_prime], then parallel π(x/p) lookups via rayon par_iter. Runs concurrently with D+AC.
