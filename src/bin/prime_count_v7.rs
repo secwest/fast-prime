@@ -872,6 +872,97 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     c1 + c2 + a_sum
 }
 
+// ── Mod-30 wheel sieve constants ─────────────────────────────────────────────
+// 8 residues coprime to 30 per group of 30 numbers.
+// Benefits: 1.875× fewer sieve operations than odd-only (8/30 vs 1/2 density).
+
+const WHEEL30_RESIDUES: [usize; 8] = [1, 7, 11, 13, 17, 19, 23, 29];
+
+// Map: n % 30 → index in WHEEL30_RESIDUES (255 if not coprime to 30)
+const MOD30_TO_IDX: [u8; 30] = [
+    255, 0, 255, 255, 255, 255, 255, 1, 255, 255,
+    255, 2, 255, 3, 255, 255, 255, 4, 255, 5,
+    255, 255, 255, 6, 255, 255, 255, 255, 255, 7,
+];
+
+// Map: for n with offset r = (n - low) % 30, which bit position is the largest
+// coprime-to-30 number ≤ n? -1 means previous group's bit 7.
+const FLOOR_WHEEL_BIT: [i8; 30] = [
+    -1, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+     1, 2, 2, 3, 3, 3, 3, 4, 4, 5,
+     5, 5, 5, 6, 6, 6, 6, 6, 6, 7,
+];
+
+// Number of coprime residues in [1, r] for each r in 0..30
+const COPRIME_COUNT_30: [u8; 31] = [
+    0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 4, 4, 4,
+    4, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 8, 8,
+];
+
+// Wheel cross-off tables: gaps between consecutive coprime residues
+const WHEEL_GAPS: [usize; 8] = [6, 4, 2, 4, 2, 4, 6, 2];
+
+// Wheel cross-off tables (kept for reference / future use with byte-level stepping)
+#[allow(dead_code)]
+const WHEEL_GAPS: [usize; 8] = [6, 4, 2, 4, 2, 4, 6, 2];
+#[allow(dead_code)]
+const WHEEL_BITS: [[u8; 8]; 8] = [
+    [0, 1, 2, 3, 4, 5, 6, 7], // p ≡ 1
+    [1, 5, 4, 0, 7, 3, 2, 6], // p ≡ 7
+    [2, 4, 0, 6, 1, 7, 3, 5], // p ≡ 11
+    [3, 0, 6, 5, 2, 1, 7, 4], // p ≡ 13
+    [4, 7, 1, 2, 5, 6, 0, 3], // p ≡ 17
+    [5, 3, 7, 1, 6, 0, 4, 2], // p ≡ 19
+    [6, 2, 3, 7, 0, 4, 5, 1], // p ≡ 23
+    [7, 6, 5, 4, 3, 2, 1, 0], // p ≡ 29
+];
+
+// WHEEL_CORR[r_idx][step]: byte advance correction (added to p/30 * gap[step])
+#[allow(dead_code)]
+const WHEEL_CORR: [[usize; 8]; 8] = [
+    [0, 0, 0, 0, 0, 0, 0, 1], // p ≡ 1
+    [1, 1, 1, 0, 1, 1, 1, 1], // p ≡ 7
+    [2, 2, 0, 2, 0, 2, 2, 1], // p ≡ 11
+    [3, 1, 1, 2, 1, 1, 3, 1], // p ≡ 13
+    [3, 3, 1, 2, 1, 3, 3, 1], // p ≡ 17
+    [4, 2, 2, 2, 2, 2, 4, 1], // p ≡ 19
+    [5, 3, 1, 4, 1, 3, 5, 1], // p ≡ 23
+    [6, 4, 2, 4, 2, 4, 6, 1], // p ≡ 29
+];
+
+// Find smallest number >= n that is coprime to 30
+#[inline(always)]
+#[allow(dead_code)]
+fn next_coprime30(n: usize) -> usize {
+    let r = n % 30;
+    let base = n - r;
+    for &res in &WHEEL30_RESIDUES {
+        if res >= r { return base + res; }
+    }
+    base + 30 + 1
+}
+
+// Convert number n to wheel bit position in segment starting at low (low must be multiple of 30)
+// Returns the position of the largest coprime-to-30 number ≤ n
+#[inline(always)]
+fn num_to_wheel_pos(n: usize, low: usize) -> usize {
+    let offset = n - low;
+    let group = offset / 30;
+    let r = offset % 30;
+    let bit = FLOOR_WHEEL_BIT[r];
+    if bit >= 0 {
+        group * 8 + bit as usize
+    } else {
+        (group - 1) * 8 + 7
+    }
+}
+
+// Number of wheel bits needed to cover n numbers starting from a 30-aligned boundary
+#[inline(always)]
+fn wheel_bit_count(n: usize) -> usize {
+    (n / 30) * 8 + COPRIME_COUNT_30[n % 30] as usize
+}
+
 // ── D: hard special leaves via segmented sieve ───────────────────────────────
 // Similar to V6's S2_hard but with Gourdon bounds:
 //   Type 1 (b ≤ π(√z)): squarefree m ≤ z, μ(m)≠0, lpf(m)>p, all factors ≤ y
@@ -929,32 +1020,52 @@ impl BitSieve {
 
 struct PreSieveTemplate {
     bits: Vec<u64>,
-    period: usize,
+    period: usize, // period in groups of 30 (bytes)
 }
 
 impl PreSieveTemplate {
     fn new(primes: &[u32], c: usize) -> Self {
+        // For wheel-30: primes 2,3,5 are implicit. Pre-sieve primes[4..=c] = {7,11,13,17}
+        let first_b = 4; // primes[4] = 7
+        if first_b > c {
+            // No primes to pre-sieve; return all-ones template
+            return PreSieveTemplate { bits: vec![u64::MAX; 2], period: 1 };
+        }
         let mut period: usize = 1;
-        for b in 2..=c { period *= primes[b] as usize; }
-        let mut tpl = vec![true; period];
-        for b in 2..=c {
+        for b in first_b..=c { period *= primes[b] as usize; }
+        // period in groups-of-30 (bytes): since gcd(product, 30) = 1, period is also in bytes
+
+        let nbits = period * 8;
+        let nwords = (nbits + 63) / 64;
+        let double_nwords = nwords + (nwords + 1); // extra for unaligned reads
+        let mut bits = vec![u64::MAX; double_nwords];
+
+        // Mark composites: for each pre-sieve prime p, and each coprime residue r,
+        // p*r is a composite. Clear that bit and repeat every p bytes.
+        for b in first_b..=c {
             let p = primes[b] as usize;
-            let mut k = (p - 1) / 2;
-            while k < period { tpl[k] = false; k += p; }
+            for &r in &WHEEL30_RESIDUES {
+                let composite = p * r;
+                let byte0 = composite / 30;
+                let bit_in_byte = MOD30_TO_IDX[composite % 30] as usize;
+                let mut byte = byte0;
+                while byte < period * 2 + p {
+                    let pos = byte * 8 + bit_in_byte;
+                    if pos < double_nwords * 64 {
+                        bits[pos / 64] &= !(1u64 << (pos % 64));
+                    }
+                    byte += p;
+                }
+            }
         }
-        let double_period = period * 2;
-        let nwords = (double_period + 63) / 64;
-        let mut bits = vec![0u64; nwords];
-        for i in 0..double_period {
-            if tpl[i % period] { bits[i / 64] |= 1u64 << (i % 64); }
-        }
+
         PreSieveTemplate { bits, period }
     }
 
     #[inline]
-    fn get_word(&self, start: usize) -> u64 {
-        let w = start / 64;
-        let bit_off = start % 64;
+    fn get_word(&self, start_bit: usize) -> u64 {
+        let w = start_bit / 64;
+        let bit_off = start_bit % 64;
         if bit_off == 0 {
             unsafe { *self.bits.get_unchecked(w) }
         } else {
@@ -964,19 +1075,21 @@ impl PreSieveTemplate {
         }
     }
 
-    fn init_sieve(&self, sieve: &mut BitSieve, low: usize, odd_seg_len: usize) {
-        sieve.len = odd_seg_len;
-        let nwords = (odd_seg_len + 63) / 64;
-        let mut tpl_pos = (low / 2) % self.period;
+    fn init_sieve(&self, sieve: &mut BitSieve, low: usize, wheel_seg_bits: usize) {
+        sieve.len = wheel_seg_bits;
+        let nwords = (wheel_seg_bits + 63) / 64;
+        let tpl_start_bit = ((low / 30) % self.period) * 8;
+        let tpl_period_bits = self.period * 8;
+        let mut tpl_pos = tpl_start_bit;
         let mut total = 0i64;
         for w in 0..nwords {
             let word = self.get_word(tpl_pos);
             unsafe { *sieve.bits.get_unchecked_mut(w) = word; }
             total += word.count_ones() as i64;
             tpl_pos += 64;
-            if tpl_pos >= self.period { tpl_pos -= self.period; }
+            if tpl_pos >= tpl_period_bits { tpl_pos -= tpl_period_bits; }
         }
-        let excess = nwords * 64 - odd_seg_len;
+        let excess = nwords * 64 - wheel_seg_bits;
         if excess > 0 {
             let last = unsafe { *sieve.bits.get_unchecked(nwords - 1) };
             let masked = last & (u64::MAX >> excess);
@@ -987,49 +1100,62 @@ impl PreSieveTemplate {
     }
 }
 
-#[inline(always)]
-fn int_to_odd_bp(n: usize, low: usize) -> usize { (n - low - 1) / 2 }
-
-#[inline(always)]
-fn first_odd_multiple(p: usize, low_bound: usize) -> usize {
-    let m = ((low_bound + p - 1) / p) * p;
-    if m % 2 == 0 { m + p } else { m }
-}
-
 fn cross_off_sieve(sieve: &mut BitSieve, prime: usize, low: usize, high: usize,
-                   odd_seg_len: usize) {
+                   _wheel_seg_len: usize) {
     let p = prime;
-    // For the phi sieve we must cross off ALL odd multiples of p (not just ≥ p²)
-    let fom = first_odd_multiple(p, std::cmp::max(low + 1, p));
-    let start = if fom >= high { odd_seg_len } else { int_to_odd_bp(fom, low) };
-    let mut k = start;
+    let wheel_seg_bits = sieve.len;
     let bits = sieve.bits.as_mut_ptr();
     let mut delta = 0i64;
-    while k + p * 3 < odd_seg_len {
-        unsafe {
-            let w0 = k >> 6; let b0 = k & 63;
-            let old0 = *bits.add(w0); delta += ((old0 >> b0) & 1) as i64;
-            *bits.add(w0) = old0 & !(1u64 << b0);
-            let k1 = k + p; let w1 = k1 >> 6; let b1 = k1 & 63;
-            let old1 = *bits.add(w1); delta += ((old1 >> b1) & 1) as i64;
-            *bits.add(w1) = old1 & !(1u64 << b1);
-            let k2 = k + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
-            let old2 = *bits.add(w2); delta += ((old2 >> b2) & 1) as i64;
-            *bits.add(w2) = old2 & !(1u64 << b2);
-            let k3 = k + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
-            let old3 = *bits.add(w3); delta += ((old3 >> b3) & 1) as i64;
-            *bits.add(w3) = old3 & !(1u64 << b3);
+    let step = p * 8; // uniform step in wheel-bit-space for same residue
+
+    for r_idx in 0..8 {
+        let r = WHEEL30_RESIDUES[r_idx];
+        let composite_residue = (p * r) % 30;
+        let bit_in_byte = MOD30_TO_IDX[composite_residue] as usize;
+
+        // First composite p*q in [max(low+1, p), high) where q ≡ r (mod 30)
+        let first_q = {
+            let min_q = std::cmp::max((low + p) / p, 1);
+            let base = (min_q / 30) * 30;
+            if base + r >= min_q { base + r } else { base + 30 + r }
+        };
+        let first_composite = p * first_q;
+        if first_composite >= high { continue; }
+
+        let base_pos = ((first_composite - low) / 30) * 8 + bit_in_byte;
+        let mut pos = base_pos;
+
+        // 4x unrolled word-level cross-off (same pattern as old odd-only code)
+        while pos + step * 3 < wheel_seg_bits {
+            unsafe {
+                let w0 = pos >> 6; let b0 = pos & 63;
+                let old0 = *bits.add(w0); delta += ((old0 >> b0) & 1) as i64;
+                *bits.add(w0) = old0 & !(1u64 << b0);
+                let pos1 = pos + step;
+                let w1 = pos1 >> 6; let b1 = pos1 & 63;
+                let old1 = *bits.add(w1); delta += ((old1 >> b1) & 1) as i64;
+                *bits.add(w1) = old1 & !(1u64 << b1);
+                let pos2 = pos + step * 2;
+                let w2 = pos2 >> 6; let b2 = pos2 & 63;
+                let old2 = *bits.add(w2); delta += ((old2 >> b2) & 1) as i64;
+                *bits.add(w2) = old2 & !(1u64 << b2);
+                let pos3 = pos + step * 3;
+                let w3 = pos3 >> 6; let b3 = pos3 & 63;
+                let old3 = *bits.add(w3); delta += ((old3 >> b3) & 1) as i64;
+                *bits.add(w3) = old3 & !(1u64 << b3);
+            }
+            pos += step * 4;
         }
-        k += p * 4;
-    }
-    while k < odd_seg_len {
-        unsafe {
-            let w = k >> 6; let bk = k & 63;
-            let old = *bits.add(w); delta += ((old >> bk) & 1) as i64;
-            *bits.add(w) = old & !(1u64 << bk);
+        while pos < wheel_seg_bits {
+            unsafe {
+                let w = pos >> 6; let b = pos & 63;
+                let old = *bits.add(w); delta += ((old >> b) & 1) as i64;
+                *bits.add(w) = old & !(1u64 << b);
+            }
+            pos += step;
         }
-        k += p;
     }
+
     sieve.total -= delta;
 }
 
@@ -1079,10 +1205,13 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let target_segs = rayon::current_num_threads() * 32;
     let seg_cap = std::env::var("D_SEG_CAP").ok()
         .and_then(|s| s.parse::<u32>().ok()).unwrap_or(21);
-    let segment_size = std::cmp::max(
+    // Round segment_size to multiple of 30 for wheel-30 alignment
+    let segment_size_raw = std::cmp::max(
         std::cmp::min(xz / std::cmp::max(target_segs, 1), 1usize << seg_cap),
         1 << 17
     ).next_power_of_two();
+    let segment_size = (segment_size_raw / 30) * 30;
+    let segment_size = segment_size.max(30);
     let num_segments = if xz == 0 { 1 } else { (xz / segment_size) + 1 };
 
     if num_segments <= 2 {
@@ -1129,7 +1258,8 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         }).max().unwrap_or(0);
         let vec_size = std::cmp::min(chunk_max_b + 1, nprimes);
 
-        let mut sieve = BitSieve::new(segment_size / 2);
+        let max_wheel_bits = wheel_bit_count(segment_size);
+        let mut sieve = BitSieve::new(max_wheel_bits);
         let mut phi = vec![0i64; vec_size];
         let mut d_local = 0i64;
         let mut coeff = vec![0i64; vec_size];
@@ -1139,11 +1269,15 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             let low = seg_idx * segment_size;
             if low > xz { break; }
             let high = std::cmp::min(low + segment_size, xz + 1);
-            let odd_seg_len = (high - low) / 2;
+            let wheel_seg_bits = wheel_bit_count(high - low);
             let low1 = std::cmp::max(low, 1);
-            if odd_seg_len == 0 { break; }
+            if wheel_seg_bits == 0 { break; }
 
-            template.init_sieve(&mut sieve, low, odd_seg_len);
+            template.init_sieve(&mut sieve, low, wheel_seg_bits);
+
+            // Clear bit for number 1 in first segment (1 is coprime to 30 but not a prime for phi)
+            // Actually, for phi sieve, 1 SHOULD be counted (phi counts numbers coprime to first b primes)
+            // No adjustment needed.
 
             let cur_max_b = std::cmp::min(
                 pi[std::cmp::min(isqrt(x / low1 as u64) as usize, pi_limit)] as usize,
@@ -1173,7 +1307,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                         if prime < v.lpf as u64 {
                             let xpm = (x_div_prime / v.m as u64) as usize;
                             if xpm > low && xpm < high {
-                                let pos = int_to_odd_bp(xpm, low);
+                                let pos = num_to_wheel_pos(xpm, low);
                                 let count = match prev_pos {
                                     None => { running_count = sieve.count(pos); running_count }
                                     Some(pp) if pos == pp => running_count,
@@ -1191,7 +1325,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 }
 
                 phi[b] += sieve.count_total();
-                cross_off_sieve(&mut sieve, prime as usize, low, high, odd_seg_len);
+                cross_off_sieve(&mut sieve, prime as usize, low, high, wheel_seg_bits);
                 b += 1;
             }
 
@@ -1212,7 +1346,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
                     let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
                     if xpq > low && xpq < high {
-                        let pos = int_to_odd_bp(xpq, low);
+                        let pos = num_to_wheel_pos(xpq, low);
                         let count = match prev_pos {
                             Some(pp) if pos == pp => running_count,
                             Some(pp) if pos > pp => {
@@ -1232,7 +1366,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 }
 
                 phi[b] += sieve.count_total();
-                cross_off_sieve(&mut sieve, prime as usize, low, high, odd_seg_len);
+                cross_off_sieve(&mut sieve, prime as usize, low, high, wheel_seg_bits);
                 b += 1;
             }
         }
@@ -1270,19 +1404,19 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
     let pi_limit = pi.len() - 1;
     let c = k;
     let mut phi: Vec<i64> = vec![0i64; nprimes];
-    let mut next: Vec<usize> = (0..nprimes).map(|b| primes[b] as usize).collect();
-    let mut sieve = BitSieve::new(segment_size / 2);
+    let max_wheel_bits = wheel_bit_count(segment_size);
+    let mut sieve = BitSieve::new(max_wheel_bits);
     let mut d: i64 = 0;
     let mut low: usize = 0;
 
 
     while low <= xz {
         let high = std::cmp::min(low + segment_size, xz + 1);
-        let odd_seg_len = (high - low) / 2;
+        let wheel_seg_bits = wheel_bit_count(high - low);
         let low1 = std::cmp::max(low, 1);
-        if odd_seg_len == 0 { break; }
+        if wheel_seg_bits == 0 { break; }
 
-        template.init_sieve(&mut sieve, low, odd_seg_len);
+        template.init_sieve(&mut sieve, low, wheel_seg_bits);
 
         let cur_max_b = std::cmp::min(
             pi[std::cmp::min(isqrt(x / low1 as u64) as usize, pi_limit)] as usize,
@@ -1311,7 +1445,7 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
                     if prime < v.lpf as u64 {
                         let xpm = (x_div_prime / v.m as u64) as usize;
                         if xpm > low && xpm < high {
-                            let pos = int_to_odd_bp(xpm, low);
+                            let pos = num_to_wheel_pos(xpm, low);
                             let count = match prev_pos {
                                 None => { running_count = sieve.count(pos); running_count }
                                 Some(pp) if pos == pp => running_count,
@@ -1328,8 +1462,7 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
 
             phi[b] += sieve.count_total();
             let p = prime as usize;
-            cross_off_sieve(&mut sieve, p, low, high, odd_seg_len);
-            next[b] = first_odd_multiple(p, high);
+            cross_off_sieve(&mut sieve, p, low, high, wheel_seg_bits);
             b += 1;
         }
 
@@ -1350,7 +1483,7 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
             while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
                 let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
                 if xpq > low && xpq < high {
-                    let pos = int_to_odd_bp(xpq, low);
+                    let pos = num_to_wheel_pos(xpq, low);
                     let count = match prev_pos {
                         Some(pp) if pos == pp => running_count,
                         Some(pp) if pos > pp => {
@@ -1369,8 +1502,7 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
 
             phi[b] += sieve.count_total();
             let p = prime as usize;
-            cross_off_sieve(&mut sieve, p, low, high, odd_seg_len);
-            next[b] = first_odd_multiple(p, high);
+            cross_off_sieve(&mut sieve, p, low, high, wheel_seg_bits);
             b += 1;
         }
 
