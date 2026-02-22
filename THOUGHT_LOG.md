@@ -1011,6 +1011,106 @@ S2_easy: 98→51s, S2_hard: 98→81s. Total: 99→82.6s.
 
 Tried EVERYTHING on S2_hard bottleneck (81s at 1Q):
 - S2_hard segment size cap (L2-fitting): WORSE (88.7s). Larger segments amortize overhead.
+
+---
+
+## V7 Optimization Campaign (Gourdon's Algorithm)
+
+### V7 Opt 6 — Alpha Table Retune (committed 001335e)
+
+**Discovery**: primecount always uses α_z=2.0, not the α_z=4.5 we had at Max i64.
+primecount's α_y=17 at Max i64, we had α_y=19. Their z=71M vs our z=179M.
+
+**Sweep results** (all with az=2.0):
+- Max i64: ay=17 optimal (39.4s), 1Q: ay=14 (10.5s), 100Q: ay=13 (2.53s)
+- Updated alpha lookup table: 10 entries with az=2.0 throughout
+
+**Result**: Max i64: 50.1s → 40.4s (**19% faster**). Gap vs primecount: 6.0× → 4.7×
+
+---
+
+### V7 Opt 7 — Segmented B (committed cee07de)
+
+**Problem**: B builds a 32GB BigPiTable covering [0, x/y]. Construction dominates B (35.6s).
+primecount's B takes only 1.9s — they likely don't build a monolithic table.
+
+**Solution**: Replace BigPiTable with segmented sieve approach:
+- Process [0, x/y] in L1-sized 32KB chunks (4096 words each)
+- For each chunk: sieve → prefix sum → look up x/p values via binary search
+- Parallel chunking with correction pass (prefix_pi × num_lookups per chunk)
+- Memory: 32GB → ~1.2GB (27× reduction)
+
+**Result**: B: 35.6s → 17.8s (**2.0× faster**). D now dominates wall time at 36.1s.
+
+Component profile (Max i64, ay=17, az=2.0):
+  Setup: 2.72s | BigPi(AC): 0.23s | B: 17.78s | AC: 21.76s | D: 36.14s
+
+---
+
+### V7 Opt 8 — D Optimization (IN PROGRESS)
+
+**Goal**: Close the 8.8× gap with primecount's D (36.1s vs 4.1s).
+
+**Current D bottleneck analysis**:
+- D processes [0, x/z] in 2M segments with 1032 b-iterations per segment
+- Total segments: 61.5K, cross_off calls: 63.5M
+- Total cross-offs: ~77.6B (bit clears with delta tracking)
+- Binary search overhead: 127M partition_point calls on 73MB valid_m_list
+
+**Experiment 1: Sliding pointers (FAILED — 5.9s REGRESSION)**
+- Replaced partition_point binary searches with per-b sliding pointers
+- Maintained vm_start_arr/vm_end_arr across segments, sliding left monotonically
+- Theory: O(1) amortized vs O(log N) per search, better cache locality
+- Reality: D went 36.1s → 42.0s. Reverted.
+- Possible cause: initialization overhead, register pressure in hot loop, or
+  compiler couldn't optimize the sliding loops as well as partition_point
+
+**Next ideas to try**:
+1. Add timing instrumentation to identify exact D bottleneck (cross_off vs count_delta vs lookups)
+2. Word-batched cross_off for small primes (p<64): accumulate mask, single popcount per word
+3. Counter tree / block prefix sums for O(√N) count_delta instead of O(span)
+4. Larger pre-sieve template (extend beyond p=13 to p=23)
+5. Different D chunk distribution for load balancing
+
+**Experiment 2: Detailed D profiling (DIAGNOSTIC)**
+Added per-component timing to chunk 0 at Max i64:
+  init_sieve: 10.3ms (negligible)
+  cross_off: 234.1ms, 449K calls (negligible!)
+  binary_search: 323.1ms (negligible!)
+  lookups+count_delta: 31,611.8ms — **97.2% of D time**, 2.23 BILLION hits
+
+The bottleneck is the 2.23B valid_m iterations × ~14ns each:
+  - u64 division (x/(p*m)): ~6ns (21 cycles on Arrow Lake)
+  - count_delta popcount scan: ~4ns (average ~9 word span)
+  - other (memory loads, branches): ~4ns
+
+**Experiment 3: Precomputed reciprocals for fast_div (FAILED — 5.5s REGRESSION)**
+- Precomputed vm_recip[i] = (2^64)/m for all 9.1M valid_m entries (73MB)
+- Used fast_div(x_div_prime, m, recip) instead of native u64 division
+- D: 36.1s → 41.6s. ALL components degraded.
+- Root cause: extra 73MB array thrashes L3 cache (36MB total).
+  Both valid_m_list (73MB) and vm_recip (73MB) = 146MB competing for L3.
+  B and AC also suffer from increased L3 contention.
+
+**Experiment 4: Increase c from 6 to 7 (FAILED — 0.8s REGRESSION)**
+- Extended TINY_PRIMES to include 17, set k = min(7, pi_y)
+- PhiTinyCache: 30K → 510K entries (4MB). PreSieveTemplate: 7.5KB → 128KB.
+- D: 36.1s → 36.9s. init_sieve slower (128KB template reads from L2 vs L1).
+- The template cache degradation offsets the savings from eliminating b=7 iteration.
+
+**Experiment 5: D segment size sweep (NO IMPROVEMENT)**
+- D_SEG_CAP=19: D=37.6s (worse). More per-segment overhead.
+- D_SEG_CAP=21: D=36.1s (baseline, optimal).
+- D_SEG_CAP=22: D=36.7s (worse). More L2 pressure.
+- D_SEG_CAP=23: D=37.6s (worse). Hurts AC via L3 contention.
+
+**D optimization conclusion**:
+D is fundamentally bottlenecked by 2.23B valid_m lookups with u64 divisions.
+primecount likely uses: wheel mod 30 (53% sieve savings), counter trees for O(log N)
+count queries, and optimized C++ with hand-tuned assembly. Matching primecount's D
+would require a complete rewrite of the sieve infrastructure.
+
+**Shifting focus to AC** (21.8s vs primecount's 2.5s = 8.7× gap) — more room for improvement.
 - nchunks tuning: 3-24x multiplier. 6-12x all equivalent. Current 6x is optimal.
 - target_segs tuning: 8-128x. All equivalent. No improvement.
 - BitSieve hierarchical block counters: 57% overhead on hot crossing loop outweighs count() savings.
