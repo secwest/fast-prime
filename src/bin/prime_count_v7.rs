@@ -468,7 +468,7 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
     let bp_sw = bp_start / 64;
     let bp_ew = bp_end / 64;
 
-    let mut xp_odd_asc: Vec<usize> = Vec::new();
+    let mut xp_wheel_asc: Vec<usize> = Vec::new();
     let mut max_xp: usize = 0;
     for word_idx in (bp_sw..=bp_ew).rev() {
         let mut w = big_pi.bits_word(word_idx);
@@ -487,17 +487,17 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
             let p = (2 * (word_idx * 64 + bit) + 1) as u64;
             let xp = (x / p) as usize;
             if xp > max_xp { max_xp = xp; }
-            xp_odd_asc.push(xp.saturating_sub(1) / 2);
+            xp_wheel_asc.push(num_to_wheel_pos(xp, 0));
         }
     }
 
-    if xp_odd_asc.is_empty() || max_xp < 2 { return 0; }
+    if xp_wheel_asc.is_empty() || max_xp < 2 { return 0; }
 
-    // Sieving primes ≥ 17 from BigPiTable (3,5,7,11,13 pre-sieved)
+    // Sieving primes ≥ 19 from BigPiTable (7,11,13,17 pre-sieved via wheel template)
     let sqrt_maxp = isqrt(max_xp as u64) as usize;
     let mut sieve_primes: Vec<usize> = Vec::new();
     if sqrt_maxp >= 19 {
-        let sp_s = (19 - 1) / 2; // odd-index of 19
+        let sp_s = (19 - 1) / 2;
         let sp_e = (sqrt_maxp - 1) / 2;
         for word_idx in (sp_s / 64)..=(sp_e / 64) {
             let mut w = big_pi.bits_word(word_idx);
@@ -517,27 +517,28 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
         }
     }
 
-    let masks3 = BigPiTable::build_presieve_masks(3);
-    let masks5 = BigPiTable::build_presieve_masks(5);
-    let masks7 = BigPiTable::build_presieve_masks(7);
-    let masks11 = BigPiTable::build_presieve_masks(11);
-    let masks13 = BigPiTable::build_presieve_masks(13);
-    let masks17 = BigPiTable::build_presieve_masks(17);
+    // Wheel-30 pre-sieve template for {7,11,13,17} (2,3,5 implicit in wheel)
+    let b_tiny: [u32; 8] = [0, 2, 3, 5, 7, 11, 13, 17];
+    let tpl = PreSieveTemplate::new(&b_tiny, 7);
 
-    let odd_count = (max_xp - 1) / 2 + 1;
-    let seg_words: usize = 4096; // 32KB = fits L1
-    let seg_odd_count = seg_words * 64;
-    let num_segs = (odd_count + seg_odd_count - 1) / seg_odd_count;
+    // Segment parameters in wheel-30 format (8 bits per 30 numbers)
+    let seg_words: usize = 32768; // 256KB = L2, minimizes per-segment overhead
+    let seg_bits = seg_words * 64;
+    let seg_nums = seg_words * 240; // 1 word = 8 groups × 30 numbers = 240 numbers
+    let groups_per_seg = seg_words * 8;
+    let total_groups = max_xp / 30 + 1;
+    let total_wheel_bits = total_groups * 8;
+    let num_segs = (total_wheel_bits + seg_bits - 1) / seg_bits;
 
     let nthreads = rayon::current_num_threads();
     let nchunks = std::cmp::min(nthreads * 32, num_segs).max(1);
     let chunk_segs = (num_segs + nchunks - 1) / nchunks;
 
     let chunk_xp_bounds: Vec<usize> = (0..=nchunks).map(|k| {
-        let chunk_odd_start = std::cmp::min(
-            k as u64 * chunk_segs as u64 * seg_odd_count as u64,
-            odd_count as u64) as usize;
-        xp_odd_asc.partition_point(|&v| v < chunk_odd_start)
+        let chunk_bit_start = std::cmp::min(
+            k as u64 * chunk_segs as u64 * seg_bits as u64,
+            total_wheel_bits as u64) as usize;
+        xp_wheel_asc.partition_point(|&v| v < chunk_bit_start)
     }).collect();
 
     let chunk_results: Vec<(i64, u64, usize)> = (0..nchunks).into_par_iter().map(|k| {
@@ -552,65 +553,62 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
         let mut buf = vec![0u64; seg_words];
         let mut seg_prefix = vec![0u64; seg_words + 1];
 
+        let tpl_period_bits = tpl.period * 8;
+
         for seg in seg_lo..seg_hi {
-            let start_idx = seg * seg_odd_count;
-            let end_idx = std::cmp::min(start_idx + seg_odd_count, odd_count);
-            let seg_len = end_idx - start_idx;
-            let seg_nw = (seg_len + 63) / 64;
+            let low_num = seg * seg_nums;
+            let seg_groups = std::cmp::min(groups_per_seg, total_groups.saturating_sub(seg * groups_per_seg));
+            let seg_nbits = seg_groups * 8;
+            let seg_nw = (seg_nbits + 63) / 64;
 
-            for w in 0..seg_nw { unsafe { *buf.get_unchecked_mut(w) = !0u64; } }
-            let excess = seg_nw * 64 - seg_len;
-            if excess > 0 { buf[seg_nw - 1] &= u64::MAX >> excess; }
-            if seg == 0 { buf[0] &= !1u64; }
-
-            // Pre-sieve 3, 5, 7, 11, 13, 17
-            let mut o3 = (1 + 3 - start_idx % 3) % 3;
-            let mut o5 = (2 + 5 - start_idx % 5) % 5;
-            let mut o7 = (3 + 7 - start_idx % 7) % 7;
-            let mut o11 = (5 + 11 - start_idx % 11) % 11;
-            let mut o13 = (6 + 13 - start_idx % 13) % 13;
-            let mut o17 = (8 + 17 - start_idx % 17) % 17;
+            // Init from wheel-30 pre-sieve template
+            let tpl_start_bit = ((low_num / 30) % tpl.period) * 8;
+            let mut tpl_pos = tpl_start_bit;
             for w in 0..seg_nw {
-                unsafe {
-                    *buf.get_unchecked_mut(w) &=
-                        masks3[o3] & masks5[o5] & masks7[o7]
-                        & masks11[o11] & masks13[o13] & masks17[o17];
-                }
-                o3 = (o3 + 2) % 3;
-                o5 = (o5 + 1) % 5;
-                o7 = (o7 + 6) % 7;
-                o11 = (o11 + 2) % 11;
-                o13 = (o13 + 1) % 13;
-                o17 = (o17 + 4) % 17;
+                unsafe { *buf.get_unchecked_mut(w) = tpl.get_word(tpl_pos); }
+                tpl_pos += 64;
+                if tpl_pos >= tpl_period_bits { tpl_pos -= tpl_period_bits; }
             }
+            let excess = seg_nw * 64 - seg_nbits;
+            if excess > 0 { buf[seg_nw - 1] &= u64::MAX >> excess; }
+
+            // Seg 0: clear bit 0 (number 1 is not prime), restore primes 7,11,13,17
             if seg == 0 {
-                buf[0] |= (1u64 << 1) | (1u64 << 2) | (1u64 << 3)
-                        | (1u64 << 5) | (1u64 << 6) | (1u64 << 8); // restore 3,5,7,11,13,17
+                buf[0] = (buf[0] & !1u64) | 0b11110;
             }
 
-            // Cross off composites for primes ≥ 19
-            let end_num = 2 * (end_idx - 1) + 1;
+            // Cross off composites for primes ≥ 19 (per-residue wheel-30)
+            let end_num = low_num + seg_groups * 30;
             let max_p = isqrt(end_num as u64) as usize;
             let sp_end = sieve_primes.partition_point(|&p| p <= max_p);
-            let low_num = 2 * start_idx + 1;
             for &p in &sieve_primes[..sp_end] {
-                let pp = (p as u64) * (p as u64);
-                let first_num = if pp >= low_num as u64 {
-                    pp as usize
-                } else {
-                    let m = ((low_num + p - 1) / p) * p;
-                    if m % 2 == 0 { m + p } else { m }
-                };
-                if first_num > end_num { continue; }
-                let local_idx = (first_num - 1) / 2 - start_idx;
-                let mut idx = local_idx;
-                while idx < seg_len {
-                    unsafe {
-                        let w = idx >> 6;
-                        let b = idx & 63;
-                        *buf.get_unchecked_mut(w) &= !(1u64 << b);
+                let step = p * 8;
+                let min_q = std::cmp::max(p, (low_num + p - 1) / p);
+                let base_q = (min_q / 30) * 30;
+                for r_idx in 0..8 {
+                    let r = WHEEL30_RESIDUES[r_idx];
+                    let bit_in_group = MOD30_TO_IDX[(p * r) % 30] as usize;
+                    let first_q = if base_q + r >= min_q { base_q + r } else { base_q + 30 + r };
+                    let first_composite = p * first_q;
+                    if first_composite >= end_num { continue; }
+
+                    let mut pos = ((first_composite - low_num) / 30) * 8 + bit_in_group;
+                    while pos + step * 3 < seg_nbits {
+                        unsafe {
+                            *buf.get_unchecked_mut(pos >> 6) &= !(1u64 << (pos & 63));
+                            let p1 = pos + step;
+                            *buf.get_unchecked_mut(p1 >> 6) &= !(1u64 << (p1 & 63));
+                            let p2 = pos + step * 2;
+                            *buf.get_unchecked_mut(p2 >> 6) &= !(1u64 << (p2 & 63));
+                            let p3 = pos + step * 3;
+                            *buf.get_unchecked_mut(p3 >> 6) &= !(1u64 << (p3 & 63));
+                        }
+                        pos += step * 4;
                     }
-                    idx += p;
+                    while pos < seg_nbits {
+                        unsafe { *buf.get_unchecked_mut(pos >> 6) &= !(1u64 << (pos & 63)); }
+                        pos += step;
+                    }
                 }
             }
 
@@ -621,16 +619,17 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
             }
             let seg_prime_count = seg_prefix[seg_nw];
 
+            let global_seg_start = seg * seg_bits;
             while xp_idx < xp_hi {
-                let oi = unsafe { *xp_odd_asc.get_unchecked(xp_idx) };
-                if oi >= end_idx { break; }
-                let pos = oi - start_idx;
+                let wp = unsafe { *xp_wheel_asc.get_unchecked(xp_idx) };
+                if wp >= global_seg_start + seg_nbits { break; }
+                let pos = wp - global_seg_start;
                 let word = pos >> 6;
                 let bit = pos & 63;
                 let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
                 let count = unsafe { *seg_prefix.get_unchecked(word) }
                     + (unsafe { *buf.get_unchecked(word) } & mask).count_ones() as u64;
-                local_sum += (1 + local_pi + count) as i64;
+                local_sum += (3 + local_pi + count) as i64; // 3 for primes {2,3,5}
                 xp_idx += 1;
             }
 
@@ -898,9 +897,6 @@ const COPRIME_COUNT_30: [u8; 31] = [
     0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 4, 4, 4,
     4, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 8, 8,
 ];
-
-// Wheel cross-off tables: gaps between consecutive coprime residues
-const WHEEL_GAPS: [usize; 8] = [6, 4, 2, 4, 2, 4, 6, 2];
 
 // Wheel cross-off tables (kept for reference / future use with byte-level stepping)
 #[allow(dead_code)]
