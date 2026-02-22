@@ -1635,3 +1635,44 @@ Key primecount advantages:
 V7 Opt 11: Max i64 = 31.4s (3.69× primecount). All 15 test cases pass.
 
 Next priority: SegmentedPiTable for AC (most well-understood remaining optimization).
+
+### Opt 12: Work-Balanced D Chunking
+
+**CRITICAL DISCOVERY**: D had extreme load imbalance. Using profiling with per-chunk wall timers:
+- Old equal-segment chunking (144 chunks): chunk 0 = 30.7s, last chunks = 0.7s
+- 74% of thread-time was IDLE (only 194.8 of 744 thread-seconds was actual work!)
+
+Root cause: early segments (low near 0) have cur_max_b up to 174K for Type 2.
+Late segments have only ~840 (Type 1 only). Equal segment count means chunk 0
+gets 743 segments including all the expensive ones.
+
+Fix: pre-compute work per segment (proportional to cur_max_b), assign segments
+to chunks based on balanced cumulative work. Increased chunks to 24×32=768.
+Also right-size phi/coeff vectors per chunk (saves memory for late chunks where
+only 841 entries needed instead of 1.29M).
+
+Results: max chunk 30.7s → 4.8s. D: 29.9s → 27.5s. Wall: 31.4s → 29.1s.
+
+### Key Profiling Findings (from D instrumentation)
+
+1. D components at Max i64 (thread-sums):
+   - T1 cross-off: ~53-59 thread-seconds (cross_off_sieve for primes 23-6403)
+   - T1 contributions: ~65 thread-seconds (ValidM iteration + sieve.count)
+   - T2 total: ~55 thread-seconds (primes 6403-2.37M, cross-off + contributions)
+   - Total actual work: ~193 thread-seconds
+
+2. All three components (B, AC, D) share rayon's 24-thread pool via thread::scope.
+   Each effectively gets ~8 threads. D's 193 thread-seconds / 8 ≈ 24s + overhead = 27.5s.
+
+3. AC (27.5s) is now tied with D as the bottleneck. B at 24s is slightly below.
+
+### Current State
+
+V7 Opt 12: Max i64 = 29.1s (3.42× primecount). All 15 test cases pass.
+
+### Next Priority
+
+Now that D is reasonably balanced, focus on AC optimization:
+- SegmentedPiTable for AC: convert random DRAM misses to L2 hits
+- Would reduce AC from 27.5s to potentially ~14s
+- With faster AC, can increase alpha_y to shift more work from D to AC/B

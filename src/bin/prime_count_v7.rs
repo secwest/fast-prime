@@ -142,6 +142,7 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
     let logx = (x as f64).ln();
 
     // Lookup table tuned for Intel Core Ultra 9 285K (24 threads, 36MB L3)
+    // Re-tuned Opt 13 with work-balanced D: higher alpha_y optimal at top end
     // (logx, alpha_y, alpha_z)
     const TABLE: &[(f64, f64, f64)] = &[
         (20.0,  2.0, 1.5),   // x ~ 5e8
@@ -151,9 +152,9 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
         (32.2,  6.0, 2.0),   // x ~ 1e14
         (34.5,  7.0, 2.0),   // x ~ 1e15
         (36.8,  8.0, 2.0),   // x ~ 1e16
-        (39.1,  8.0, 2.0),   // x ~ 1e17
-        (41.4,  9.0, 2.0),   // x ~ 1e18
-        (43.6,  9.8, 2.0),   // x ~ Max i64
+        (39.1, 10.0, 2.0),   // x ~ 1e17 (was 8.0)
+        (41.4, 12.0, 2.0),   // x ~ 1e18 (was 9.0)
+        (43.6, 13.5, 2.0),   // x ~ Max i64 (was 9.8)
     ];
 
     let (alpha_y, alpha_z) = if logx <= TABLE[0].0 {
