@@ -402,7 +402,6 @@ impl BigPiTable {
         if n >= 3 {
             let base = (n - 1) / 2 / 64 * 2;
             unsafe {
-                // bits and prefix in same cache line — single prefetch suffices
                 _mm_prefetch(self.data.as_ptr().add(base) as *const i8, _MM_HINT_T0);
             }
         }
@@ -769,13 +768,11 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                     let p1 = big_pi.pi(xpq1) as i64;
                     let p2 = big_pi.pi(xpq2) as i64;
                     let p3 = big_pi.pi(xpq3) as i64;
-                    // A: coefficient is 1 if l <= y_boundary, else 2
                     if l + 3 <= info.y_boundary_l {
                         local += p0 + p1 + p2 + p3;
                     } else if l > info.y_boundary_l {
                         local += 2 * (p0 + p1 + p2 + p3);
                     } else {
-                        // Mixed boundary — handle individually
                         for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
                             local += if ll <= info.y_boundary_l { pv } else { 2 * pv };
                         }
@@ -1294,6 +1291,8 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                     } else if xpq == low {
                         d_local += phi[b];
                         coeff[b] += 1;
+                    } else if xpq >= high {
+                        break; // xpq only increases as l decreases
                     }
                     l -= 1;
                 }
@@ -1430,6 +1429,8 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
                     prev_pos = Some(pos);
                 } else if xpq == low {
                     d += phi[b];
+                } else if xpq >= high {
+                    break; // xpq only increases as l decreases
                 }
                 l -= 1;
             }

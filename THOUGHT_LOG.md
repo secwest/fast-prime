@@ -2021,3 +2021,159 @@ sum += running
 - Consider SoA for ValidM (separate m, recip_m arrays for cache efficiency)
 - Try reducing valid_m entries via better filtering
 - Explore different D chunking strategies
+
+---
+
+## Session 4: Exhaustive Micro-Optimization Exploration
+
+### Starting point: V7 Opt 23 (streaming merge), 17.36s at Max i64
+
+Component breakdown: B≈16.49s, AC≈16.47s, D≈16.46s, setup≈0.84s
+Nearly perfect 3-way balance. Need to reduce total serial work to close 2.04× gap to primecount (8.49s).
+
+---
+
+### Experiment 1: B-First Scheduling (FAILED — 23.76s)
+
+**Idea**: Run B alone with all 24 threads, then AC+D concurrently.
+
+**Result**: MUCH WORSE (23.76s). B alone finishes in ~7s, then AC+D sequential in their shared pool takes 15.8s each. Total = 7 + 15.8 = 22.8s vs concurrent 16.5s.
+
+**Root cause**: Concurrent is fundamentally better because total_serial/24 < B_serial/24 + max(AC,D)_serial/24. The rayon shared pool naturally load-balances across all three components.
+
+**Verdict**: REVERTED.
+
+---
+
+### Experiment 2: Hybrid Batch/Iterate for B (CATASTROPHIC — 111.3s)
+
+**Idea**: For large gaps between xp values (>100K), use primesieve_count_primes instead of iterator (~0.1ns/prime SIMD POPCNT vs ~5ns/prime iterator).
+
+**Result**: CATASTROPHIC regression (111.3s!). primesieve_count_primes has enormous per-call overhead — creates and destroys a full sieve context each call (~20-50μs). With 147M xp values and many small-range calls, the overhead dominates.
+
+**Analysis**: Average gap is ~5000 numbers. Iterator: 5ns × ~590 primes = ~3μs per gap. count_primes: 20-50μs per gap. 10-17× worse per gap!
+
+**Verdict**: REVERTED immediately. primesieve_count_primes only useful for few, large-range calls.
+
+---
+
+### Experiment 3: Compact ValidM (Remove recip_m) (REGRESSED — 17.87s)
+
+**Idea**: Remove recip_m from ValidM struct, shrink from 16→8 bytes (53MB→26.4MB), fit in L3 cache (36MB). Use plain u64 division instead of fast_div.
+
+**Result**: REGRESSED (17.87s, D: 17.03s vs 16.46s). u64 DIV instruction (~7ns) is much slower than fast_div with precomputed reciprocal (~1.4ns, just MUL+adjust). The L3 cache benefit (~6ns saved from fewer misses) doesn't compensate for 5.6ns slower division.
+
+**Verdict**: REVERTED. Precomputed reciprocals are essential.
+
+---
+
+### Experiment 4: Overlap B Start with Table Generation (REGRESSED — 22.29s)
+
+**Idea**: Build BigPiTable outside rayon scope, start B immediately while generate_tables runs.
+
+**Result**: MUCH WORSE (22.29s). BigPiTable no longer overlaps with generate_tables, setup takes longer, and B/AC/D phasing is degraded.
+
+**Complication**: std::thread::scope lifetime rules prevent borrowing objects created inside scope from spawned threads. Required restructuring that hurt overall timing.
+
+**Verdict**: REVERTED.
+
+---
+
+### Experiment 5: Thread Count Scaling Test
+
+| Threads | Time |
+|---------|------|
+| 8 | 37.3s |
+| 16 | 22.4s |
+| 20 | 19.0s |
+| 24 | 17.6s |
+
+**Conclusion**: 24 threads optimal. Scaling sub-linear (2.12× for 3× threads) due to memory bandwidth and L3 cache pressure. All cores contribute despite mixed P+E architecture.
+
+---
+
+### Experiment 6: Alpha Parameter Grid Search
+
+**Coarse search**: alpha_y=4.0 to 8.0, alpha_z=1.5 to 2.7
+**Fine search**: alpha_y=5.5 to 6.3, alpha_z=2.3 to 2.7
+
+**Best candidates**: ay=5.9/az=2.4 initially showed 16.95s but averaged 17.18s over 3 runs.
+
+**Conclusion**: ay=6.0/az=2.0 remains near-optimal. Variations within ~0.3s noise margin. Total serial work doesn't change much with alpha — it's redistributed among B, AC, D.
+
+---
+
+### Experiment 7: NTA Prefetch for BigPiTable (REGRESSED — 17.84s)
+
+**Idea**: Change prefetch hint from _MM_HINT_T0 (bring to all cache levels) to _MM_HINT_NTA (non-temporal, bypass L1/L2).
+
+**Result**: WORSE (17.84s). NTA bypasses L1/L2 caches, causing misses on the actual pi() read that follows the prefetch. T0 is correct — we need the data in L1 for the pi() call.
+
+**Verdict**: REVERTED.
+
+---
+
+### Experiment 8: Deeper Prefetch Distance in AC (l+64 instead of l+32) (SLIGHTLY WORSE — 17.60s)
+
+**Result**: Extra prefetch distance adds computation overhead and may pollute hardware prefetch queue. Prefetch at l+32 is the sweet spot.
+
+**Verdict**: REVERTED.
+
+---
+
+### Experiment 9: 8x Unrolled AC Loop (WORSE — 17.74s)
+
+**Idea**: Increase AC loop unrolling from 4x to 8x for more ILP.
+
+**Result**: WORSE due to register pressure. x86-64 has 16 GPR. 8 xpq values + 8 pi results + loop variables exceeds register file, causing spills. 8 prefetches may also exceed hardware prefetch queue depth (~10-16 entries).
+
+**Verdict**: REVERTED. 4x unrolling is the sweet spot.
+
+---
+
+### Experiment 10: D Type 2 Early Break (KEPT — neutral performance, correct optimization)
+
+**Idea**: In D Type 2 inner loop, when xpq = x/(p*q) >= high, break immediately since xpq only increases as l decreases.
+
+**Result**: Within noise (17.53s vs 17.46s baseline). Analysis shows few iterations are actually wasted due to the min_m lower bound already limiting iterations.
+
+**Verdict**: KEPT. Correct optimization, doesn't hurt, may help in edge cases.
+
+---
+
+### Analysis: Why the 2× Gap to primecount is Fundamental
+
+Total serial work breakdown:
+- **B**: ~120s serial (primesieve iterator ~5ns/prime × 24B primes)
+  - primecount uses internal SIMD POPCNT counting (~0.5ns/prime). Savings: 80-90s
+- **AC**: ~138s serial (BigPiTable 375MB random lookups → DRAM misses ~100ns each)
+  - primecount uses more compact structures
+- **D**: ~138s serial (valid_m_list 53MB > 36MB L3 → cache thrashing)
+
+Total: ~396s / 24 threads = 16.5s wall
+primecount: ~204s total work / 24 threads = 8.5s
+**Gap is ~192s of extra serial work**, primarily in B's per-prime materialization overhead.
+
+### Remaining Strategies to Close Gap
+
+1. **Custom counting sieve for B**: Build segmented sieve with POPCNT counting, bypass primesieve's per-prime iterator overhead. Estimated savings: 80s serial (40% of B). MASSIVE effort — needs bucket sieve for large primes.
+
+2. **Modify primesieve to expose batch counting API**: Batch π(x) queries during single sieve pass. Would give primesieve's optimized sieve + our merge logic.
+
+3. **Segment-based AC processing**: Process BigPiTable in L3-sized segments. For each segment, handle all (b,l) pairs accessing it. Reduces DRAM misses.
+
+4. **Switch to Deleglise-Rivat formula**: primecount uses this approach with inherently less total work. MASSIVE rewrite.
+
+---
+
+## V7 Optimization 24: D Type 2 Early Break
+
+**Change**: Added `else if xpq >= high { break; }` in D Type 2 inner loops (both parallel and serial).
+
+**Performance**: Neutral (within noise). Correct pruning of unnecessary iterations.
+
+**Current state**: 17.45s at Max i64, 2.06× vs primecount (8.49s).
+
+---
+
+## Session 4 Continuation: Pursuing Further Optimizations
