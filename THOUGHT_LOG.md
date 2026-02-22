@@ -1258,3 +1258,43 @@ az=4.49 (just below cliff!). Fixed to logx=43.6 so Max i64 uses exact (19.0, 4.5
 
 **Cumulative V7 Opt 4 vs V6**: Max i64 342.5s -> 62.2s = **5.5x faster**.
 
+
+---
+
+## V7 Opt 5 — Software Prefetch + L2-Sized D Segments (Session 2)
+
+### Prefetch for AC BigPiTable Lookups
+- Added _mm_prefetch intrinsic to BigPiTable::prefetch() method
+- First attempt: single prefetch per 4x iteration → no improvement (59.7s)
+- Second attempt: prefetch all 4 values for NEXT iteration → AC: 53.5→50.0s (6.5% improvement)
+- Also 4x unrolled A formula inner loops with prefetch 4 ahead
+- Interleaved BigPiTable (prefix+bits in same struct) → REGRESSED AC by 3s! Separate arrays with double-prefetch is better. Reverted.
+
+### L2-Cache-Sized D Segments — THE BIG WIN
+- Added segment size cap to D's segmented sieve: min(xz/target_segs, 1<<21)
+- Old: 67M-int segments → 4.2MB sieve/thread → 100MB total → L3 thrashing
+- New: 2M-int segments → 125KB sieve/thread → 3MB total → fits L2
+- Results MASSIVE: B 38→22s, AC 50→42s, D 50→42s, Wall 57→49.6s
+- The key insight: reducing D's L3 footprint benefits ALL concurrent components
+- Sweep: 2^21 optimal at Max i64 (48.8s), slight regression at 1Q (11.6 vs 11.1s)
+- Extended pre-sieve (p=11,13) → marginal gain, possible regression. Reverted.
+
+### Benchmark vs Kim Walisch's primecount v8.2
+- Installed primecount and primesieve via winget
+- primecount (Gourdon): V7 is 1.5-6× slower (gap grows with scale)
+  - 1e12: 1.5×, 1e14: 1.9×, 1e16: 3.9×, 1e18: 5.2×, Max i64: 6.0×
+- primesieve: O(n) sieve, impractical above 1e12. V7 is 760× faster at 1e12
+- primecount has 10+ years of optimization, 128-bit math, AVX2, cache-oblivious algorithms
+
+### Component Profile (Opt 5, Max i64 full suite)
+- Setup: 7.05s (Sieve, pi, mu/lpf/y_smooth — single-threaded)
+- BigPiTable(AC): 0.22s
+- B: 22.2s (BigPiTable construction, no longer bottleneck)
+- AC: 42.4s (C2+A with prefetch, still bottleneck)
+- D: 42.5s (L2-sized segments, near-tied with AC)
+- Wall: 50.1s
+
+### Cumulative: V7 Opt 0→5 speedup
+- 100Q: 7.05s → 2.76s (2.6×, 5.2× vs V6)
+- 1Q: 32.9s → 11.9s (2.8×, 4.4× vs V6)
+- Max i64: 200.9s → 50.1s (4.0×, 6.8× vs V6)

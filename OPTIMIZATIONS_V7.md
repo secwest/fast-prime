@@ -255,19 +255,100 @@ Exhaustive sweep of α_z at Max i64 (α_y=19 fixed) revealed a dramatic performa
 
 ---
 
+## Opt 5 — Software Prefetch + L2-Sized D Segments
+
+**What**: Two changes that reduce Max i64 from 62.2s to **50.1s** (19.5% faster).
+
+### Software Prefetch for AC's BigPiTable Lookups
+
+Add `_mm_prefetch` intrinsic calls to pre-load BigPiTable data for upcoming iterations in AC's hot loops:
+- **C2 sparse loop** (4x unrolled): prefetch next iteration's 4 BigPiTable entries (8 cache lines: 4 bits + 4 prefix)
+- **A formula loops** (x/pq≥y and x/pq<y): 4x unrolled with prefetch 4 ahead
+
+The AC BigPiTable at Max i64 is 380MB (10× L3 cache). Random lookups hit DRAM at ~100ns. Prefetching one iteration ahead (4 values) hides most of the DRAM latency.
+
+**Impact on AC**: 53.5s → 50.0s (6.5% faster)
+
+### L2-Cache-Sized D Segments
+
+Cap D's segment size at 2^21 = 2M integers (1M odd, 15.6K words, **125KB per sieve**). Previously, D used dynamic sizing that resulted in 67M-integer segments (4.2MB sieve per thread). The key insight:
+
+- Old: 24 threads × 4.2MB = 100MB total sieve memory → exceeds L3 (36MB), causes frequent evictions
+- New: 24 threads × 125KB = 3MB total sieve memory → fits in L3 with room for B/AC data
+
+Reducing D's L3 footprint benefits ALL three concurrent components:
+- **B**: 38s → 22s (42% faster) — BigPiTable construction gets more L3 bandwidth
+- **AC**: 50s → 42s (16% faster) — BigPiTable lookups have fewer L3 evictions
+- **D**: 50s → 42s (16% faster) — sieve fits in L2 cache for fast count/count_delta
+
+Tunable via `D_SEG_CAP` env var (default 21, i.e., 2^21). Sweep results at Max i64:
+| Cap | Segment | Sieve/thread | Time |
+|-----|---------|-------------|------|
+| 2^20 | 1M | 62KB | 49.3s |
+| **2^21** | **2M** | **125KB** | **48.8s** |
+| 2^22 | 4M | 250KB | 50.2s |
+| 2^24 | 16M | 1MB | 51.5s |
+| 2^26 | 64M | 4.2MB | 62.0s |
+
+### Results (Opt 5 vs Opt 4)
+
+| Range | Opt 4 | Opt 5 | Speedup |
+|-------|-------|-------|---------|
+| 100Q | 2.80s | 2.76s | same |
+| 1 Quintillion | 11.1s | 11.9s | 0.93× |
+| **Max i64** | **62.2s** | **50.1s** | **1.24×** |
+
+Note: 1Q shows slight regression because at that scale, larger segments were already near-optimal. The Max i64 improvement dominates.
+
+### Cumulative Progress
+
+| Range | V7 Opt 0 | V7 Opt 5 | Speedup | vs V6 |
+|-------|----------|----------|---------|-------|
+| 100Q | 7.05s | 2.76s | 2.6× | 5.2× |
+| 1 Quintillion | 32.9s | 11.9s | 2.8× | 4.4× |
+| Max i64 | 200.9s | 50.1s | 4.0× | **6.8×** |
+
+### Comparison with Kim Walisch's primecount v8.2
+
+primecount is the fastest published prime counting implementation, by Kim Walisch. Both implementations use Gourdon's algorithm.
+
+| Scale | V7 Opt 5 | primecount | Ratio | primesieve |
+|-------|----------|------------|-------|------------|
+| 1e10 | 0.004s | — | — | 0.054s |
+| 1e11 | 0.005s | — | — | 0.565s |
+| 1e12 | 0.009s | 0.006s | 1.5× | 6.85s |
+| 1e13 | 0.022s | 0.009s | 2.4× | 84s |
+| 1e14 | 0.042s | 0.022s | 1.9× | — |
+| 1e15 | 0.180s | 0.054s | 3.3× | — |
+| 1e16 | 0.686s | 0.174s | 3.9× | — |
+| 1e17 | 2.59s | 0.590s | 4.4× | — |
+| 1e18 | 11.8s | 2.27s | 5.2× | — |
+| Max i64 | 50.5s | 8.40s | 6.0× | — |
+
+Our V7 is ~1.5-6× slower than primecount, with the gap growing at larger scales. primecount has been optimized for over a decade with:
+- 128-bit arithmetic for extended range
+- Highly tuned segmented sieve and phi tables
+- Sophisticated alpha tuning per scale
+- Cache-oblivious algorithms
+- AVX2/AVX-512 SIMD in some paths
+
+For reference, primesieve (segmented Sieve of Eratosthenes) becomes impractical above 1e12 due to O(n log log n) complexity vs O(n^{2/3+ε}) for Gourdon's algorithm. Our V7 is already 760× faster than primesieve at 1e12.
+
+---
+
 ## Next Optimization Targets
 
-### Bottleneck Analysis (Opt 4, Max i64 isolated)
+### Bottleneck Analysis (Opt 5, Max i64 full suite)
 
-- **AC = 53.5s** — C2+A parallel loops with BigPiTable(3B) lookups into 380MB table. Random access pattern causes DRAM misses.
-- **D = 50.4s** — Parallel sieve with ValidM list. Well-optimized but could benefit from compressed tables.
-- **B = 39.4s** — BigPiTable(232B) construction with pre-sieve. Mostly hidden behind AC/D.
+- **AC = 42.4s** — C2+A parallel loops with BigPiTable(3B) lookups. Prefetch helps but table is still 380MB (10× L3).
+- **D = 42.5s** — Parallel sieve with L2-sized segments. Near tied with AC.
+- **B = 22.2s** — BigPiTable(232B) construction. No longer bottleneck.
+- **Setup = 7.0s** — Sieve, pi table, mu/lpf/y_smooth generation (single-threaded).
 
 ### Planned Optimizations
 
-1. **AC segmented pi** — V6-style L2-segmented processing for AC's BigPiTable lookups. Currently 380MB table causes random DRAM access. Expected significant speedup.
-2. **Compressed FactorTable** — Pack mu (2 bits) + lpf_idx (14 bits) into 2 bytes, halving memory for D's table access. Better L3 cache utilization.
-3. **Alpha fine-tuning at 1Q** — Current 1Q alpha might have similar cliffs.
-4. **Load-balanced D** — Work-stealing for uneven D chunk sizes.
-5. **Extended pre-sieve** — Add primes 11, 13 to BigPiTable and D sieve pre-sieve.
-6. **Segment size tuning** — Sweep BigPiTable, D, and AC segment sizes.
+1. **AC segmented pi** — V6-style L2-segmented processing for AC's BigPiTable lookups. Process [0,√x] in L2 chunks, narrowing b/l ranges per segment. Highest potential.
+2. **Setup overlap** — Start B immediately (it only needs x, y, pi_y), overlap generate_tables with BigPiTable construction. Could save ~5s of wall time.
+3. **Compressed FactorTable** — Pack mu (2 bits) + lpf_idx (14 bits) into 2 bytes, halving memory for D's table access.
+4. **SIMD popcount for D** — Use AVX2 256-bit popcount for sieve.count_delta() spans.
+5. **Alpha scale-dependent D segments** — Use larger D segments at smaller scales where cache pressure is lower.

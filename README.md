@@ -30,7 +30,7 @@ Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized seg
 
 ### V7 — Gourdon's Algorithm (`src/bin/prime_count_v7.rs`)
 
-Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ. Uses two independent alpha parameters (α_y for y, α_z for z) instead of V6's single alpha, allowing independent tuning of the easy-leaf and hard-leaf domains. D (hard leaves) processes fewer iterations than V6's S2_hard by using tighter x* bounds. Parallel D via chunk-based phi correction. BigPiTable provides O(1) π(n) lookups for AC and B. ValidM list pre-filters D Type 1 for 8.5× fewer iterations. Piecewise-linear alpha lookup table tuned per-scale. **Currently the fastest implementation — 5.5× faster than V6 at Max i64.**
+Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ. Uses two independent alpha parameters (α_y for y, α_z for z) instead of V6's single alpha, allowing independent tuning of the easy-leaf and hard-leaf domains. D (hard leaves) processes fewer iterations than V6's S2_hard by using tighter x* bounds. Parallel D via chunk-based phi correction with L2-cache-sized segments. BigPiTable provides O(1) π(n) lookups for AC and B with software prefetch. ValidM list pre-filters D Type 1 for 8.5× fewer iterations. Piecewise-linear alpha lookup table tuned per-scale. **Currently the fastest implementation — 6.8× faster than V6 at Max i64.**
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -41,17 +41,34 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 ├───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼───────────────────┤
 │ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │    0.00080s  │    0.00097s  │    0.00171s  │        50,847,534 │
 │ 10 Billion    │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │    0.00300s  │    0.00175s  │    0.00170s  │       455,052,511 │
-│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │    0.00311s  │    0.00294s  │     4,118,054,813 │
-│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    0.01323s  │    0.00762s  │    37,607,912,018 │
-│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │    0.06099s  │    0.03103s  │   346,065,536,839 │
-│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.21665s  │    0.10788s  │ 3,204,941,750,802 │
-│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.51846s  │    0.44932s  │29,844,570,422,669 │
-│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.31895s  │    1.72982s  │279,238,341,033,925│
-│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    2.74131s  │2,623,557,157,654,233│
-│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │   11.08351s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │   62.16517s  │216,289,611,853,439,384│
+│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │    0.00311s  │    0.00237s  │     4,118,054,813 │
+│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    0.01323s  │    0.00446s  │    37,607,912,018 │
+│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │    0.06099s  │    0.01349s  │   346,065,536,839 │
+│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.21665s  │    0.04406s  │ 3,204,941,750,802 │
+│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.51846s  │    0.17337s  │29,844,570,422,669 │
+│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.31895s  │    0.65938s  │279,238,341,033,925│
+│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    2.76210s  │2,623,557,157,654,233│
+│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │   11.88786s  │24,739,954,287,740,860│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │   50.12116s  │216,289,611,853,439,384│
 └───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
+
+### V7 vs Kim Walisch's primecount v8.2 (Gourdon, state of the art)
+
+| Scale | V7 | primecount | Ratio | primesieve |
+|---|---|---|---|---|
+| 1e10 | 0.004s | — | — | 0.054s |
+| 1e11 | 0.005s | — | — | 0.565s |
+| 1e12 | 0.009s | 0.006s | 1.5× | 6.85s |
+| 1e13 | 0.022s | 0.009s | 2.4× | 84s |
+| 1e14 | 0.042s | 0.022s | 1.9× | — |
+| 1e15 | 0.180s | 0.054s | 3.3× | — |
+| 1e16 | 0.686s | 0.174s | 3.9× | — |
+| 1e17 | 2.59s | 0.590s | 4.4× | — |
+| 1e18 | 11.8s | 2.27s | 5.2× | — |
+| Max i64 | 50.5s | 8.40s | 6.0× | — |
+
+primecount is the fastest published prime counting code, developed by Kim Walisch over 10+ years. V7 is within 1.5-6× of it. primesieve (segmented Sieve of Eratosthenes) becomes impractical above 1e12 — V7 is already 760× faster at that scale.
 
 ### Best (V7) vs V1 Speedup
 
@@ -72,14 +89,14 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 
 | Range | V6 Seg-Pi | V7 Gourdon | Speedup |
 |---|---|---|---|
-| 1 Trillion | 0.013s | 0.005s | **2.8×** |
-| 10 Trillion | 0.061s | 0.014s | **4.2×** |
-| 100 Trillion | 0.217s | 0.039s | **5.6×** |
-| 1 Quadrillion | 0.518s | 0.143s | **3.6×** |
-| 10 Quadrillion | 2.319s | 0.600s | **3.9×** |
-| 100 Quadrillion | 14.379s | 2.741s | **5.2×** |
-| 1 Quintillion | 51.840s | 10.820s | **4.8×** |
-| Max i64 | 342.460s | 62.165s | **5.5×** |
+| 1 Trillion | 0.013s | 0.004s | **3.0×** |
+| 10 Trillion | 0.061s | 0.013s | **4.5×** |
+| 100 Trillion | 0.217s | 0.044s | **4.9×** |
+| 1 Quadrillion | 0.518s | 0.173s | **3.0×** |
+| 10 Quadrillion | 2.319s | 0.659s | **3.5×** |
+| 100 Quadrillion | 14.379s | 2.762s | **5.2×** |
+| 1 Quintillion | 51.840s | 11.888s | **4.4×** |
+| Max i64 | 342.460s | 50.121s | **6.8×** |
 
 ### Comparison vs Strix Halo Reference
 
