@@ -204,20 +204,70 @@ At Max i64: B (97.7s) is now the clear bottleneck. AC (87.7s) and D (87.7s) are 
 
 ---
 
+## Opt 4 — Pre-sieve Masks for BigPiTable + Alpha Table Fix
+
+**What**: Two changes that together reduce Max i64 from 95.4s to **62.2s** (35% faster).
+
+### Pre-sieve Masks for BigPiTable Construction
+
+Add word-level bitmask pre-sieve for primes 3, 5, 7 in BigPiTable parallel sieve construction. Instead of clearing composites bit-by-bit, precompute AND-masks for each prime's offset pattern and apply all three per word in a single pass. Remaining primes (≥ 11) use existing per-bit loop.
+
+For prime p in odd-index space, odd multiples are at indices ≡ (p-1)/2 (mod p). Each word advances the offset by Δ = (p - 64%p) % p:
+- p=3: Δ=2, cycle length 3
+- p=5: Δ=1, cycle length 5
+- p=7: Δ=6, cycle length 7
+
+First segment: restore prime bits for 3, 5, 7 after mask application.
+
+**Impact**: B at Max i64: 97.7s → 87.0s (11% faster construction). D benefits from reduced rayon thread contention: 87.7s → 75.4s.
+
+### Alpha Table Fix: The az=4.5 Cliff
+
+Exhaustive sweep of α_z at Max i64 (α_y=19 fixed) revealed a dramatic performance cliff:
+
+| α_z | Time | B | AC | D |
+|-----|------|---|----|----|
+| 4.2 | 98.4s | 88.3s | 88.9s | — |
+| 4.3 | 98.3s | — | — | — |
+| 4.4 | 97.1s | 88.3s | 88.9s | 77.0s |
+| **4.5** | **59.4s** | **39.4s** | **53.5s** | **50.4s** |
+| 4.6 | 63.5s | — | — | — |
+| 4.8 | 61.8s | — | — | — |
+
+**37% speedup** from changing α_z by just 0.1! Root cause: at α_z ≥ 4.5, D and AC finish fast enough that B gets exclusive rayon pool access for its final construction phase. Below 4.5, all three components compete for threads for their full duration.
+
+**The bug**: the alpha lookup table's last entry was at logx=43.7, but Max i64 has logx=43.68. Linear interpolation gave α_z=4.49 — just below the 4.5 cliff. Fixed by moving the entry to logx=43.6 so Max i64 correctly uses (19.0, 4.5).
+
+### Results (Opt 4 vs Opt 3)
+
+| Range | Opt 3 | Opt 4 | Speedup |
+|-------|-------|-------|---------|
+| 1 Quintillion | 10.8s | 11.1s | same |
+| **Max i64** | **95.4s** | **62.2s** | **1.53×** |
+
+### Cumulative Progress
+
+| Range | V7 Opt 0 | V7 Opt 4 | Speedup | vs V6 |
+|-------|----------|----------|---------|-------|
+| 100Q | 7.05s | 2.80s | 2.5× | 5.1× |
+| 1 Quintillion | 32.9s | 11.1s | 3.0× | 4.7× |
+| Max i64 | 200.9s | 62.2s | 3.2× | **5.5×** |
+
+---
+
 ## Next Optimization Targets
 
-### Bottleneck Analysis (Opt 3, Max i64)
+### Bottleneck Analysis (Opt 4, Max i64 isolated)
 
-- **B = 97.7s** — builds 24GB BigPiTable covering [0, 232B], then parallel lookups. Construction is ~95% of time (parallel segmented sieve of 232B odd numbers with ~40K small primes per segment). Could benefit from pre-sieve masks (3, 5, 7) to reduce crossing work.
-- **AC = 87.7s** — C2+A parallel loops with BigPiTable(3B) lookups into 285MB table. Random access pattern. Could benefit from V6-style L2-segmented pi processing.
-- **D = 87.7s** — Parallel sieve with ValidM list. Already well-optimized. Could try compressed FactorTable (2 bytes vs 3+ bytes per entry).
+- **AC = 53.5s** — C2+A parallel loops with BigPiTable(3B) lookups into 380MB table. Random access pattern causes DRAM misses.
+- **D = 50.4s** — Parallel sieve with ValidM list. Well-optimized but could benefit from compressed tables.
+- **B = 39.4s** — BigPiTable(232B) construction with pre-sieve. Mostly hidden behind AC/D.
 
 ### Planned Optimizations
 
-1. **Pre-sieve masks for BigPiTable** — Word-level bitmask clearing for primes 3, 5, 7 during BigPiTable construction. 64× fewer operations for these three primes. Expected 20-30% speedup on B construction.
-2. **Alpha fine-tuning** — Sweep individual table entries at Max i64 and 1Q for local optima. Current table values may not be fully optimal.
-3. **Compressed FactorTable** — Pack mu (2 bits) + lpf_idx (14 bits) into 2 bytes, halving memory for D's table access. Better L3 cache utilization.
-4. **AC segmented pi** — V6-style L2-segmented processing for AC's BigPiTable lookups. Currently 285MB table causes random DRAM access.
-5. **Load-balanced D** — Work-stealing for uneven D chunk sizes.
-6. **Extended pre-sieve** — Add primes 11, 13 to pre-sieve template for D and BigPiTable sieves.
-7. **Segment size tuning** — Sweep segment sizes for BigPiTable, D, and AC.
+1. **AC segmented pi** — V6-style L2-segmented processing for AC's BigPiTable lookups. Currently 380MB table causes random DRAM access. Expected significant speedup.
+2. **Compressed FactorTable** — Pack mu (2 bits) + lpf_idx (14 bits) into 2 bytes, halving memory for D's table access. Better L3 cache utilization.
+3. **Alpha fine-tuning at 1Q** — Current 1Q alpha might have similar cliffs.
+4. **Load-balanced D** — Work-stealing for uneven D chunk sizes.
+5. **Extended pre-sieve** — Add primes 11, 13 to BigPiTable and D sieve pre-sieve.
+6. **Segment size tuning** — Sweep BigPiTable, D, and AC segment sizes.

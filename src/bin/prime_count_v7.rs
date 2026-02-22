@@ -150,7 +150,7 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
         (36.8, 10.0, 2.0),   // x ~ 1e16
         (39.1, 14.0, 2.5),   // x ~ 1e17
         (41.4, 15.0, 3.5),   // x ~ 1e18
-        (43.7, 19.0, 4.5),   // x ~ Max i64
+        (43.6, 19.0, 4.5),   // x ~ Max i64 (cliff at az>=4.5)
     ];
 
     let (alpha_y, alpha_z) = if logx <= TABLE[0].0 {

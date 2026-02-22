@@ -1234,3 +1234,27 @@ Higher α_z increases z, allowing more leaves to be classified as "easy" (AC) vs
 7. Segment size tuning: sweep segment sizes for D and B
 8. Alpha fine-tuning: sweep individual table entries for local optima
 
+
+---
+
+### V7 Opt 4 — Pre-sieve Masks + Alpha Table Fix (committed)
+
+**Pre-sieve**: Word-level bitmask clearing for primes 3,5,7 in BigPiTable construction.
+64x fewer operations for these three primes per segment. B at Max i64: 97.7s -> 87.0s (11%).
+D also benefits from reduced rayon contention: 87.7s -> 75.4s.
+
+**Alpha cliff discovery**: Exhaustive az sweep revealed a DRAMATIC performance cliff at az=4.5:
+- az=4.4: 97.1s (B=88.3, AC=88.9, D=77.0)
+- az=4.5: 59.4s (B=39.4, AC=53.5, D=50.4) — 37% FASTER from 0.1 change!
+
+Root cause: concurrent thread contention. At az>=4.5, D and AC finish fast enough that B
+gets exclusive rayon pool for its final BigPiTable construction. Below 4.5, all three compete
+for threads for their full duration.
+
+**The bug**: alpha table last entry at logx=43.7, but Max i64 logx=43.68. Interpolation gave
+az=4.49 (just below cliff!). Fixed to logx=43.6 so Max i64 uses exact (19.0, 4.5).
+
+**Results**: Max i64: 94.7s -> 62.2s (**34% faster**). 1Q unchanged at ~11s.
+
+**Cumulative V7 Opt 4 vs V6**: Max i64 342.5s -> 62.2s = **5.5x faster**.
+
