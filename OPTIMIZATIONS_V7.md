@@ -318,6 +318,94 @@ primecount is the fastest published prime counting implementation, by Kim Walisc
 | 1e11 | 0.005s | — | — | 0.565s |
 | 1e12 | 0.009s | 0.006s | 1.5× | 6.85s |
 | 1e13 | 0.022s | 0.009s | 2.4× | 84s |
+
+---
+
+## Opt 9: B uses BigPiTable + Pre-sieve 11,13
+
+**Date**: V7 Opt 9 session
+
+**Changes**:
+- Eliminated redundant `Sieve::new(√x=3.04B)` in compute_b by iterating BigPiTable's bits directly
+- BigPiTable bits iterated in REVERSE (high-to-low) for descending p → ascending x/p
+- Added pre-sieve masks for primes 11 and 13 (was only 3,5,7)
+- Cross-off loop starts from prime 17 instead of 11
+- Sieve primes extracted from BigPiTable starting at odd-index 8
+
+**Results at Max i64**: B: 24.5s → 23.3s (marginal — B is not the bottleneck)
+
+---
+
+## Opt 10: Interleaved BigPiTable
+
+**Date**: V7 Opt 10 session
+
+**Changes**:
+- Merged `bits[]` and `prefix[]` into single `data[]` array: data[2w]=bits, data[2w+1]=prefix
+- Both values now in same 64-byte cache line — pi() needs 1 cache miss instead of 2
+- prefetch() reduced from 2 instructions to 1
+- Added bits_word() accessor for B's prime iteration
+
+**Results at Max i64**: AC: 28.4s → 27.4s (~3.5% improvement on AC)
+
+---
+
+## Opt 11: k=7 + Serial D Cleanup
+
+**Date**: Current session
+
+**Changes**:
+- Increase k from 6 to 7: PhiTinyCache covers first 7 primes {2,3,5,7,11,13,17}
+  - PhiTinyCache: period 510,510, partial table ~4MB (fits L2)
+  - PreSieveTemplate: includes {3,5,7,11,13,17,19}, period 1,616,615, ~404KB
+- TINY_PRIMES array extended from 7 to 8 entries (added 17)
+- D cross-off loop starts from prime 23 instead of 19
+- Serial D path refactored: uses shared cross_off_sieve instead of inline cross-off code
+
+**Results at Max i64**: 32.49s → 31.4s (B=23.1, AC=27.3, D=29.9)
+
+### Failed Experiment: Skip-3 Cross-off
+
+**Idea**: Since the template pre-sieves prime 3 (all multiples of 3 already cleared to 0), skip these positions during cross_off to eliminate 1/3 of iterations.
+
+**Implementation**: Alternating step pattern (step_a, step_b) where step_a + step_b = 3p, processing 2 of every 3 positions.
+
+**Bug found**: For val_mod3==0 case with twop_mod3==2, the step pattern was (2p, p) but should be (p, 2p). Fixed and all tests pass.
+
+**Result**: Correct results but NO performance improvement. The non-uniform step pattern breaks CPU pipeline prediction and adds per-call setup overhead, negating the 33% iteration reduction. Reverted to uniform 4× unrolled cross-off.
+
+### Current Benchmark (V7 Opt 11)
+
+| Scale | Time | primecount | Ratio |
+|-------|------|------------|-------|
+| 100Q | 1.94s | 0.59s | 3.3× |
+| 1QN | 8.26s | 2.28s | 3.6× |
+| Max i64 | 31.4s | 8.52s | 3.7× |
+
+Component profile at Max i64:
+| Component | Time |
+|-----------|------|
+| Setup | 1.50s |
+| B | 23.11s |
+| AC | 27.25s |
+| D | 29.86s |
+| Wall | 31.4s |
+
+### primecount Gap Analysis
+
+primecount at Max i64: AC=2.5s, B=1.9s, D=4.0s. ALL components ~8-12× faster.
+
+Key differences:
+1. **Mod-30 wheel sieve**: 8/30 density vs our 1/2 (odds-only). 1.875× fewer sieve operations.
+2. **SegmentedPiTable for AC**: Process AC in L2-sized segments, converting DRAM misses to L2 hits.
+3. **k=8 pre-sieve**: primecount pre-sieves through prime 23 (vs our prime 19 with k=7).
+4. **Higher alpha_y=16.98**: Larger y shifts work from D to AC/B (only viable with fast AC).
+
+### Next Steps
+
+1. **SegmentedPiTable for AC** — process AC contributions in L2-sized segments of BigPiTable. Estimated AC: 27s → ~14s. Won't reduce Max i64 wall time immediately (D bottleneck) but enables alpha_y tuning.
+2. **Mod-30 wheel sieve** — affects D, B, BigPiTable. ~500 lines of changes but fundamental efficiency gain.
+3. **Alpha_y increase** — after AC is fast, increase alpha_y to shift work from D to AC/B.
 | 1e14 | 0.042s | 0.022s | 1.9× | — |
 | 1e15 | 0.180s | 0.054s | 3.3× | — |
 | 1e16 | 0.686s | 0.174s | 3.9× | — |

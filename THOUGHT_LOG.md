@@ -1571,3 +1571,67 @@ Gap closed from 6.0× to 3.7× at Max i64! From 5.2× to 3.4× at 1e18!
 2. Re-examine D with new (lower) alpha values — D iterations changed
 3. Setup overlap — start B before D/AC setup completes
 4. Compressed FactorTable — pack mu+lpf into 2 bytes
+
+---
+
+## V7 Opt 9-11 Session
+
+### Opt 9: B Uses BigPiTable Bits + Pre-sieve 11,13
+
+Eliminated redundant Sieve::new(sqrt_x=3.04B) in compute_b. Instead iterate BigPiTable's bits directly in REVERSE order (high-to-low for descending p). Added pre-sieve masks for primes 11 and 13 (was only 3,5,7), starting cross-off from prime 17.
+
+Result: B: 24.5s → 23.3s at Max i64 (marginal, B not the bottleneck).
+
+### Opt 10: Interleaved BigPiTable
+
+Merged bits[] and prefix[] arrays into interleaved data[]: data[2w]=bits, data[2w+1]=prefix. Both values in same cache line — pi() needs 1 miss instead of 2. prefetch() down to 1 instruction.
+
+Result: AC: 28.4s → 27.4s at Max i64 (~3.5% improvement).
+
+### Alpha Parameter Sweep
+
+Tested alpha_y = 6, 7, 8, 15, 20 at Max i64. ALL within noise (~2s variation). Current alpha_y=9.8 at Max i64 is near-optimal given our AC/B/D balance.
+
+### Opt 11: k=7 + Serial D Cleanup
+
+Increased k from 6 to 7. PhiTinyCache now covers 7 primes (period 510,510, ~4MB). PreSieveTemplate includes {3,5,7,11,13,17,19} (period 1,616,615, ~404KB). D loop starts from prime 23 instead of 19. Refactored serial D to use shared cross_off_sieve.
+
+Result: Max i64 32.49s → 31.4s (B=23.1, AC=27.3, D=29.9).
+
+### FAILED: Skip-3 Cross-off Optimization
+
+**Idea**: Since template pre-sieves prime 3 (all odd multiples of 3 = 0 in sieve), skip these positions during cross_off for subsequent primes. Use alternating step pattern (step_a, step_b) where step_a+step_b=3p.
+
+**Bug**: For val_mod3==0 and twop_mod3==2, steps were (2p,p) instead of (p,2p). Was skipping WRONG positions (non-multiples-of-3 instead of multiples). Fixed.
+
+**Result**: Correct after fix but NO performance gain. The non-uniform step pattern (step_a ≠ step_b) breaks CPU pipeline prediction. The 33% iteration reduction is fully consumed by per-iteration overhead from irregular stride. Reverted.
+
+**Lesson**: Simple uniform stride (4× unrolled, step p) is hard to beat even when 85% of accessed bits are already 0. The CPU's regular-stride prefetcher is very effective.
+
+### D Bottleneck Analysis
+
+At Max i64 with k=7:
+- Total D range: x/z ≈ 2.24e11, ~53K segments of 2M each
+- Cross-off: ~828 primes per segment (primes 23 to ~6420)  
+- Type 2 contributions: ~53K b-values, each with ~1.2M l-values = ~65B total lookups
+- Estimated breakdown: cross_off ~50%, contribution computation ~50%
+
+### primecount Comparison (Deep Analysis)
+
+primecount v8.2 at Max i64: AC=2.5s, B=1.9s, D=4.0s (total 8.52s).
+Our V7 Opt 11: AC=27.3s, B=23.1s, D=29.9s (total 31.4s).
+
+Component ratios: AC: 10.9×, B: 12.2×, D: 7.5×. ALL components 8-12× slower.
+
+Key primecount advantages:
+1. Mod-30 wheel sieve: 8/30 density (1.875× fewer ops than our odds-only 1/2)
+2. SegmentedPiTable for AC: L2-cache-friendly pi() lookups (vs our DRAM random access)
+3. k=8 pre-sieve: template through prime 23 (ours: prime 19 with k=7)  
+4. alpha_y=16.98: larger y → smaller D range (viable because their AC is fast)
+5. Overall implementation maturity: years of optimization by Kim Walisch
+
+### Current State
+
+V7 Opt 11: Max i64 = 31.4s (3.69× primecount). All 15 test cases pass.
+
+Next priority: SegmentedPiTable for AC (most well-understood remaining optimization).
