@@ -204,14 +204,13 @@ fn get_x_star(x: u64, y: u64) -> u64 {
 // Memory: ~limit/4 bytes.
 
 struct BigPiTable {
-    bits: Vec<u64>,     // bit k = is_prime(2k+1)
-    prefix: Vec<u64>,   // prefix[w] = prime count in odd numbers for words 0..w-1
+    data: Vec<u64>,     // interleaved: data[2w] = bits (is_prime), data[2w+1] = prefix sum
 }
 
 impl BigPiTable {
     fn new(limit: usize) -> Self {
         if limit < 3 {
-            return BigPiTable { bits: vec![], prefix: vec![0] };
+            return BigPiTable { data: vec![] };
         }
 
         let odd_count = (limit - 1) / 2 + 1;
@@ -292,19 +291,22 @@ impl BigPiTable {
             local
         }).collect();
 
-        // Assemble and build prefix sums
+        // Assemble bits, build prefix sums, and interleave into data array
         let mut bits = Vec::with_capacity(nwords);
         for seg in &seg_results {
             bits.extend_from_slice(seg);
         }
         bits.truncate(nwords);
 
-        let mut prefix = vec![0u64; nwords + 1];
+        let mut data = vec![0u64; 2 * nwords];
+        let mut running = 0u64;
         for i in 0..nwords {
-            prefix[i + 1] = prefix[i] + bits[i].count_ones() as u64;
+            data[2 * i] = bits[i];         // bits word
+            data[2 * i + 1] = running;     // prefix sum (primes in words 0..i-1)
+            running += bits[i].count_ones() as u64;
         }
 
-        BigPiTable { bits, prefix }
+        BigPiTable { data }
     }
 
     fn build_presieve_masks(p: usize) -> Vec<u64> {
@@ -327,20 +329,27 @@ impl BigPiTable {
         let odd_idx = (n - 1) / 2;
         let word = odd_idx / 64;
         let bit = odd_idx % 64;
-        count += self.prefix[word];
+        let base = word * 2;
+        // Both bits and prefix are adjacent in the same cache line
+        count += unsafe { *self.data.get_unchecked(base + 1) };
         let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
-        count += (unsafe { *self.bits.get_unchecked(word) } & mask).count_ones() as u64;
+        count += (unsafe { *self.data.get_unchecked(base) } & mask).count_ones() as u64;
         count
+    }
+
+    #[inline(always)]
+    fn bits_word(&self, w: usize) -> u64 {
+        unsafe { *self.data.get_unchecked(w * 2) }
     }
 
     #[inline(always)]
     #[cfg(target_arch = "x86_64")]
     fn prefetch(&self, n: usize) {
         if n >= 3 {
-            let word = (n - 1) / 2 / 64;
+            let base = (n - 1) / 2 / 64 * 2;
             unsafe {
-                _mm_prefetch(self.bits.as_ptr().add(word) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(self.prefix.as_ptr().add(word) as *const i8, _MM_HINT_T0);
+                // bits and prefix in same cache line — single prefetch suffices
+                _mm_prefetch(self.data.as_ptr().add(base) as *const i8, _MM_HINT_T0);
             }
         }
     }
@@ -461,7 +470,7 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
     let mut xp_odd_asc: Vec<usize> = Vec::new();
     let mut max_xp: usize = 0;
     for word_idx in (bp_sw..=bp_ew).rev() {
-        let mut w = unsafe { *big_pi.bits.get_unchecked(word_idx) };
+        let mut w = big_pi.bits_word(word_idx);
         if word_idx == bp_sw {
             let sb = bp_start % 64;
             if sb > 0 { w &= !((1u64 << sb) - 1); }
@@ -490,7 +499,7 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
         let sp_s = (17 - 1) / 2; // odd-index of 17
         let sp_e = (sqrt_maxp - 1) / 2;
         for word_idx in (sp_s / 64)..=(sp_e / 64) {
-            let mut w = unsafe { *big_pi.bits.get_unchecked(word_idx) };
+            let mut w = big_pi.bits_word(word_idx);
             if word_idx == sp_s / 64 {
                 let sb = sp_s % 64;
                 if sb > 0 { w &= !((1u64 << sb) - 1); }
