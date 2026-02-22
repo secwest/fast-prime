@@ -141,19 +141,19 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
 
     let logx = (x as f64).ln();
 
-    // Lookup table tuned with az=2.0 (matching primecount's proven optimal)
+    // Lookup table tuned for Intel Core Ultra 9 285K (24 threads, 36MB L3)
     // (logx, alpha_y, alpha_z)
     const TABLE: &[(f64, f64, f64)] = &[
         (20.0,  2.0, 1.5),   // x ~ 5e8
         (23.0,  3.0, 1.5),   // x ~ 1e10
         (25.3,  4.0, 2.0),   // x ~ 1e11
-        (30.0,  7.0, 2.0),   // x ~ 1e13
+        (30.0,  6.0, 2.0),   // x ~ 1e13
         (32.2,  6.0, 2.0),   // x ~ 1e14
-        (34.5,  8.0, 2.0),   // x ~ 1e15
-        (36.8,  9.0, 2.0),   // x ~ 1e16
-        (39.1, 13.0, 2.0),   // x ~ 1e17
-        (41.4, 14.0, 2.0),   // x ~ 1e18
-        (43.6, 17.0, 2.0),   // x ~ Max i64
+        (34.5,  7.0, 2.0),   // x ~ 1e15
+        (36.8,  8.0, 2.0),   // x ~ 1e16
+        (39.1,  8.0, 2.0),   // x ~ 1e17
+        (41.4,  9.0, 2.0),   // x ~ 1e18
+        (43.6,  9.8, 2.0),   // x ~ Max i64
     ];
 
     let (alpha_y, alpha_z) = if logx <= TABLE[0].0 {
@@ -224,7 +224,6 @@ impl BigPiTable {
             .take_while(|&p| p <= sqrt_limit).collect();
 
         // Pre-sieve AND-masks for primes 3, 5, 7
-        // masks[p][offset] has 0-bits at positions offset, offset+p, offset+2p, ...
         let masks3 = Self::build_presieve_masks(3);
         let masks5 = Self::build_presieve_masks(5);
         let masks7 = Self::build_presieve_masks(7);
@@ -245,7 +244,6 @@ impl BigPiTable {
             if seg == 0 { local[0] &= !1u64; } // number 1 is not prime
 
             // Pre-sieve: clear multiples of 3, 5, 7 via word-level masks
-            // Odd multiples of p are at odd_idx ≡ (p-1)/2 (mod p)
             let mut o3 = (1 + 3 - start_idx % 3) % 3;
             let mut o5 = (2 + 5 - start_idx % 5) % 5;
             let mut o7 = (3 + 7 - start_idx % 7) % 7;
@@ -254,9 +252,9 @@ impl BigPiTable {
                     *local.get_unchecked_mut(w) &=
                         masks3[o3] & masks5[o5] & masks7[o7];
                 }
-                o3 = (o3 + 2) % 3;  // delta = 3 - 64%3 = 2
-                o5 = (o5 + 1) % 5;  // delta = 5 - 64%5 = 1
-                o7 = (o7 + 6) % 7;  // delta = 7 - 64%7 = 6
+                o3 = (o3 + 2) % 3;
+                o5 = (o5 + 1) % 5;
+                o7 = (o7 + 6) % 7;
             }
 
             // Restore prime bits for 3, 5, 7 in first segment
