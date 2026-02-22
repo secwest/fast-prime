@@ -446,7 +446,8 @@ fn compute_phi0(x: u64, _y: usize, z: usize, k: usize,
 
 // ── B: equivalent to P2 ─────────────────────────────────────────────────────
 // Sum of π(x/p) for primes y < p ≤ √x.
-// Uses a dedicated BigPiTable covering [0, max(x/p)] for parallel O(1) lookups.
+// Segmented approach: sieve [0, max(x/p)] in L1-sized chunks, accumulating
+// π(x/p) on the fly. Eliminates the 32GB BigPiTable entirely (~1GB peak).
 
 fn compute_b(x: u64, y: usize, _pi_y: usize) -> i64 {
     let sqrt_x = isqrt(x) as usize;
@@ -458,16 +459,144 @@ fn compute_b(x: u64, y: usize, _pi_y: usize) -> i64 {
 
     if b_primes.is_empty() { return 0; }
 
-    // Largest x/p comes from smallest prime
     let max_xp = (x / b_primes[0]) as usize;
+    if max_xp < 2 { return 0; }
 
-    // Build parallel sieve covering [0, max_xp] for O(1) π lookups
-    let b_pi = BigPiTable::new(max_xp);
+    // x/p values as odd-indices, ascending (reverse of b_primes order)
+    let xp_odd_asc: Vec<usize> = b_primes.iter().rev()
+        .map(|&p| ((x / p) as usize).saturating_sub(1) / 2).collect();
 
-    // Parallel sum of π(x/p)
-    b_primes.par_iter().map(|&p| {
-        b_pi.pi((x / p) as usize) as i64
-    }).sum()
+    // Sieving primes > 7 (3,5,7 handled by pre-sieve masks)
+    let sqrt_maxp = isqrt(max_xp as u64) as usize;
+    let sieve_primes: Vec<usize> = small_sieve.primes_from(11)
+        .take_while(|&p| p <= sqrt_maxp).collect();
+
+    let masks3 = BigPiTable::build_presieve_masks(3);
+    let masks5 = BigPiTable::build_presieve_masks(5);
+    let masks7 = BigPiTable::build_presieve_masks(7);
+
+    let odd_count = (max_xp - 1) / 2 + 1;
+    let seg_words: usize = 4096; // 32KB = fits L1
+    let seg_odd_count = seg_words * 64;
+    let num_segs = (odd_count + seg_odd_count - 1) / seg_odd_count;
+
+    let nthreads = rayon::current_num_threads();
+    let nchunks = std::cmp::min(nthreads * 4, num_segs).max(1);
+    let chunk_segs = (num_segs + nchunks - 1) / nchunks;
+
+    // Precompute which xp lookups fall in each chunk
+    let chunk_xp_bounds: Vec<usize> = (0..=nchunks).map(|k| {
+        let chunk_odd_start = std::cmp::min(
+            k as u64 * chunk_segs as u64 * seg_odd_count as u64,
+            odd_count as u64) as usize;
+        xp_odd_asc.partition_point(|&v| v < chunk_odd_start)
+    }).collect();
+
+    // Process chunks in parallel — each chunk sieves its segments
+    // and accumulates π(x/p) for lookups that fall in those segments
+    let chunk_results: Vec<(i64, u64, usize)> = (0..nchunks).into_par_iter().map(|k| {
+        let seg_lo = k * chunk_segs;
+        let seg_hi = std::cmp::min(seg_lo + chunk_segs, num_segs);
+        let xp_lo = chunk_xp_bounds[k];
+        let xp_hi = chunk_xp_bounds[k + 1];
+
+        let mut local_sum: i64 = 0;
+        let mut local_pi: u64 = 0;
+        let mut xp_idx = xp_lo;
+        let mut buf = vec![0u64; seg_words];
+        let mut seg_prefix = vec![0u64; seg_words + 1];
+
+        for seg in seg_lo..seg_hi {
+            let start_idx = seg * seg_odd_count;
+            let end_idx = std::cmp::min(start_idx + seg_odd_count, odd_count);
+            let seg_len = end_idx - start_idx;
+            let seg_nw = (seg_len + 63) / 64;
+
+            // Init sieve — all odd numbers assumed prime
+            for w in 0..seg_nw { unsafe { *buf.get_unchecked_mut(w) = !0u64; } }
+            let excess = seg_nw * 64 - seg_len;
+            if excess > 0 { buf[seg_nw - 1] &= u64::MAX >> excess; }
+            if seg == 0 { buf[0] &= !1u64; } // 1 is not prime
+
+            // Pre-sieve 3, 5, 7
+            let mut o3 = (1 + 3 - start_idx % 3) % 3;
+            let mut o5 = (2 + 5 - start_idx % 5) % 5;
+            let mut o7 = (3 + 7 - start_idx % 7) % 7;
+            for w in 0..seg_nw {
+                unsafe {
+                    *buf.get_unchecked_mut(w) &=
+                        masks3[o3] & masks5[o5] & masks7[o7];
+                }
+                o3 = (o3 + 2) % 3;
+                o5 = (o5 + 1) % 5;
+                o7 = (o7 + 6) % 7;
+            }
+            if seg == 0 { buf[0] |= (1u64 << 1) | (1u64 << 2) | (1u64 << 3); }
+
+            // Cross off composites for primes > 7
+            let end_num = 2 * (end_idx - 1) + 1;
+            let max_p = isqrt(end_num as u64) as usize;
+            let sp_end = sieve_primes.partition_point(|&p| p <= max_p);
+            let low_num = 2 * start_idx + 1;
+            for &p in &sieve_primes[..sp_end] {
+                let pp = (p as u64) * (p as u64);
+                let first_num = if pp >= low_num as u64 {
+                    pp as usize
+                } else {
+                    let m = ((low_num + p - 1) / p) * p;
+                    if m % 2 == 0 { m + p } else { m }
+                };
+                if first_num > end_num { continue; }
+                let local_idx = (first_num - 1) / 2 - start_idx;
+                let mut idx = local_idx;
+                while idx < seg_len {
+                    unsafe {
+                        let w = idx >> 6;
+                        let b = idx & 63;
+                        *buf.get_unchecked_mut(w) &= !(1u64 << b);
+                    }
+                    idx += p;
+                }
+            }
+
+            // Prefix sums for O(1) partial-popcount lookups
+            seg_prefix[0] = 0;
+            for w in 0..seg_nw {
+                seg_prefix[w + 1] = seg_prefix[w]
+                    + unsafe { *buf.get_unchecked(w) }.count_ones() as u64;
+            }
+            let seg_prime_count = seg_prefix[seg_nw];
+
+            // Accumulate π(x/p) for lookups in this segment
+            while xp_idx < xp_hi {
+                let oi = unsafe { *xp_odd_asc.get_unchecked(xp_idx) };
+                if oi >= end_idx { break; }
+                let pos = oi - start_idx;
+                let word = pos >> 6;
+                let bit = pos & 63;
+                let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
+                let count = unsafe { *seg_prefix.get_unchecked(word) }
+                    + (unsafe { *buf.get_unchecked(word) } & mask).count_ones() as u64;
+                local_sum += (1 + local_pi + count) as i64; // +1 for prime 2
+                xp_idx += 1;
+            }
+
+            local_pi += seg_prime_count;
+        }
+
+        (local_sum, local_pi, xp_idx - xp_lo)
+    }).collect();
+
+    // Correction: each chunk's sum was computed with local_pi starting at 0;
+    // add prefix_pi * num_lookups to account for primes in earlier chunks.
+    let mut total_sum: i64 = 0;
+    let mut prefix_pi: u64 = 0;
+    for &(local_sum, local_pi, num_lookups) in &chunk_results {
+        total_sum += local_sum + prefix_pi as i64 * num_lookups as i64;
+        prefix_pi += local_pi;
+    }
+
+    total_sum
 }
 
 // ── AC: combined A + C formulas ──────────────────────────────────────────────
