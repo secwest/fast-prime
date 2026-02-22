@@ -95,7 +95,7 @@ fn generate_pi(limit: usize, sieve: &Sieve) -> Vec<u32> {
 
 // ── PhiTiny ──────────────────────────────────────────────────────────────────
 
-const TINY_PRIMES: [u64; 7] = [0, 2, 3, 5, 7, 11, 13];
+const TINY_PRIMES: [u64; 8] = [0, 2, 3, 5, 7, 11, 13, 17];
 
 struct PhiTinyCache {
     pc: u64,
@@ -1295,40 +1295,8 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
 
             phi[b] += sieve.count_total();
             let p = prime as usize;
-            let start_int = if next[b] > low { next[b] } else {
-                first_odd_multiple(p, low + 1)
-            };
-            let start = if start_int >= high { odd_seg_len } else { int_to_odd_bp(start_int, low) };
-            let mut kk = start;
-            let bits = sieve.bits.as_mut_ptr();
-            let mut delta = 0i64;
-            while kk + p * 3 < odd_seg_len {
-                unsafe {
-                    let w0 = kk >> 6; let b0 = kk & 63;
-                    let old0 = *bits.add(w0); delta += ((old0 >> b0) & 1) as i64;
-                    *bits.add(w0) = old0 & !(1u64 << b0);
-                    let k1 = kk + p; let w1 = k1 >> 6; let b1 = k1 & 63;
-                    let old1 = *bits.add(w1); delta += ((old1 >> b1) & 1) as i64;
-                    *bits.add(w1) = old1 & !(1u64 << b1);
-                    let k2 = kk + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
-                    let old2 = *bits.add(w2); delta += ((old2 >> b2) & 1) as i64;
-                    *bits.add(w2) = old2 & !(1u64 << b2);
-                    let k3 = kk + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
-                    let old3 = *bits.add(w3); delta += ((old3 >> b3) & 1) as i64;
-                    *bits.add(w3) = old3 & !(1u64 << b3);
-                }
-                kk += p * 4;
-            }
-            while kk < odd_seg_len {
-                unsafe {
-                    let w = kk >> 6; let bk = kk & 63;
-                    let old = *bits.add(w); delta += ((old >> bk) & 1) as i64;
-                    *bits.add(w) = old & !(1u64 << bk);
-                }
-                kk += p;
-            }
-            sieve.total -= delta;
-            next[b] = low + 1 + 2 * kk;
+            cross_off_sieve(&mut sieve, p, low, high, odd_seg_len);
+            next[b] = first_odd_multiple(p, high);
             b += 1;
         }
 
@@ -1368,40 +1336,8 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
 
             phi[b] += sieve.count_total();
             let p = prime as usize;
-            let start_int = if next[b] > low { next[b] } else {
-                first_odd_multiple(p, low + 1)
-            };
-            let start = if start_int >= high { odd_seg_len } else { int_to_odd_bp(start_int, low) };
-            let mut kk = start;
-            let bits = sieve.bits.as_mut_ptr();
-            let mut delta = 0i64;
-            while kk + p * 3 < odd_seg_len {
-                unsafe {
-                    let w0 = kk >> 6; let b0 = kk & 63;
-                    let old0 = *bits.add(w0); delta += ((old0 >> b0) & 1) as i64;
-                    *bits.add(w0) = old0 & !(1u64 << b0);
-                    let k1 = kk + p; let w1 = k1 >> 6; let b1 = k1 & 63;
-                    let old1 = *bits.add(w1); delta += ((old1 >> b1) & 1) as i64;
-                    *bits.add(w1) = old1 & !(1u64 << b1);
-                    let k2 = kk + p * 2; let w2 = k2 >> 6; let b2 = k2 & 63;
-                    let old2 = *bits.add(w2); delta += ((old2 >> b2) & 1) as i64;
-                    *bits.add(w2) = old2 & !(1u64 << b2);
-                    let k3 = kk + p * 3; let w3 = k3 >> 6; let b3 = k3 & 63;
-                    let old3 = *bits.add(w3); delta += ((old3 >> b3) & 1) as i64;
-                    *bits.add(w3) = old3 & !(1u64 << b3);
-                }
-                kk += p * 4;
-            }
-            while kk < odd_seg_len {
-                unsafe {
-                    let w = kk >> 6; let bk = kk & 63;
-                    let old = *bits.add(w); delta += ((old >> bk) & 1) as i64;
-                    *bits.add(w) = old & !(1u64 << bk);
-                }
-                kk += p;
-            }
-            sieve.total -= delta;
-            next[b] = low + 1 + 2 * kk;
+            cross_off_sieve(&mut sieve, p, low, high, odd_seg_len);
+            next[b] = first_odd_multiple(p, high);
             b += 1;
         }
 
@@ -1436,7 +1372,7 @@ fn count_primes(x: u64) -> u64 {
     let mut primes: Vec<u32> = vec![0];
     primes.extend(pi_sieve.primes_from(2).take_while(|&p| p <= y).map(|p| p as u32));
     let pi_y = primes.len() - 1;
-    let k = std::cmp::min(6, pi_y);
+    let k = std::cmp::min(7, pi_y);
     let phi_cache = PhiTinyCache::new(k);
     let pi = generate_pi(pi_table_limit, &pi_sieve);
 
