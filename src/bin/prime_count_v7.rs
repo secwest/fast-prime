@@ -738,65 +738,103 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let c2_a_sum: i64 = if b_lookups.is_empty() { 0 } else {
         let primes_len = primes.len();
 
-        // Process C2 and A with per-b parallelism (original approach)
-        // but with ascending l iteration for better BigPiTable locality
-        b_lookups.par_iter().map(|info| {
-            let mut local = 0i64;
-            let mut l = info.l_cur;
+        // Segmented AC: process BigPiTable in L3-cache-sized segments.
+        // All pi() lookups within a segment hit L3, reducing DRAM traffic.
+        let seg_pairs: usize = 1_500_000; // interleaved pairs per segment ≈ 24MB
+        let total_pairs = big_pi.data.len() / 2;
+        let num_segs = (total_pairs + seg_pairs - 1) / seg_pairs;
 
-            // 4x unrolled with deep prefetch
-            while l + 3 <= info.l_max && l + 3 < primes_len {
-                if l + 35 <= info.l_max && l + 35 < primes_len {
-                    big_pi.prefetch(std::cmp::min(fast_div(info.xp, primes[l+32] as u64, recip[l+32]) as usize, sqrt_x));
-                    big_pi.prefetch(std::cmp::min(fast_div(info.xp, primes[l+33] as u64, recip[l+33]) as usize, sqrt_x));
-                    big_pi.prefetch(std::cmp::min(fast_div(info.xp, primes[l+34] as u64, recip[l+34]) as usize, sqrt_x));
-                    big_pi.prefetch(std::cmp::min(fast_div(info.xp, primes[l+35] as u64, recip[l+35]) as usize, sqrt_x));
-                }
+        // Each pair covers 128 numbers (64 odd numbers per word * 2 numbers per odd)
+        // Segment s covers numbers [s*seg_pairs*128, (s+1)*seg_pairs*128)
+        let numbers_per_seg = seg_pairs * 128;
 
-                let xpq0 = std::cmp::min(fast_div(info.xp, primes[l] as u64, recip[l]) as usize, sqrt_x);
-                let xpq1 = std::cmp::min(fast_div(info.xp, primes[l+1] as u64, recip[l+1]) as usize, sqrt_x);
-                let xpq2 = std::cmp::min(fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize, sqrt_x);
-                let xpq3 = std::cmp::min(fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize, sqrt_x);
+        let mut total: i64 = 0;
+        for seg in (0..num_segs).rev() {
+            let n_lo = if seg == 0 { 0usize } else { seg * numbers_per_seg };
+            let n_hi = std::cmp::min((seg + 1) * numbers_per_seg - 1, sqrt_x);
 
-                if info.is_c2 {
-                    local += (big_pi.pi(xpq0) as i64 - info.b as i64 + 2)
-                           + (big_pi.pi(xpq1) as i64 - info.b as i64 + 2)
-                           + (big_pi.pi(xpq2) as i64 - info.b as i64 + 2)
-                           + (big_pi.pi(xpq3) as i64 - info.b as i64 + 2);
+            let seg_sum: i64 = b_lookups.par_iter().map(|info| {
+                // Find l range where n_lo <= xp/primes[l] <= n_hi
+                let l_lo = if seg == num_segs - 1 {
+                    info.l_cur // highest segment includes clamped values
                 } else {
-                    let p0 = big_pi.pi(xpq0) as i64;
-                    let p1 = big_pi.pi(xpq1) as i64;
-                    let p2 = big_pi.pi(xpq2) as i64;
-                    let p3 = big_pi.pi(xpq3) as i64;
-                    if l + 3 <= info.y_boundary_l {
-                        local += p0 + p1 + p2 + p3;
-                    } else if l > info.y_boundary_l {
-                        local += 2 * (p0 + p1 + p2 + p3);
+                    // primes[l] >= ceil(xp / (n_hi + 1))
+                    let thresh = (info.xp / (n_hi as u64 + 1)) as u32;
+                    let start = info.l_cur;
+                    let end = std::cmp::min(info.l_max + 1, primes_len);
+                    if start >= end { return 0; }
+                    start + primes[start..end].partition_point(|&p| p <= thresh)
+                };
+
+                let l_hi = if n_lo <= 1 {
+                    info.l_max
+                } else {
+                    // primes[l] <= floor(xp / n_lo)
+                    let thresh = std::cmp::min(info.xp / n_lo as u64, u32::MAX as u64) as u32;
+                    let start = info.l_cur;
+                    let end = std::cmp::min(info.l_max + 1, primes_len);
+                    if start >= end { return 0; }
+                    let pos = primes[start..end].partition_point(|&p| p <= thresh);
+                    if pos == 0 { return 0; }
+                    start + pos - 1
+                };
+
+                let eff_lo = std::cmp::max(l_lo, info.l_cur);
+                let eff_hi = std::cmp::min(l_hi, std::cmp::min(info.l_max, primes_len - 1));
+                if eff_lo > eff_hi || eff_lo >= primes_len { return 0; }
+
+                let mut local = 0i64;
+                let mut l = eff_lo;
+
+                while l + 3 <= eff_hi {
+                    let xpq0 = std::cmp::min(fast_div(info.xp, primes[l] as u64, recip[l]) as usize, sqrt_x);
+                    let xpq1 = std::cmp::min(fast_div(info.xp, primes[l+1] as u64, recip[l+1]) as usize, sqrt_x);
+                    let xpq2 = std::cmp::min(fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize, sqrt_x);
+                    let xpq3 = std::cmp::min(fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize, sqrt_x);
+
+                    if info.is_c2 {
+                        local += (big_pi.pi(xpq0) as i64 - info.b as i64 + 2)
+                               + (big_pi.pi(xpq1) as i64 - info.b as i64 + 2)
+                               + (big_pi.pi(xpq2) as i64 - info.b as i64 + 2)
+                               + (big_pi.pi(xpq3) as i64 - info.b as i64 + 2);
                     } else {
-                        for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
-                            local += if ll <= info.y_boundary_l { pv } else { 2 * pv };
+                        let p0 = big_pi.pi(xpq0) as i64;
+                        let p1 = big_pi.pi(xpq1) as i64;
+                        let p2 = big_pi.pi(xpq2) as i64;
+                        let p3 = big_pi.pi(xpq3) as i64;
+                        if l + 3 <= info.y_boundary_l {
+                            local += p0 + p1 + p2 + p3;
+                        } else if l > info.y_boundary_l {
+                            local += 2 * (p0 + p1 + p2 + p3);
+                        } else {
+                            for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
+                                local += if ll <= info.y_boundary_l { pv } else { 2 * pv };
+                            }
                         }
                     }
+                    l += 4;
                 }
-                l += 4;
-            }
 
-            // Cleanup
-            while l <= info.l_max && l < primes_len {
-                let xpq = std::cmp::min(fast_div(info.xp, primes[l] as u64, recip[l]) as usize, sqrt_x);
-                let pi_val = big_pi.pi(xpq) as i64;
-                if info.is_c2 {
-                    local += pi_val - info.b as i64 + 2;
-                } else if l <= info.y_boundary_l {
-                    local += pi_val;
-                } else {
-                    local += 2 * pi_val;
+                while l <= eff_hi {
+                    let xpq = std::cmp::min(fast_div(info.xp, primes[l] as u64, recip[l]) as usize, sqrt_x);
+                    let pi_val = big_pi.pi(xpq) as i64;
+                    if info.is_c2 {
+                        local += pi_val - info.b as i64 + 2;
+                    } else if l <= info.y_boundary_l {
+                        local += pi_val;
+                    } else {
+                        local += 2 * pi_val;
+                    }
+                    l += 1;
                 }
-                l += 1;
-            }
 
-            local
-        }).sum()
+                local
+            }).sum();
+
+            total += seg_sum;
+        }
+
+        total
     };
 
     c1 + c2_a_sum
