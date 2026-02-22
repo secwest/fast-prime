@@ -535,3 +535,66 @@ Gap to primecount closed from 6.0× to 3.7× at Max i64!
 2. **D: re-examine with lower alphas** — D's iteration count changed with new alpha values, may unlock new optimization opportunities.
 3. **Setup/B overlap** — Start B immediately (only needs x, y, pi_y), overlap with generate_tables. Could save ~1s.
 4. **Compressed FactorTable** — Pack mu (2 bits) + lpf_idx (14 bits) into 2 bytes, halving D's table memory.
+
+---
+
+## V7 Opt 12-20: The Exhaustive Optimization Campaign
+
+### Opt 12-16: Sieve and Table Optimizations
+Documented elsewhere — includes BigPiTable, extended pre-sieve, wheel-30 for B.
+
+### Opt 17: fast_div for D Type 1 (COMMITTED)
+- Precompute reciprocal `(1 << 64) / m` per ValidM entry  
+- Replace hardware division (~40cy) with multiply-high (~6cy)
+- D improvement: modest but measurable
+- Commit: `9d1fa01`
+
+### Opt 18: Unified C2+A with ascending l + prefetch (COMMITTED)
+- Merge C2 and A into single ascending l loop
+- Add software prefetch on BigPiTable 16 entries ahead
+- AC: 17.7s → 15.4s at Max i64 (-13%)
+- Commit: `83413e6`
+
+### Opt 19: Alpha_z tuning 2.0 → 1.5 (COMMITTED)
+- Smaller z → fewer D segments → D faster
+- D improvement: ~1.2s at Max i64
+- Commit: `568e3e6`
+
+### Opt 20: Alpha_y tuning 13.5 → 13.0 (COMMITTED)
+- Fine-tuning for logx ≥ 43.6
+- Marginal improvement ~0.3s
+- Commit: `9500d1b`
+
+### Opt 21: SoA valid_m (6-byte entries) — REVERTED
+- **Idea**: Replace 16-byte ValidM struct with two compact arrays (vm_m: Vec<u32> + vm_meta: Vec<u16>) totaling 36MB to fit in L3 cache
+- **Result**: D REGRESSED from 20.8s to 22.6s
+- **Cause**: Hardware division (replacing fast_div) costs 24 extra cycles per valid entry × 1.78B valid entries = significant overhead that exceeds cache benefit
+- **Lesson**: fast_div's precomputed reciprocal is critical; can't eliminate recip_m without regression
+
+### D Profiling Results (Max i64)
+Instrumented D with atomic counters to understand cost distribution:
+
+| Metric | Value | Meaning |
+|--------|-------|---------|
+| T1 entries iterated | 5.05B | Total valid_m entries scanned (including lpf rejects) |
+| T1 valid | 1,776M | Entries passing lpf+range filters (35% rate) |
+| T1 count() calls | 21.96M | First-of-sequence prefix counts |
+| T1 count_delta() calls | 1,754M | Incremental counts (cheap, close positions) |
+| T2 iterations | 772.9M | Type 2 prime-pair iterations |
+| cross_off calls | 152.35M | Sieve updates across all primes and segments |
+
+**Key insight**: The bottleneck is the 5.05B valid_m entry reads. At 16 bytes each = 80.8GB of data, the 96MB valid_m_list (2.67× L3 cache) causes severe cache thrashing with 24 threads. This is a fundamental memory-architecture bottleneck that micro-optimizations cannot overcome.
+
+### Exhaustive Alpha Grid Search Results (Max i64)
+
+| alpha_y | alpha_z | B (s) | AC (s) | D (s) | Setup (s) | Total (s) |
+|---------|---------|-------|--------|-------|-----------|-----------|
+| 5.0 | 1.5 | 29.63 | 29.60 | 29.60 | 0.44 | 30.13 |
+| 8.75 | 1.5 | ~20 | ~20 | ~20 | ~1.0 | ~21.75 |
+| 10.0 | 1.5 | 18.04 | 21.44 | 21.43 | 1.11 | 22.58 |
+| 13.0 | 1.0 | 16.49 | 24.22 | 24.22 | 0.90 | 25.16 |
+| 13.0 | 1.5 | 15.97 | 15.94 | 20.80 | 1.44 | 22.27 |
+| 13.0 | 1.7 | 15.87 | 15.84 | 20.99 | 1.70 | 22.74 |
+| 13.0 | 2.0 | 15.78 | 15.75 | 20.29 | 2.04 | 22.40 |
+
+**Conclusion**: alpha_y=13/az=1.5 remains optimal. Lower alpha_y makes B dominate; higher alpha_z increases setup cost.

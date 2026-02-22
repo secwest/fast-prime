@@ -1791,3 +1791,79 @@ Now that D is reasonably balanced, focus on AC optimization:
 - SegmentedPiTable for AC: convert random DRAM misses to L2 hits
 - Would reduce AC from 27.5s to potentially ~14s
 - With faster AC, can increase alpha_y to shift more work from D to AC/B
+
+---
+
+## Session: V7 Opt 17-20 + Exhaustive D/B Optimization Campaign
+
+### V7 Opt 17: fast_div with inline reciprocal for D Type 1 leaves
+Precompute `recip_m = ((1u128 << 64) / m)` for each valid_m entry. Replace hardware division `x_div_prime / m` (~40 cycles) with multiply-high reciprocal (~6 cycles). Only impacts D Type 1 inner loop. Measurable but modest improvement since fast_div is not the dominant cost.
+
+### V7 Opt 18: Unified C2+A with ascending l iteration and deep prefetch
+Merged C2 and A computation into a single loop. Iterate l ascending (instead of separate ascending/descending passes). Added software prefetch on BigPiTable lookups 16 entries ahead. AC: 17.7s → 15.4s at Max i64 (-13%).
+
+### V7 Opt 19: Alpha_z tuning (2.0 → 1.5 for large x)
+Reduced alpha_z from 2.0 to 1.5 for logx ≥ 39.1 (x ≥ 1e17). This reduces z, which reduces xz = x/z, making D process fewer segments. D improved ~1.2s at Max i64. Key insight: smaller z means fewer D segments but larger valid_m_list; the segment reduction wins.
+
+### V7 Opt 20: Alpha_y tuning (13.5 → 13.0 for Max i64)  
+Fine-tuned alpha_y table entry for logx ≥ 43.6 from 13.5 to 13.0. Marginal improvement ~0.3s.
+
+### Exhaustive Alpha Grid Search (18+ configurations tested)
+- Tested alpha_y ∈ {3, 5, 8.0, 8.25, 8.5, 8.75, 9.0, 9.5, 10, 13} × alpha_z ∈ {1.0, 1.3, 1.5, 1.6, 1.7, 2.0}
+- **alpha_y=8.75/az=1.5**: Perfectly balances B≈AC≈D≈20s. Median ~21.75s — essentially same as alpha_y=13 (~21.8s)
+- **alpha_y=5**: B dominates at 29.6s (all components ~29.6s due to thread saturation)
+- **alpha_y=3**: B = 46.8s (sieve range too large)
+- **Key insight**: Optimal alpha_y balances max(B, AC, D). With our B sieve speed, alpha_y≈13 minimizes max(B,D). Alpha_y=8.75 balances all three but doesn't reduce the max.
+- **alpha_z=1.0**: D=24.2s (more segments), az=2.0: D=20.3s but setup=2.04s. az=1.5 optimal.
+
+### B Sieve Optimization Attempts (ALL FAILED)
+1. **512KB segments** (was 256KB): B improved 16.0→15.7s but setup 0.93→1.45s. Net neutral.
+2. **fast_div for B cross-off divisions**: Pre-computed reciprocals for sieve primes, replaced `(low_num+p-1)/p` with fast_div. B UNCHANGED (16.01 vs 16.0). CPU pipeline hides division latency.
+3. **Tracked wheel offsets**: Per-prime-per-residue wheel position tracking across segments to eliminate divisions. B improved 0.65s but total REGRESSED 0.5s due to 3MB offsets array memory pressure.
+4. **Root cause analysis**: B's bottleneck is the ~130B actual bit-clearing crossings at ~9 cycles each (L2 access). The per-prime overhead is fully hidden by CPU out-of-order execution. No micro-optimization can reduce the crossing count.
+
+### D Optimization Attempts (ALL FAILED — 12 approaches total)
+1. Sequential execution (D first, then B+AC): D barely scales with threads → total increases
+2. 8-byte ValidM (remove recip_m): 48MB (still > 36MB L3). Hardware division slower. Net regression.
+3. Monotonic cursors v1: Scanning millions of entries per segment
+4. Block prefix sums: cross_off cost too expensive
+5. FactorTable (dense i16 array): Iterating ALL odd m is 2× more iterations (20.9→47.1s)
+6. Hybrid FactorTable + valid_m_keys: Hardware division (41cy) vs fast_div (6cy) → regression
+7. Compact binary search keys (u32): Binary search not the bottleneck
+8. SoA (Structure-of-Arrays): Multiple memory streams → slight regression
+9. Monotonic cursors v2: Cache pollution from cursor scanning
+10. Software prefetch on valid_m_list: Hardware prefetcher handles backward stride → regression
+11. D segment size sweep (cap 19-23): All within noise of 2MB default
+12. **SoA v2 (compact 6-byte entries, no recip_m)**: 36MB (fits L3!) but hardware division overhead (24 extra cycles × 1.78B valid entries) wiped out cache benefit. D: 20.8→22.6s. REVERTED.
+
+### D Profiling Diagnostics (Max i64, measured with atomic counters)
+```
+T1_entries:  5.05B  (total valid_m entries iterated across all (b,seg) pairs)
+T1_valid:    1,776M (entries passing lpf filter AND in range — 35% pass rate)
+T1_count:    21.96M (count() calls — first-of-sequence prefix count)
+T1_delta:    1,754M (count_delta() calls — incremental count between close positions)
+T2_iters:    772.9M (Type 2 prime-pair iterations)  
+crossoffs:   152.35M (cross_off_sieve calls across all primes and segments)
+```
+
+**Analysis**: The 5.05B entry iteration dominates D's time. Valid_m_list is 96MB (6M entries × 16 bytes), which is 2.67× larger than L3 cache (36MB). With 24 threads all accessing different parts simultaneously, L3 thrashing is severe. This is the FUNDAMENTAL bottleneck.
+
+The SoA approach (36MB total) should theoretically help but hardware division cost negates the cache benefit. A hypothetical approach keeping fast_div with compact layout would require the 48MB recip_m array, pushing back above L3.
+
+### Strategic Analysis — Path to Beating primecount
+- **Current gap**: 2.63× at Max i64 (22.3s vs 8.48s)
+- **primecount uses**: Deleglise-Rivat algorithm, primesieve for B, Fenwick tree for counting, C++ with SIMD
+- **Our B sieve**: ~5× slower than primesieve for equivalent ranges
+- **Alpha dependency**: primecount uses α≈2 (tiny D, fast B via primesieve). We use α≈13 (large D) because our B sieve is slow.
+- **Micro-optimizations exhausted**: 12+ D and 4+ B approaches, ALL failed or neutral
+- **Required strategy**: Either integrate primesieve via FFI OR implement a primesieve-quality bucket sieve to unlock small alpha
+
+### Benchmark Comparison (Max i64, Intel Core Ultra 9 285K, 24 threads)
+| Program | 1Q | Max i64 |
+|---------|-----|---------|
+| Our V7 Opt 20 | 5.59s | 22.3s |
+| primecount v8.2 | 2.26s | 8.49s |
+| Ratio | 2.47× | 2.63× |
+
+primesieve (sieve-only, not analytic):
+- 1e12: 6.85s, 1e13: 83.1s (too slow for large analytic ranges)
