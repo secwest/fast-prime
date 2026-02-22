@@ -141,18 +141,19 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
 
     let logx = (x as f64).ln();
 
-    // Lookup table tuned for ValidM-optimized Gourdon on 24 threads
+    // Lookup table tuned with az=2.0 (matching primecount's proven optimal)
     // (logx, alpha_y, alpha_z)
     const TABLE: &[(f64, f64, f64)] = &[
         (20.0,  2.0, 1.5),   // x ~ 5e8
         (23.0,  3.0, 1.5),   // x ~ 1e10
         (25.3,  4.0, 2.0),   // x ~ 1e11
-        (30.0,  6.0, 2.0),   // x ~ 1e13
+        (30.0,  7.0, 2.0),   // x ~ 1e13
+        (32.2,  6.0, 2.0),   // x ~ 1e14
         (34.5,  8.0, 2.0),   // x ~ 1e15
-        (36.8, 10.0, 2.0),   // x ~ 1e16
-        (39.1, 14.0, 2.5),   // x ~ 1e17
-        (41.4, 15.0, 3.5),   // x ~ 1e18
-        (43.6, 19.0, 4.5),   // x ~ Max i64 (cliff at az>=4.5)
+        (36.8,  9.0, 2.0),   // x ~ 1e16
+        (39.1, 13.0, 2.0),   // x ~ 1e17
+        (41.4, 14.0, 2.0),   // x ~ 1e18
+        (43.6, 17.0, 2.0),   // x ~ Max i64
     ];
 
     let (alpha_y, alpha_z) = if logx <= TABLE[0].0 {
