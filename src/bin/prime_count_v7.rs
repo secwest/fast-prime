@@ -1090,16 +1090,47 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                                 &valid_m_list);
     }
 
-    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 6);
+    // Work-balanced chunk assignment: early segments have much higher cur_max_b
+    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 32);
+    let work_per_seg: Vec<usize> = (0..num_segments).map(|seg_idx| {
+        let low = std::cmp::max(seg_idx * segment_size, 1);
+        std::cmp::min(
+            pi[std::cmp::min(isqrt(x / low as u64) as usize, pi_limit)] as usize,
+            pi_x_star)
+    }).collect();
+    let total_work: usize = work_per_seg.iter().sum();
+    let target_work = total_work / nchunks;
 
-    let results: Vec<(i64, Vec<i64>, Vec<i64>, usize)> = (0..nchunks).into_par_iter().map(|tid| {
-        let seg_start = tid * num_segments / nchunks;
-        let seg_end = (tid + 1) * num_segments / nchunks;
+    let mut chunk_bounds: Vec<usize> = Vec::with_capacity(nchunks + 1);
+    chunk_bounds.push(0);
+    let mut cum_work = 0usize;
+    for (i, &w) in work_per_seg.iter().enumerate() {
+        cum_work += w;
+        if cum_work >= target_work * chunk_bounds.len() && chunk_bounds.len() < nchunks {
+            chunk_bounds.push(i + 1);
+        }
+    }
+    chunk_bounds.push(num_segments);
+    let actual_nchunks = chunk_bounds.len() - 1;
+
+    let results: Vec<(i64, Vec<i64>, Vec<i64>, usize)> = (0..actual_nchunks).into_par_iter().map(|tid| {
+        let seg_start = chunk_bounds[tid];
+        let seg_end = chunk_bounds[tid + 1];
+
+        // Pre-compute max_b for this chunk to size phi/coeff vectors
+        let chunk_max_b = (seg_start..seg_end).map(|seg_idx| {
+            let low = std::cmp::max(seg_idx * segment_size, 1);
+            if low > xz { return 0; }
+            std::cmp::min(
+                pi[std::cmp::min(isqrt(x / low as u64) as usize, pi_limit)] as usize,
+                pi_x_star)
+        }).max().unwrap_or(0);
+        let vec_size = std::cmp::min(chunk_max_b + 1, nprimes);
 
         let mut sieve = BitSieve::new(segment_size / 2);
-        let mut phi = vec![0i64; nprimes];
+        let mut phi = vec![0i64; vec_size];
         let mut d_local = 0i64;
-        let mut coeff = vec![0i64; nprimes];
+        let mut coeff = vec![0i64; vec_size];
         let mut max_b_seen: usize = 0;
 
         for seg_idx in seg_start..seg_end {
