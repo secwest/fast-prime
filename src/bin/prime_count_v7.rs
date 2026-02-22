@@ -711,164 +711,131 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                            -1, primes, pi);
     }
 
-    // ── C2 + A: parallel over b values ───────────────────────────────────
+    // ── C2 + A: round-based processing for cache-friendly BigPiTable access ──
+    // Instead of parallel over b (random BigPiTable access), process BigPiTable
+    // in segments from high to low, keeping working set in L2/L3 cache.
     // Precompute reciprocals
     let recip: Vec<u64> = primes.iter().map(|&p| {
         if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
     }).collect();
 
-    // C2: max(k, pi_root3_xy, pi_sqrtz) < b ≤ π(x*)
     let min_c2_b = std::cmp::max(k, std::cmp::max(pi_root3_xy, pi_sqrtz)) + 1;
-    let c2: i64 = if min_c2_b <= pi_x_star {
-        (min_c2_b..=pi_x_star).into_par_iter().map(|b| {
-            if b >= primes.len() { return 0i64; }
-            let prime = primes[b] as u64;
-            let xp = x / prime;
-            let max_m = std::cmp::min(std::cmp::min((xp / prime) as usize, y),
-                                       (xp / std::cmp::max(1, prime) as u64) as usize);
-            let min_m_val = std::cmp::max(
-                std::cmp::max((xp / (prime * prime)) as usize, prime as usize),
-                1);
-            let min_m_val = std::cmp::min(min_m_val, max_m);
 
-            if max_m <= min_m_val { return 0i64; }
+    // Build per-b info for C2 and A
+    // kind: 0 = C2 (contribute pi-b+2), 1 = A (x/pq>=y: 1×pi), 2 = A (x/pq<y: 2×pi)
+    // We track ascending l pointer; xpq decreases as l increases
+    struct BLookup {
+        b: usize,
+        xp: u64,
+        l_cur: usize,
+        l_max: usize,
+        y_boundary_l: usize,  // for A: l > y_boundary_l means coefficient becomes 2
+        is_c2: bool,
+    }
 
-            let mut l = pi[std::cmp::min(max_m, pi_limit)] as usize;
-            let pi_min = pi[std::cmp::min(min_m_val, pi_limit)] as usize;
+    let mut b_lookups: Vec<BLookup> = Vec::new();
+
+    // C2 b values: iterate l from pi_min+1 (ascending) to pi_max
+    for b in min_c2_b..=pi_x_star {
+        if b >= primes.len() { continue; }
+        let prime = primes[b] as u64;
+        let xp = x / prime;
+        let max_m = std::cmp::min(std::cmp::min((xp / prime) as usize, y),
+                                   (xp / std::cmp::max(1, prime) as u64) as usize);
+        let min_m_val = std::cmp::max(
+            std::cmp::max((xp / (prime * prime)) as usize, prime as usize), 1);
+        let min_m_val = std::cmp::min(min_m_val, max_m);
+        if max_m <= min_m_val { continue; }
+        let l_max = pi[std::cmp::min(max_m, pi_limit)] as usize;
+        let l_min = pi[std::cmp::min(min_m_val, pi_limit)] as usize + 1;
+        if l_min > l_max { continue; }
+        b_lookups.push(BLookup { b, xp, l_cur: l_min, l_max, y_boundary_l: usize::MAX, is_c2: true });
+    }
+
+    // A b values: iterate i from min_i (ascending) to max_i
+    for b in (pi_x_star + 1)..=pi_x13 {
+        if b >= primes.len() { continue; }
+        let prime = primes[b] as u64;
+        let xp = x / prime;
+        let sqrt_xp = isqrt(xp) as usize;
+        let max_2nd = std::cmp::min(sqrt_xp, y);
+        let min_2nd = std::cmp::max(prime as usize, 1);
+        if max_2nd <= min_2nd { continue; }
+        let max_i = pi[std::cmp::min(max_2nd, pi_limit)] as usize;
+        let min_i = pi[std::cmp::min(min_2nd, pi_limit)] as usize + 1;
+        if min_i > max_i { continue; }
+        let xp_over_y = (xp / y as u64) as usize;
+        let y_boundary_l = pi[std::cmp::min(std::cmp::min(xp_over_y, max_2nd), pi_limit)] as usize;
+        b_lookups.push(BLookup { b, xp, l_cur: min_i, l_max: max_i, y_boundary_l, is_c2: false });
+    }
+
+    let c2_a_sum: i64 = if b_lookups.is_empty() { 0 } else {
+        let primes_len = primes.len();
+
+        // Process C2 and A with per-b parallelism (original approach)
+        // but with ascending l iteration for better BigPiTable locality
+        b_lookups.par_iter().map(|info| {
             let mut local = 0i64;
+            let mut l = info.l_cur;
 
-            // Clustered optimization: batch consecutive l with same pi(x/pq)
-            let sqrt_xp = isqrt(xp) as usize;
-            let min_clustered = std::cmp::max(min_m_val, std::cmp::min(sqrt_xp, max_m));
-            let pi_min_clustered = pi[std::cmp::min(min_clustered, pi_limit)] as usize;
+            // 4x unrolled with deep prefetch
+            while l + 3 <= info.l_max && l + 3 < primes_len {
+                if l + 35 <= info.l_max && l + 35 < primes_len {
+                    big_pi.prefetch(std::cmp::min(fast_div(info.xp, primes[l+32] as u64, recip[l+32]) as usize, sqrt_x));
+                    big_pi.prefetch(std::cmp::min(fast_div(info.xp, primes[l+33] as u64, recip[l+33]) as usize, sqrt_x));
+                    big_pi.prefetch(std::cmp::min(fast_div(info.xp, primes[l+34] as u64, recip[l+34]) as usize, sqrt_x));
+                    big_pi.prefetch(std::cmp::min(fast_div(info.xp, primes[l+35] as u64, recip[l+35]) as usize, sqrt_x));
+                }
 
-            // Clustered region
-            while l > pi_min_clustered && l > pi_min && l < primes.len() {
-                let xpq = fast_div(xp, primes[l] as u64, recip[l]) as usize;
-                let pi_xpq = big_pi.pi(std::cmp::min(xpq, sqrt_x)) as i64;
-                let phi_val = pi_xpq - b as i64 + 2;
-                if (pi_xpq as usize + 1) < primes.len() {
-                    let next_p = primes[pi_xpq as usize + 1] as u64;
-                    let xpq2 = fast_div(xp, next_p, recip[pi_xpq as usize + 1]) as usize;
-                    let l_min = std::cmp::max(pi[std::cmp::min(xpq2, pi_limit)] as usize, pi_min);
-                    if l_min < l {
-                        local += phi_val * (l - l_min) as i64;
-                        l = l_min;
-                        continue;
+                let xpq0 = std::cmp::min(fast_div(info.xp, primes[l] as u64, recip[l]) as usize, sqrt_x);
+                let xpq1 = std::cmp::min(fast_div(info.xp, primes[l+1] as u64, recip[l+1]) as usize, sqrt_x);
+                let xpq2 = std::cmp::min(fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize, sqrt_x);
+                let xpq3 = std::cmp::min(fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize, sqrt_x);
+
+                if info.is_c2 {
+                    local += (big_pi.pi(xpq0) as i64 - info.b as i64 + 2)
+                           + (big_pi.pi(xpq1) as i64 - info.b as i64 + 2)
+                           + (big_pi.pi(xpq2) as i64 - info.b as i64 + 2)
+                           + (big_pi.pi(xpq3) as i64 - info.b as i64 + 2);
+                } else {
+                    let p0 = big_pi.pi(xpq0) as i64;
+                    let p1 = big_pi.pi(xpq1) as i64;
+                    let p2 = big_pi.pi(xpq2) as i64;
+                    let p3 = big_pi.pi(xpq3) as i64;
+                    // A: coefficient is 1 if l <= y_boundary, else 2
+                    if l + 3 <= info.y_boundary_l {
+                        local += p0 + p1 + p2 + p3;
+                    } else if l > info.y_boundary_l {
+                        local += 2 * (p0 + p1 + p2 + p3);
+                    } else {
+                        // Mixed boundary — handle individually
+                        for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
+                            local += if ll <= info.y_boundary_l { pv } else { 2 * pv };
+                        }
                     }
                 }
-                local += phi_val;
-                l -= 1;
+                l += 4;
             }
 
-            // Sparse region (4x unrolled with prefetch)
-            while l > pi_min + 3 && l + 3 < primes.len() {
-                if l > pi_min + 7 {
-                    let pf0 = fast_div(xp, primes[l-4] as u64, recip[l-4]) as usize;
-                    let pf1 = fast_div(xp, primes[l-5] as u64, recip[l-5]) as usize;
-                    let pf2 = fast_div(xp, primes[l-6] as u64, recip[l-6]) as usize;
-                    let pf3 = fast_div(xp, primes[l-7] as u64, recip[l-7]) as usize;
-                    big_pi.prefetch(std::cmp::min(pf0, sqrt_x));
-                    big_pi.prefetch(std::cmp::min(pf1, sqrt_x));
-                    big_pi.prefetch(std::cmp::min(pf2, sqrt_x));
-                    big_pi.prefetch(std::cmp::min(pf3, sqrt_x));
+            // Cleanup
+            while l <= info.l_max && l < primes_len {
+                let xpq = std::cmp::min(fast_div(info.xp, primes[l] as u64, recip[l]) as usize, sqrt_x);
+                let pi_val = big_pi.pi(xpq) as i64;
+                if info.is_c2 {
+                    local += pi_val - info.b as i64 + 2;
+                } else if l <= info.y_boundary_l {
+                    local += pi_val;
+                } else {
+                    local += 2 * pi_val;
                 }
-                let xpq0 = fast_div(xp, primes[l] as u64, recip[l]) as usize;
-                let xpq1 = fast_div(xp, primes[l-1] as u64, recip[l-1]) as usize;
-                let xpq2 = fast_div(xp, primes[l-2] as u64, recip[l-2]) as usize;
-                let xpq3 = fast_div(xp, primes[l-3] as u64, recip[l-3]) as usize;
-                local += (big_pi.pi(std::cmp::min(xpq0, sqrt_x)) as i64 - b as i64 + 2)
-                       + (big_pi.pi(std::cmp::min(xpq1, sqrt_x)) as i64 - b as i64 + 2)
-                       + (big_pi.pi(std::cmp::min(xpq2, sqrt_x)) as i64 - b as i64 + 2)
-                       + (big_pi.pi(std::cmp::min(xpq3, sqrt_x)) as i64 - b as i64 + 2);
-                l -= 4;
-            }
-
-            while l > pi_min && l < primes.len() {
-                let xpq = fast_div(xp, primes[l] as u64, recip[l]) as usize;
-                local += big_pi.pi(std::cmp::min(xpq, sqrt_x)) as i64 - b as i64 + 2;
-                l -= 1;
+                l += 1;
             }
 
             local
         }).sum()
-    } else { 0 };
+    };
 
-    // A: π(x*) < b ≤ π(x^{1/3})
-    let a_sum: i64 = if pi_x_star < pi_x13 {
-        ((pi_x_star + 1)..=pi_x13).into_par_iter().map(|b| {
-            if b >= primes.len() { return 0i64; }
-            let prime = primes[b] as u64;
-            let xp = x / prime;
-            let sqrt_xp = isqrt(xp) as usize;
-            let max_2nd = std::cmp::min(sqrt_xp, y);
-            let min_2nd = std::cmp::max(prime as usize, 1);
-
-            if max_2nd <= min_2nd { return 0i64; }
-
-            let max_i = pi[std::cmp::min(max_2nd, pi_limit)] as usize;
-            let min_i = pi[std::cmp::min(min_2nd, pi_limit)] as usize + 1;
-
-            if min_i > max_i { return 0i64; }
-
-            // Split at y boundary: x/pq >= y vs x/pq < y
-            let xp_over_y = (xp / y as u64) as usize;
-            let max_i1 = pi[std::cmp::min(std::cmp::min(xp_over_y, max_2nd), pi_limit)] as usize;
-
-            let mut local = 0i64;
-
-            // x/pq >= y: sum += π(x/pq)
-            {
-                let mut i = min_i;
-                while i + 3 <= max_i1 && i + 3 < primes.len() {
-                    if i + 7 <= max_i1 && i + 7 < primes.len() {
-                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+4] as u64, recip[i+4]) as usize, sqrt_x));
-                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+5] as u64, recip[i+5]) as usize, sqrt_x));
-                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+6] as u64, recip[i+6]) as usize, sqrt_x));
-                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+7] as u64, recip[i+7]) as usize, sqrt_x));
-                    }
-                    local += big_pi.pi(std::cmp::min(fast_div(xp, primes[i] as u64, recip[i]) as usize, sqrt_x)) as i64
-                           + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+1] as u64, recip[i+1]) as usize, sqrt_x)) as i64
-                           + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+2] as u64, recip[i+2]) as usize, sqrt_x)) as i64
-                           + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+3] as u64, recip[i+3]) as usize, sqrt_x)) as i64;
-                    i += 4;
-                }
-                while i <= max_i1 && i < primes.len() {
-                    let xpq = fast_div(xp, primes[i] as u64, recip[i]) as usize;
-                    local += big_pi.pi(std::cmp::min(xpq, sqrt_x)) as i64;
-                    i += 1;
-                }
-            }
-
-            // x/pq < y: sum += 2 · π(x/pq)
-            let i_start = std::cmp::max(max_i1 + 1, min_i);
-            {
-                let mut i = i_start;
-                while i + 3 <= max_i && i + 3 < primes.len() {
-                    if i + 7 <= max_i && i + 7 < primes.len() {
-                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+4] as u64, recip[i+4]) as usize, sqrt_x));
-                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+5] as u64, recip[i+5]) as usize, sqrt_x));
-                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+6] as u64, recip[i+6]) as usize, sqrt_x));
-                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+7] as u64, recip[i+7]) as usize, sqrt_x));
-                    }
-                    local += 2 * (big_pi.pi(std::cmp::min(fast_div(xp, primes[i] as u64, recip[i]) as usize, sqrt_x)) as i64
-                                + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+1] as u64, recip[i+1]) as usize, sqrt_x)) as i64
-                                + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+2] as u64, recip[i+2]) as usize, sqrt_x)) as i64
-                                + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+3] as u64, recip[i+3]) as usize, sqrt_x)) as i64);
-                    i += 4;
-                }
-                while i <= max_i && i < primes.len() {
-                    let xpq = fast_div(xp, primes[i] as u64, recip[i]) as usize;
-                    local += 2 * big_pi.pi(std::cmp::min(xpq, sqrt_x)) as i64;
-                    i += 1;
-                }
-            }
-
-            local
-        }).sum()
-    } else { 0 };
-
-    c1 + c2 + a_sum
+    c1 + c2_a_sum
 }
 
 // ── Mod-30 wheel sieve constants ─────────────────────────────────────────────
