@@ -1398,3 +1398,176 @@ az=4.49 (just below cliff!). Fixed to logx=43.6 so Max i64 uses exact (19.0, 4.5
 - 100Q: 7.05s → 2.76s (2.6×, 5.2× vs V6)
 - 1Q: 32.9s → 11.9s (2.8×, 4.4× vs V6)
 - Max i64: 200.9s → 50.1s (4.0×, 6.8× vs V6)
+
+---
+
+## V7 Opt 6 — Alpha Table Retune with α_z=2.0 (Session 3)
+
+### Key Insight
+- Previous alpha table used polynomial fit that over-predicted α_y at large scales
+- Retested with α_z fixed at 2.0 (matching primecount's proven optimal)
+- Swept α_y at each scale systematically
+
+### Results
+- 100Q: 2.76s → 2.37s (-14%)
+- 1QN: 11.9s → 10.07s (-15%)
+- Max i64: 50.1s → 40.4s (-19%)
+
+### Component Breakdown (Max i64)
+- Setup: 3.5s, BigPiTable: 0.22s
+- B: 35.6s (now the bottleneck — BigPiTable construction dominates)
+- AC: 21.8s, D: 36.5s
+- Wall: 40.4s
+
+---
+
+## V7 Opt 7 — Segmented B (Session 3)
+
+### Problem
+- B was computing BigPiTable(√x) for each prime p in (y, √x]
+- At Max i64, BigPiTable covers [0, 3.04B] = ~232MB
+- Construction takes ~17.5s, and B needs it for every π(x/p) lookup
+- Total B time: 35.6s (became bottleneck after Opt 6)
+
+### Solution: Segmented B
+- Instead of one giant BigPiTable, process B in L1-sized chunks
+- Segment [0, √x] into chunks, count primes per segment via parallel sieve
+- For each p in (y, √x], look up x/p in the appropriate chunk
+- L1-sized sieve (32KB) with prefix sum tracking
+
+### Results
+- B: 35.6s → 17.8s (2× speedup)
+- Total: 40.4s → 38.8s (4.1% faster)
+- AC and D unchanged (still ~21.8s and ~36.5s respectively)
+
+---
+
+## V7 Opt 8 Experiments — D Optimization Attempts (Session 3, ALL FAILED)
+
+### Sliding Pointers for D
+- Goal: avoid re-scanning squarefree m values by maintaining sliding pointers
+- Result: REGRESSED due to register pressure and branch misprediction
+- Reverted
+
+### Precomputed Reciprocals for D
+- Goal: replace divisions x/m with multiplications using precomputed 1/m
+- Result: 73MB reciprocal array thrashes L3 cache (36MB). REGRESSED.
+- Reverted
+
+### Increasing c from 6 to 7
+- Goal: sieve out more small primes in pre-sieve template
+- Result: PreSieveTemplate grows from 7.5KB (fits L1) to 128KB (L2 only)
+- Overall regression due to cache pressure. Reverted.
+
+### D Segment Size Sweep
+- Tested D_SEG_CAP from 18 to 24 (powers of 2)
+- D_SEG_CAP=21 confirmed optimal for this CPU's L2 cache (2MB)
+- Other values all regressed. No change.
+
+---
+
+## V7 AC Optimization Experiments (Session 4, ALL FAILED/MARGINAL)
+
+### Key Bottleneck Analysis
+- AC's BigPiTable at Max i64: ~380MB (bits + prefix for 1.52B odd numbers)
+- Random pi() lookups cause DRAM cache misses
+- 24 threads × 128 bytes/lookup ≈ saturating DDR5 bandwidth (~96GB/s)
+- Root cause: **DRAM bandwidth-limited**, not latency-limited
+
+### 16-Ahead Prefetch (replace 4-ahead)
+- Hypothesis: deeper prefetch pipeline hides more DRAM latency
+- Result: AC barely changed (21.76→21.66s). Bandwidth is the bottleneck, not latency.
+- Reverted
+
+### Segmented AC with rayon::join
+- Hypothesis: process AC in BigPiTable segments to convert DRAM misses to L2 hits
+- Split: xpq≥y uses segmented pass, xpq<y uses parallel-over-b
+- Result: AC REGRESSED 21.76→24.00s — thread contention from rayon::join overhead
+- Reverted
+
+### Full-Range Segmented AC
+- Hypothesis: single pass over BigPiTable segments, all b values per segment
+- Result: AC MASSIVELY REGRESSED 21.76→62.46s
+- Root cause: iterating b-values inside each segment thrashes L2 for primes[] (9MB) and recip[] (18MB) arrays
+- Reverted
+
+### Batched Prefetch (BATCH=32)
+- Hypothesis: two-pass approach (compute+prefetch, then lookups) fully hides latency
+- Result: AC barely improved (21.76→21.45s). Confirms bandwidth is the bottleneck.
+- Reverted
+
+### Interleaved BigPiTable
+- Hypothesis: store bits+prefix in same cache line → single prefetch instead of double
+- Result: AC improved to ~20.6s (halves bandwidth per lookup: 64B vs 128B)
+- But: BigPiTable construction overhead (+0.1s) and D/B unchanged
+- Net effect: neutral overall. Reverted.
+
+### Combined Batched+Interleaved
+- Best AC ~20.4s but total wall time similar due to D dominance
+- Reverted everything to baseline
+
+### Key Insight
+At this scale, AC's BigPiTable lookups are fundamentally **memory-bandwidth-limited**.
+Without reducing the table size or the number of lookups, AC can't be significantly
+improved by reorganizing access patterns. Need mod-30 wheel or compressed pi-table.
+
+---
+
+## V7 Opt 8 — Alpha Parameter Retune (Session 4, THE BIG WIN)
+
+### Discovery
+- Previous alpha_y values (13-17 for large scales) were far from optimal
+- D dominates at 36s while AC=21.8s, B=17.8s
+- Reducing alpha_y reduces z (z = y × alpha_z), which reduces D iterations
+- Counterintuitive: increasing alpha_y was the OLD optimization direction
+
+### Systematic Sweep Results
+| Scale | Old α_y | New α_y | Old Time | New Time | Speedup |
+|-------|---------|---------|----------|----------|---------|
+| 10^15 | 8 | 7 | 0.107s | 0.095s | -11% |
+| 10^16 | 9 | 8 | 0.49s | 0.43s | -12% |
+| 10^17 | 13 | 8 | 2.37s | 2.00s | -16% |
+| 10^18 | 14 | 9 | 10.07s | 7.82s | -22% |
+| Max i64 | 17 | 9.8 | 38.83s | 31.52s | -19% |
+
+### Alpha α_z Verification
+- Tested α_z=1.5 and α_z=2.5 at Max i64 — both worse than α_z=2.0
+- α_z=2.0 confirmed optimal across all scales
+
+### Updated Alpha Table
+```
+(logx, alpha_y, alpha_z):
+(30.0, 6.0, 2.0)  -- 10^13
+(32.2, 6.0, 2.0)  -- 10^14
+(34.5, 7.0, 2.0)  -- 10^15
+(36.8, 8.0, 2.0)  -- 10^16
+(39.1, 8.0, 2.0)  -- 10^17
+(41.4, 9.0, 2.0)  -- 10^18
+(43.6, 9.8, 2.0)  -- Max i64
+```
+
+### primecount Comparison (updated)
+| Scale | V7 Opt 8 | primecount | Ratio |
+|-------|----------|------------|-------|
+| 1e14 | 0.028s | 0.023s | 1.2× |
+| 1e15 | 0.095s | 0.059s | 1.6× |
+| 1e16 | 0.487s | 0.178s | 2.7× |
+| 1e17 | 2.00s | 0.598s | 3.3× |
+| 1e18 | 7.82s | 2.279s | 3.4× |
+| Max i64 | 31.52s | 8.520s | 3.7× |
+
+Gap closed from 6.0× to 3.7× at Max i64! From 5.2× to 3.4× at 1e18!
+
+### Component Profile (Opt 8, Max i64)
+- Setup: 1.42s
+- BigPiTable(AC): 0.22s
+- B: 24.5s
+- AC: 28.4s
+- D: 29.8s
+- Wall: 31.52s
+
+### Next Steps
+1. Wheel mod 30 for BigPiTable — reduce table size by 3.75× (from 380MB to ~100MB)
+2. Re-examine D with new (lower) alpha values — D iterations changed
+3. Setup overlap — start B before D/AC setup completes
+4. Compressed FactorTable — pack mu+lpf into 2 bytes

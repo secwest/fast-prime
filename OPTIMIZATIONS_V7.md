@@ -345,10 +345,105 @@ For reference, primesieve (segmented Sieve of Eratosthenes) becomes impractical 
 - **B = 22.2s** — BigPiTable(232B) construction. No longer bottleneck.
 - **Setup = 7.0s** — Sieve, pi table, mu/lpf/y_smooth generation (single-threaded).
 
-### Planned Optimizations
+---
 
-1. **AC segmented pi** — V6-style L2-segmented processing for AC's BigPiTable lookups. Process [0,√x] in L2 chunks, narrowing b/l ranges per segment. Highest potential.
-2. **Setup overlap** — Start B immediately (it only needs x, y, pi_y), overlap generate_tables with BigPiTable construction. Could save ~5s of wall time.
-3. **Compressed FactorTable** — Pack mu (2 bits) + lpf_idx (14 bits) into 2 bytes, halving memory for D's table access.
-4. **SIMD popcount for D** — Use AVX2 256-bit popcount for sieve.count_delta() spans.
-5. **Alpha scale-dependent D segments** — Use larger D segments at smaller scales where cache pressure is lower.
+## Opt 6 — Alpha Table Retune (α_z=2.0)
+
+Retested alpha parameters with α_z fixed at 2.0 (matching primecount's approach).
+Swept α_y systematically per scale. Previous polynomial fit over-predicted α_y.
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| 100Q | 2.76s | 2.37s | -14% |
+| 1QN | 11.9s | 10.07s | -15% |
+| Max i64 | 50.1s | 40.4s | **-19%** |
+
+B became the new bottleneck at 35.6s (BigPiTable construction dominates).
+
+---
+
+## Opt 7 — Segmented B
+
+Replaced B's monolithic BigPiTable (232MB at Max i64) with L1-sized segmented sieve.
+Process [0, √x] in 32KB chunks, count primes per segment via parallel sieve.
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| B only | 35.6s | 17.8s | **2× faster** |
+| Total Max i64 | 40.4s | 38.8s | -4% |
+
+---
+
+## Failed Experiments (between Opt 7 and 8)
+
+### D Optimization Attempts (ALL FAILED)
+- **Sliding pointers**: Regressed — register pressure and branch misprediction
+- **Precomputed reciprocals**: 73MB array thrashes 36MB L3. Regressed.
+- **c=7 pre-sieve**: Template grows from 7.5KB (L1) to 128KB (L2). Regressed.
+- **D_SEG_CAP sweep**: 2^21 confirmed optimal for 2MB L2. No change.
+
+### AC Optimization Attempts (ALL FAILED/MARGINAL)
+- **16-ahead prefetch**: AC barely changed (21.76→21.66s). Bandwidth-limited, not latency.
+- **Segmented AC (rayon::join)**: Regressed to 24.0s — thread contention overhead.
+- **Full-range segmented AC**: Massively regressed to 62.5s — b-iteration thrashes L2.
+- **Batched prefetch (BATCH=32)**: Barely improved (21.45s). Bandwidth bottleneck confirmed.
+- **Interleaved BigPiTable**: AC improved to 20.6s but overall neutral (construction overhead).
+- **Key insight**: AC is DRAM bandwidth-limited (~96GB/s DDR5). Need smaller table (mod-30 wheel).
+
+---
+
+## Opt 8 — Alpha Parameter Retune (Systematic Sweep)
+
+Discovered previous α_y values (13-17) were far too high for large scales.
+Reducing α_y reduces z = y·α_z, which dramatically reduces D iterations (the bottleneck).
+
+### New Alpha Table
+| log(x) | Scale | Old α_y | New α_y |
+|--------|-------|---------|---------|
+| 34.5 | 10^15 | 8 | 7 |
+| 36.8 | 10^16 | 9 | 8 |
+| 39.1 | 10^17 | 13 | 8 |
+| 41.4 | 10^18 | 14 | 9 |
+| 43.6 | Max i64 | 17 | 9.8 |
+
+### Results
+| Scale | Opt 7 | Opt 8 | Improvement | vs primecount |
+|-------|-------|-------|-------------|---------------|
+| 100Q | 2.37s | 2.00s | -16% | 3.3× |
+| 1QN | 10.07s | 7.82s | -22% | 3.4× |
+| Max i64 | 38.83s | 31.52s | **-19%** | **3.7×** |
+
+Gap to primecount closed from 6.0× to 3.7× at Max i64!
+
+### Component Profile (Opt 8, Max i64)
+| Component | Time |
+|-----------|------|
+| Setup | 1.42s |
+| BigPiTable(AC) | 0.22s |
+| B | 24.5s |
+| AC | 28.4s |
+| D | 29.8s |
+| **Wall** | **31.52s** |
+
+### Cumulative: V7 Opt 0→8 Speedup
+| Scale | Opt 0 | Opt 8 | Speedup | vs V6 |
+|-------|-------|-------|---------|-------|
+| 100Q | 7.05s | 2.00s | **3.5×** | **7.2×** |
+| 1QN | 32.9s | 7.82s | **4.2×** | **6.6×** |
+| Max i64 | 200.9s | 31.52s | **6.4×** | **10.9×** |
+
+---
+
+## Next Optimization Targets
+
+### Bottleneck Analysis (Opt 8, Max i64)
+- **D = 29.8s** — Still the biggest component. Lower alpha_y helped but D is inherently expensive.
+- **AC = 28.4s** — DRAM bandwidth-limited. Need mod-30 wheel or compressed pi-table.
+- **B = 24.5s** — Segmented approach works but still significant.
+- **Setup = 1.42s** — Small, could overlap with B.
+
+### Planned Optimizations
+1. **Mod-30 wheel for BigPiTable** — Store only numbers coprime to {2,3,5}: reduces table from 380MB to ~100MB, potentially converting DRAM misses to L3 hits for AC.
+2. **D: re-examine with lower alphas** — D's iteration count changed with new alpha values, may unlock new optimization opportunities.
+3. **Setup/B overlap** — Start B immediately (only needs x, y, pi_y), overlap with generate_tables. Could save ~1s.
+4. **Compressed FactorTable** — Pack mu (2 bits) + lpf_idx (14 bits) into 2 bytes, halving D's table memory.
