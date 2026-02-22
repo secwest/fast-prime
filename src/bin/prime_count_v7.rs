@@ -496,8 +496,8 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
     // Sieving primes ≥ 17 from BigPiTable (3,5,7,11,13 pre-sieved)
     let sqrt_maxp = isqrt(max_xp as u64) as usize;
     let mut sieve_primes: Vec<usize> = Vec::new();
-    if sqrt_maxp >= 17 {
-        let sp_s = (17 - 1) / 2; // odd-index of 17
+    if sqrt_maxp >= 19 {
+        let sp_s = (19 - 1) / 2; // odd-index of 19
         let sp_e = (sqrt_maxp - 1) / 2;
         for word_idx in (sp_s / 64)..=(sp_e / 64) {
             let mut w = big_pi.bits_word(word_idx);
@@ -522,6 +522,7 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
     let masks7 = BigPiTable::build_presieve_masks(7);
     let masks11 = BigPiTable::build_presieve_masks(11);
     let masks13 = BigPiTable::build_presieve_masks(13);
+    let masks17 = BigPiTable::build_presieve_masks(17);
 
     let odd_count = (max_xp - 1) / 2 + 1;
     let seg_words: usize = 4096; // 32KB = fits L1
@@ -529,7 +530,7 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
     let num_segs = (odd_count + seg_odd_count - 1) / seg_odd_count;
 
     let nthreads = rayon::current_num_threads();
-    let nchunks = std::cmp::min(nthreads * 4, num_segs).max(1);
+    let nchunks = std::cmp::min(nthreads * 32, num_segs).max(1);
     let chunk_segs = (num_segs + nchunks - 1) / nchunks;
 
     let chunk_xp_bounds: Vec<usize> = (0..=nchunks).map(|k| {
@@ -562,30 +563,32 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
             if excess > 0 { buf[seg_nw - 1] &= u64::MAX >> excess; }
             if seg == 0 { buf[0] &= !1u64; }
 
-            // Pre-sieve 3, 5, 7, 11, 13
+            // Pre-sieve 3, 5, 7, 11, 13, 17
             let mut o3 = (1 + 3 - start_idx % 3) % 3;
             let mut o5 = (2 + 5 - start_idx % 5) % 5;
             let mut o7 = (3 + 7 - start_idx % 7) % 7;
             let mut o11 = (5 + 11 - start_idx % 11) % 11;
             let mut o13 = (6 + 13 - start_idx % 13) % 13;
+            let mut o17 = (8 + 17 - start_idx % 17) % 17;
             for w in 0..seg_nw {
                 unsafe {
                     *buf.get_unchecked_mut(w) &=
                         masks3[o3] & masks5[o5] & masks7[o7]
-                        & masks11[o11] & masks13[o13];
+                        & masks11[o11] & masks13[o13] & masks17[o17];
                 }
                 o3 = (o3 + 2) % 3;
                 o5 = (o5 + 1) % 5;
                 o7 = (o7 + 6) % 7;
                 o11 = (o11 + 2) % 11;
                 o13 = (o13 + 1) % 13;
+                o17 = (o17 + 4) % 17;
             }
             if seg == 0 {
                 buf[0] |= (1u64 << 1) | (1u64 << 2) | (1u64 << 3)
-                        | (1u64 << 5) | (1u64 << 6); // restore 3,5,7,11,13
+                        | (1u64 << 5) | (1u64 << 6) | (1u64 << 8); // restore 3,5,7,11,13,17
             }
 
-            // Cross off composites for primes ≥ 17
+            // Cross off composites for primes ≥ 19
             let end_num = 2 * (end_idx - 1) + 1;
             let max_p = isqrt(end_num as u64) as usize;
             let sp_end = sieve_primes.partition_point(|&p| p <= max_p);
@@ -761,7 +764,6 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
             // Sparse region (4x unrolled with prefetch)
             while l > pi_min + 3 && l + 3 < primes.len() {
-                // Prefetch next iteration's 4 BigPiTable lookups
                 if l > pi_min + 7 {
                     let pf0 = fast_div(xp, primes[l-4] as u64, recip[l-4]) as usize;
                     let pf1 = fast_div(xp, primes[l-5] as u64, recip[l-5]) as usize;
@@ -820,7 +822,6 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             {
                 let mut i = min_i;
                 while i + 3 <= max_i1 && i + 3 < primes.len() {
-                    // Prefetch next 4
                     if i + 7 <= max_i1 && i + 7 < primes.len() {
                         big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+4] as u64, recip[i+4]) as usize, sqrt_x));
                         big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+5] as u64, recip[i+5]) as usize, sqrt_x));
