@@ -1645,6 +1645,51 @@ improved by reorganizing access patterns. Need mod-30 wheel or compressed pi-tab
 | 10^18 | 14 | 9 | 10.07s | 7.82s | -22% |
 | Max i64 | 17 | 9.8 | 38.83s | 31.52s | -19% |
 
+---
+
+## Session 5: Continued Optimization (Post Opt 24)
+
+### V7 Opt 25 — Alpha Retune for Large Scales
+
+**Discovery**: Previous alpha_z=2.0 was suboptimal at Max i64. Higher alpha_z increases z,
+shifting D from Type 2 (prime pair) leaves to Type 1 (precomputed ValidM) leaves. Type 1
+uses the ValidM list with precomputed reciprocals and sequential access — more cache-friendly
+than Type 2's prime pair iteration.
+
+**Grid Search**: Tested ay={4-9} × az={1.5-4} at Max i64, refined at 1e16-1e18.
+
+| Scale | Old (6.0/2.0) | New (varies) | Speedup |
+|-------|---------------|--------------|---------|
+| 1e16  | 0.289s (6/2)  | 0.289s (6/2) | same    |
+| 1e17  | 1.09s (6/2)   | 1.04s (6/3)  | -5%     |
+| 1e18  | 4.50s (6/2)   | 4.32s (7/3)  | -4%     |
+| Max i64 | 17.76s (6/2) | 16.37s (7/3) | -7.8%  |
+
+**Key Insight**: alpha_z has a "cliff" effect — at az≈3.0 the valid_m_list/z ratio
+hits a sweet spot where Type 1 coverage is maximal without z growing too large for
+the sieve segments.
+
+### Failed: Block Prefix Sums for BitSieve::count()
+
+**Idea**: Add per-block (64-word) population counts to BitSieve, reducing count() from
+O(nwords) to O(nblocks + BLOCK_WORDS). Maintain block counts during cross_off.
+
+**Result**: 17.76s → 18.20s REGRESSION. The per-crossing block_count decrements in
+cross_off_sieve add ~3 cycles per crossing × ~4.2M crossings per segment × ~183K segments
+= massive overhead. Even lazy rebuild (only when count() called) has O(nwords) cost per
+rebuild, same as the original linear scan.
+
+**Root cause**: BitSieve is modified too frequently (once per b) relative to count() calls
+(also once per b). No amortization possible. count_delta() handles 95%+ of lookups cheaply.
+
+**Verdict**: REVERTED. Dead end for this sieve access pattern.
+
+### Current State (Opt 25)
+- Max i64: 16.37s (1.93× gap to primecount 8.49s)
+- 1e18: 4.32s (1.90× gap to primecount 2.27s)
+- All 15 tests pass
+- Commit: c1ee46c, pushed to origin/main
+
 ### Alpha α_z Verification
 - Tested α_z=1.5 and α_z=2.5 at Max i64 — both worse than α_z=2.0
 - α_z=2.0 confirmed optimal across all scales
