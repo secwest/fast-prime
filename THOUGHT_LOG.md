@@ -1340,6 +1340,47 @@ B and AC also benefit from freed rayon threads: B=20.4s, AC=20.3s (from 22.5s).
 Period = 17017 bytes (was 510510 odd-indices). Template ~17KB fits L1.
 
 **Key insight**: Per-operation overhead matters MORE than total operation count for
+cached (L1/L2) sieves. The wheel's benefit comes from eliminating iterations, not
+faster per-iteration execution.
+
+---
+
+### V7 Opt 16: Wheel-30 Sieve for compute_b
+
+**Goal**: Apply same mod-30 wheel sieve approach from D (Opt 15) to compute_b.
+
+**Implementation**: Converted B's odd-only sieve to wheel-30 format:
+- 8 bits per 30 numbers (was 1 bit per 2 numbers)
+- PreSieveTemplate for {7,11,13,17} replaces 6 manual mask arrays
+- Per-residue cross-off with 4x-unrolled word-level access
+- pi(n) = 3 + wheel_count(n) to account for primes {2,3,5} outside wheel
+- num_to_wheel_pos(xp, 0) converts x/p to global wheel-bit position
+
+**Critical discovery — segment size matters for per-residue approach**:
+- With 4096-word (32KB) segments: B REGRESSED from 20.4s to 24.7s!
+- Root cause: per-residue setup overhead (8 × first_q computation per prime per segment)
+  cancels the 47% cross-off savings when there are too many segments.
+- B has ~332K segments (vs D's ~9K), so the 8-residue setup runs 82 billion times.
+- With 16384-word (128KB) segments: B improved to 18.3s ✓
+- With 32768-word (256KB) segments: B improved to 17.9s ✓
+- L2-sized segments reduce segment count 8× (332K → 41K), cutting setup overhead 8×.
+
+**Optimization: hoist invariant computation**: min_q and base_q depend only on (p, low_num),
+not on the residue r. Moved outside the 8-residue inner loop.
+
+**Result at Max i64**: B=17.9s (was 20.4s, -12.3%). AC=17.9s (was 20.3s, -11.8%).
+D=21.7s (was 21.3s, unchanged within noise). Wall time=23.8s (was 23.5s).
+
+**Key finding**: D is now the bottleneck (21.7s), not B or AC (17.9s each).
+Wall time limited by D. Need to either speed up D or retune alpha to rebalance.
+
+---
+
+### V7 Opt 17: Alpha retune with wheel B/D (IN PROGRESS)
+
+**Rationale**: With wheel-30 for both B and D, the cost ratio between components
+has shifted. B and AC are now faster relative to D. Increasing alpha_y shifts work
+from D to B/AC, which should improve overall balance.
 cached sieves. The wheel's benefit comes from eliminating iterations, not from
 faster per-iteration execution. Byte-level stepping with lookup tables is SLOWER
 per-step than uniform word-level stepping, even though it follows the optimal order.

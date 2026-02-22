@@ -1163,6 +1163,7 @@ struct ValidM {
     lpf: u16,    // clamped at u16::MAX (primes[b] always < u16::MAX for Type 1)
     mu_val: i8,
     _pad: u8,
+    recip_m: u64, // precomputed (1 << 64) / m for fast division
 }
 
 fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
@@ -1195,6 +1196,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 lpf: std::cmp::min(lpf[m] as u32, u16::MAX as u32) as u16,
                 mu_val: mu[m],
                 _pad: 0,
+                recip_m: ((1u128 << 64) / m as u128) as u64,
             }).collect()
     } else { vec![] };
 
@@ -1301,7 +1303,8 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                     let mut running_count: i64 = 0;
                     for v in valid_m_list[vm_start..vm_end].iter().rev() {
                         if prime < v.lpf as u64 {
-                            let xpm = (x_div_prime / v.m as u64) as usize;
+                            let xpm = fast_div(x_div_prime, v.m as u64,
+                                v.recip_m) as usize;
                             if xpm > low && xpm < high {
                                 let pos = num_to_wheel_pos(xpm, low);
                                 let count = match prev_pos {
@@ -1439,7 +1442,8 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
                 let mut running_count: i64 = 0;
                 for v in valid_m_list[vm_start..vm_end].iter().rev() {
                     if prime < v.lpf as u64 {
-                        let xpm = (x_div_prime / v.m as u64) as usize;
+                        let xpm = fast_div(x_div_prime, v.m as u64,
+                            v.recip_m) as usize;
                         if xpm > low && xpm < high {
                             let pos = num_to_wheel_pos(xpm, low);
                             let count = match prev_pos {
