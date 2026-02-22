@@ -8,6 +8,59 @@ use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+// ── Primesieve FFI bindings ──────────────────────────────────────────────────
+#[repr(C)]
+struct PrimesieveIterator {
+    i: usize,
+    size: usize,
+    start: u64,
+    stop_hint: u64,
+    primes: *mut u64,
+    memory: *mut std::ffi::c_void,
+    is_error: i32,
+}
+
+extern "C" {
+    fn primesieve_init(it: *mut PrimesieveIterator);
+    fn primesieve_free_iterator(it: *mut PrimesieveIterator);
+    fn primesieve_jump_to(it: *mut PrimesieveIterator, start: u64, stop_hint: u64);
+    fn primesieve_generate_next_primes(it: *mut PrimesieveIterator);
+    fn primesieve_set_num_threads(num_threads: i32);
+    fn primesieve_count_primes(start: u64, stop: u64) -> u64;
+}
+
+impl PrimesieveIterator {
+    fn new() -> Self {
+        let mut it = PrimesieveIterator {
+            i: 0, size: 0, start: 0, stop_hint: 0,
+            primes: std::ptr::null_mut(),
+            memory: std::ptr::null_mut(),
+            is_error: 0,
+        };
+        unsafe { primesieve_init(&mut it); }
+        it
+    }
+
+    fn jump_to(&mut self, start: u64, stop_hint: u64) {
+        unsafe { primesieve_jump_to(self, start, stop_hint); }
+    }
+
+    #[inline]
+    fn next_prime(&mut self) -> u64 {
+        self.i += 1;
+        if self.i >= self.size {
+            unsafe { primesieve_generate_next_primes(self); }
+        }
+        unsafe { *self.primes.add(self.i) }
+    }
+}
+
+impl Drop for PrimesieveIterator {
+    fn drop(&mut self) {
+        unsafe { primesieve_free_iterator(self); }
+    }
+}
+
 // ── Gourdon's Algorithm ──────────────────────────────────────────────────────
 //
 // Formula: π(x) = A - B + C + D + Φ₀ + Σ
@@ -493,36 +546,9 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
 
     if xp_wheel_asc.is_empty() || max_xp < 2 { return 0; }
 
-    // Sieving primes ≥ 19 from BigPiTable (7,11,13,17 pre-sieved via wheel template)
-    let sqrt_maxp = isqrt(max_xp as u64) as usize;
-    let mut sieve_primes: Vec<usize> = Vec::new();
-    if sqrt_maxp >= 19 {
-        let sp_s = (19 - 1) / 2;
-        let sp_e = (sqrt_maxp - 1) / 2;
-        for word_idx in (sp_s / 64)..=(sp_e / 64) {
-            let mut w = big_pi.bits_word(word_idx);
-            if word_idx == sp_s / 64 {
-                let sb = sp_s % 64;
-                if sb > 0 { w &= !((1u64 << sb) - 1); }
-            }
-            if word_idx == sp_e / 64 {
-                let eb = sp_e % 64;
-                if eb < 63 { w &= (1u64 << (eb + 1)) - 1; }
-            }
-            while w != 0 {
-                let bit = w.trailing_zeros() as usize;
-                w &= w - 1;
-                sieve_primes.push(2 * (word_idx * 64 + bit) + 1);
-            }
-        }
-    }
-
-    // Wheel-30 pre-sieve template for {7,11,13,17} (2,3,5 implicit in wheel)
-    let b_tiny: [u32; 8] = [0, 2, 3, 5, 7, 11, 13, 17];
-    let tpl = PreSieveTemplate::new(&b_tiny, 7);
-
+    // Use primesieve for the segmented sieve — much faster than our custom sieve
     // Segment parameters in wheel-30 format (8 bits per 30 numbers)
-    let seg_words: usize = 32768; // 256KB = L2, minimizes per-segment overhead
+    let seg_words: usize = 32768; // 256KB
     let seg_bits = seg_words * 64;
     let seg_nums = seg_words * 240; // 1 word = 8 groups × 30 numbers = 240 numbers
     let groups_per_seg = seg_words * 8;
@@ -541,6 +567,9 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
         xp_wheel_asc.partition_point(|&v| v < chunk_bit_start)
     }).collect();
 
+    // Set primesieve to single-threaded (we parallelize at chunk level)
+    unsafe { primesieve_set_num_threads(1); }
+
     let chunk_results: Vec<(i64, u64, usize)> = (0..nchunks).into_par_iter().map(|k| {
         let seg_lo = k * chunk_segs;
         let seg_hi = std::cmp::min(seg_lo + chunk_segs, num_segs);
@@ -553,63 +582,42 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
         let mut buf = vec![0u64; seg_words];
         let mut seg_prefix = vec![0u64; seg_words + 1];
 
-        let tpl_period_bits = tpl.period * 8;
+        // Initialize primesieve iterator for this chunk's range
+        let chunk_start_num = (seg_lo * seg_nums) as u64;
+        let chunk_end_num = std::cmp::min((seg_hi * seg_nums) as u64, max_xp as u64 + 30);
+        let mut ps_iter = PrimesieveIterator::new();
+        // Start at 7 for first chunk (skip 2,3,5), otherwise at chunk start
+        let iter_start = if chunk_start_num < 7 { 7 } else { chunk_start_num };
+        ps_iter.jump_to(iter_start, chunk_end_num);
+        let mut next_prime = ps_iter.next_prime();
 
         for seg in seg_lo..seg_hi {
             let low_num = seg * seg_nums;
             let seg_groups = std::cmp::min(groups_per_seg, total_groups.saturating_sub(seg * groups_per_seg));
             let seg_nbits = seg_groups * 8;
             let seg_nw = (seg_nbits + 63) / 64;
-
-            // Init from wheel-30 pre-sieve template
-            let tpl_start_bit = ((low_num / 30) % tpl.period) * 8;
-            let mut tpl_pos = tpl_start_bit;
-            for w in 0..seg_nw {
-                unsafe { *buf.get_unchecked_mut(w) = tpl.get_word(tpl_pos); }
-                tpl_pos += 64;
-                if tpl_pos >= tpl_period_bits { tpl_pos -= tpl_period_bits; }
-            }
-            let excess = seg_nw * 64 - seg_nbits;
-            if excess > 0 { buf[seg_nw - 1] &= u64::MAX >> excess; }
-
-            // Seg 0: clear bit 0 (number 1 is not prime), restore primes 7,11,13,17
-            if seg == 0 {
-                buf[0] = (buf[0] & !1u64) | 0b11110;
-            }
-
-            // Cross off composites for primes ≥ 19 (per-residue wheel-30)
             let end_num = low_num + seg_groups * 30;
-            let max_p = isqrt(end_num as u64) as usize;
-            let sp_end = sieve_primes.partition_point(|&p| p <= max_p);
-            for &p in &sieve_primes[..sp_end] {
-                let step = p * 8;
-                let min_q = std::cmp::max(p, (low_num + p - 1) / p);
-                let base_q = (min_q / 30) * 30;
-                for r_idx in 0..8 {
-                    let r = WHEEL30_RESIDUES[r_idx];
-                    let bit_in_group = MOD30_TO_IDX[(p * r) % 30] as usize;
-                    let first_q = if base_q + r >= min_q { base_q + r } else { base_q + 30 + r };
-                    let first_composite = p * first_q;
-                    if first_composite >= end_num { continue; }
 
-                    let mut pos = ((first_composite - low_num) / 30) * 8 + bit_in_group;
-                    while pos + step * 3 < seg_nbits {
-                        unsafe {
-                            *buf.get_unchecked_mut(pos >> 6) &= !(1u64 << (pos & 63));
-                            let p1 = pos + step;
-                            *buf.get_unchecked_mut(p1 >> 6) &= !(1u64 << (p1 & 63));
-                            let p2 = pos + step * 2;
-                            *buf.get_unchecked_mut(p2 >> 6) &= !(1u64 << (p2 & 63));
-                            let p3 = pos + step * 3;
-                            *buf.get_unchecked_mut(p3 >> 6) &= !(1u64 << (p3 & 63));
+            // Zero the buffer
+            for w in 0..seg_nw { unsafe { *buf.get_unchecked_mut(w) = 0; } }
+
+            // Fill bitmap with primes from primesieve iterator
+            while next_prime < end_num as u64 {
+                if next_prime >= low_num as u64 {
+                    let offset = (next_prime as usize) - low_num;
+                    let group = offset / 30;
+                    let r = offset % 30;
+                    let idx = MOD30_TO_IDX[r];
+                    if idx != 255 {
+                        let pos = group * 8 + idx as usize;
+                        if pos < seg_nbits {
+                            unsafe {
+                                *buf.get_unchecked_mut(pos >> 6) |= 1u64 << (pos & 63);
+                            }
                         }
-                        pos += step * 4;
-                    }
-                    while pos < seg_nbits {
-                        unsafe { *buf.get_unchecked_mut(pos >> 6) &= !(1u64 << (pos & 63)); }
-                        pos += step;
                     }
                 }
+                next_prime = ps_iter.next_prime();
             }
 
             seg_prefix[0] = 0;
