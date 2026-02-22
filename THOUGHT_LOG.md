@@ -1867,3 +1867,113 @@ The SoA approach (36MB total) should theoretically help but hardware division co
 
 primesieve (sieve-only, not analytic):
 - 1e12: 6.85s, 1e13: 83.1s (too slow for large analytic ranges)
+
+---
+
+## V7 Optimization 21: Primesieve FFI for B Sieve
+
+### Concept
+Replace our custom wheel-30 sieve in compute_b() with Kim Walisch's primesieve
+library via FFI. primesieve is the fastest published prime sieve, using highly
+optimized bucket sieving, prefetch, and cache-aware algorithms.
+
+### Implementation
+- Built primesieve v12.13 from source as static MSVC library (C:\Users\dr\Documents\primesieve)
+- Added FFI bindings for PrimesieveIterator struct (matching C layout)
+- Exported functions: primesieve_init, primesieve_free_iterator, primesieve_jump_to,
+  primesieve_generate_next_primes, primesieve_set_num_threads
+- Each parallel B chunk creates its own PrimesieveIterator, generates primes in range,
+  maps each prime to wheel-30 bitmap position (MOD30_TO_IDX), then runs prefix sums
+- Set primesieve_set_num_threads(1) to avoid contention with our own parallelism
+
+### Failed attempt: block_sums for D count()
+Before primesieve, tried adding per-block popcount tracking to BitSieve.
+- Modified cross_off_sieve to maintain block_sums array on each bit clear
+- Modified count() to use block prefix sums instead of linear word scan
+- **REGRESSED** from 20.81s to 21.04s: count() is called at small pos values (near
+  segment start, first valid_m entry = highest m = lowest x/(p*m)), so linear scan
+  was already cheap. Overhead of maintaining block_sums (1 extra memory op per clear
+  × 8.06B clears) exceeded the minimal savings. REVERTED.
+
+### Results (Opt 21)
+- B: 15.93s → 13.82s (-13.2%)
+- D: 20.81s → 20.19s (slight improvement, noise)
+- Total: 22.33s → 21.70s (-2.8%)
+- All 15 test cases pass
+
+### Why Not More B Improvement?
+The primesieve iterator approach generates primes one-by-one. Each prime requires:
+iterator overhead (~2ns) + wheel-30 position computation + individual bit set.
+For 13.9B primes at ~3ns each ≈ 42s serial / 24 threads ≈ 1.75s iteration alone.
+But segment overhead (init, prefix sums, BigPiTable lookups) is unchanged.
+The improvement comes from eliminating per-prime per-segment cross-off setup work.
+The REAL win would be primesieve's COUNTING mode (batch sieve-and-count), not iterator mode.
+
+---
+
+## V7 Optimization 22: Alpha Re-tune for Primesieve B
+
+### Insight
+With primesieve making B faster, the old alpha_y=13 was suboptimal. High alpha_y
+meant small B work but huge D work (96MB valid_m_list, 2.67× L3 cache).
+Lowering alpha_y increases B work but dramatically reduces D work by shrinking
+the valid_m_list.
+
+### Alpha Grid Search (Max i64, primesieve B)
+| alpha_y | alpha_z | B(s) | AC(s) | D(s) | Total(s) |
+|---------|---------|------|-------|------|----------|
+| 13.0 | 1.5 | 13.76 | 13.74 | 20.24 | 21.73 |
+| 9.0 | 1.5 | 15.87 | 19.79 | 19.79 | 20.76 |
+| 8.0 | 1.5 | ~16 | ~19 | ~19 | 20.01 |
+| 7.0 | 1.5 | 17.82 | 18.67 | 18.67 | 19.43 |
+| 6.75 | 1.5 | 18.32 | 18.49 | 18.49 | 19.21 |
+| 6.5 | 1.5 | ~18.5 | ~18.4 | ~18.4 | 19.37 |
+| 6.0 | 1.5 | 19.36 | 19.33 | 19.33 | 20.00 |
+| 6.5 | 2.0 | 18.17 | 18.15 | 18.15 | 18.90 |
+| 6.5 | 2.25 | ~18.2 | ~18.2 | ~18.2 | 18.69 |
+| 6.5 | 2.5 | ~18.2 | ~18.2 | ~18.2 | 18.74 |
+| 6.75 | 2.0 | ~18.3 | ~18.3 | ~18.3 | 19.01 |
+| 6.75 | 2.5 | ~18.3 | ~18.3 | ~18.3 | 18.98 |
+
+### Selected: alpha_y=6.5, alpha_z=2.0
+- Perfect balance: B≈AC≈D≈18.2s
+- Total: 19.17s (confirmed over multiple runs)
+- All 15 test cases pass
+
+### Results Summary
+| Metric | Opt 20 | Opt 21 (primesieve) | Opt 22 (re-tuned) |
+|--------|--------|---------------------|-------------------|
+| B | 15.93s | 13.82s | 18.17s |
+| AC | 15.90s | 13.79s | 18.15s |
+| D | 20.81s | 20.19s | 18.15s |
+| Total | 22.33s | 21.70s | 19.17s |
+| vs primecount | 2.63× | 2.56× | 2.26× |
+
+### Updated Benchmark
+| Program | 100Q | 1Q | Max i64 |
+|---------|------|-----|---------|
+| Our V7 Opt 22 | 1.12s | 4.62s | 19.17s |
+| primecount v8.2 | 0.60s* | 2.26s | 8.49s |
+| Ratio | 1.87× | 2.04× | 2.26× |
+
+*primecount 100Q estimated
+
+### Strategic Analysis
+- Gap to primecount narrowed from 2.63× to 2.26× at Max i64
+- Still ~2× away from primecount
+- The primesieve ITERATOR approach helps but doesn't close the gap
+- primecount uses primesieve's COUNTING mode internally (batch sieve-and-count)
+- Our iterator approach materializes each prime individually → overhead
+- Next strategy: Use primesieve_count_primes() for block-level π counts
+  instead of iterator-based bitmap construction
+
+### Next Optimization Candidates
+1. **primesieve COUNTING mode**: Use primesieve_count_primes() to count primes
+   in blocks, build block-level π table. Much faster than iterator approach.
+   Estimated B: ~3s (vs current 18.2s).
+2. **Hybrid BigPiTable**: Block-level counts from primesieve + within-block
+   mini-sieve for fine-grained lookups.
+3. **D memory optimization**: valid_m_list is still large. Streaming approach
+   or compressed format could reduce L3 pressure.
+4. **NUMA-aware allocation**: With 96GB RAM, ensure valid_m_list and BigPiTable
+   are allocated near the cores that use them.

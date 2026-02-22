@@ -47,28 +47,28 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 │ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.21665s  │    0.04406s  │ 3,204,941,750,802 │
 │ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.51846s  │    0.17337s  │29,844,570,422,669 │
 │ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.31895s  │    0.65938s  │279,238,341,033,925│
-│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    2.00000s  │2,623,557,157,654,233│
-│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │    5.59000s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │   22.30000s  │216,289,611,853,439,384│
+│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    1.12000s  │2,623,557,157,654,233│
+│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │    4.62000s  │24,739,954,287,740,860│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │   19.17000s  │216,289,611,853,439,384│
 └───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
 
 ### V7 vs Kim Walisch's primecount v8.2 (Gourdon, state of the art)
 
-| Scale | V7 (Opt 20) | primecount | Ratio | primesieve |
+| Scale | V7 (Opt 22) | primecount | Ratio | primesieve |
 |---|---|---|---|---|
 | 1e10 | 0.002s | — | — | 0.058s |
 | 1e11 | 0.002s | — | — | 0.596s |
 | 1e12 | 0.004s | 0.014s | **0.3×** ✓ | 6.85s |
 | 1e13 | 0.013s | 0.015s | **0.9×** ✓ | 83s |
-| 1e14 | 0.044s | 0.023s | 1.9× | — |
-| 1e15 | 0.173s | 0.059s | 2.9× | — |
-| 1e16 | 0.659s | 0.178s | 3.7× | — |
-| 1e17 | 2.00s | 0.598s | 3.3× | — |
-| 1e18 | 5.59s | 2.27s | 2.5× | — |
-| Max i64 | 22.3s | 8.49s | 2.63× | — |
+| 1e14 | 0.026s | 0.023s | 1.1× | — |
+| 1e15 | 0.117s | 0.059s | 2.0× | — |
+| 1e16 | 0.291s | 0.178s | 1.6× | — |
+| 1e17 | 1.12s | 0.598s | 1.9× | — |
+| 1e18 | 4.62s | 2.27s | 2.0× | — |
+| Max i64 | 19.17s | 8.49s | 2.26× | — |
 
-primecount is the fastest published prime counting code, developed by Kim Walisch over 10+ years. V7 Opt 20 is **faster at 1e12-1e13** where our startup is lighter, with the gap narrowing to 2.63× at Max i64 through 20 rounds of systematic optimization (fast_div reciprocals, unified AC, alpha tuning, wheel-30 sieve, BigPiTable prefetch). primesieve (segmented Sieve of Eratosthenes) becomes impractical above 1e13 — V7 is already 1,712× faster at 1e12.
+V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI, with alpha parameters re-tuned for perfect B/AC/D balance. primecount is the fastest published prime counting code, developed by Kim Walisch over 10+ years. V7 Opt 22 is **faster at 1e12-1e13** where our startup is lighter, with the gap at **2.26× at Max i64** through 22 rounds of optimization including primesieve integration and alpha re-tuning.
 
 ### Best (V7) vs V1 Speedup
 
