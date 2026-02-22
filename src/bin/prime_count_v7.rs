@@ -2,6 +2,8 @@ use mimalloc::MiMalloc;
 use primal::Sieve;
 use rayon::prelude::*;
 use std::time::Instant;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -331,6 +333,18 @@ impl BigPiTable {
         count += (unsafe { *self.bits.get_unchecked(word) } & mask).count_ones() as u64;
         count
     }
+
+    #[inline(always)]
+    #[cfg(target_arch = "x86_64")]
+    fn prefetch(&self, n: usize) {
+        if n >= 3 {
+            let word = (n - 1) / 2 / 64;
+            unsafe {
+                _mm_prefetch(self.bits.as_ptr().add(word) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(self.prefix.as_ptr().add(word) as *const i8, _MM_HINT_T0);
+            }
+        }
+    }
 }
 
 // ── Sigma: 7 correction formulas ─────────────────────────────────────────────
@@ -567,8 +581,19 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 l -= 1;
             }
 
-            // Sparse region (4x unrolled)
+            // Sparse region (4x unrolled with prefetch)
             while l > pi_min + 3 && l + 3 < primes.len() {
+                // Prefetch next iteration's 4 BigPiTable lookups
+                if l > pi_min + 7 {
+                    let pf0 = fast_div(xp, primes[l-4] as u64, recip[l-4]) as usize;
+                    let pf1 = fast_div(xp, primes[l-5] as u64, recip[l-5]) as usize;
+                    let pf2 = fast_div(xp, primes[l-6] as u64, recip[l-6]) as usize;
+                    let pf3 = fast_div(xp, primes[l-7] as u64, recip[l-7]) as usize;
+                    big_pi.prefetch(std::cmp::min(pf0, sqrt_x));
+                    big_pi.prefetch(std::cmp::min(pf1, sqrt_x));
+                    big_pi.prefetch(std::cmp::min(pf2, sqrt_x));
+                    big_pi.prefetch(std::cmp::min(pf3, sqrt_x));
+                }
                 let xpq0 = fast_div(xp, primes[l] as u64, recip[l]) as usize;
                 let xpq1 = fast_div(xp, primes[l-1] as u64, recip[l-1]) as usize;
                 let xpq2 = fast_div(xp, primes[l-2] as u64, recip[l-2]) as usize;
@@ -614,18 +639,51 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             let mut local = 0i64;
 
             // x/pq >= y: sum += π(x/pq)
-            for i in min_i..=max_i1 {
-                if i >= primes.len() { break; }
-                let xpq = fast_div(xp, primes[i] as u64, recip[i]) as usize;
-                local += big_pi.pi(std::cmp::min(xpq, sqrt_x)) as i64;
+            {
+                let mut i = min_i;
+                while i + 3 <= max_i1 && i + 3 < primes.len() {
+                    // Prefetch next 4
+                    if i + 7 <= max_i1 && i + 7 < primes.len() {
+                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+4] as u64, recip[i+4]) as usize, sqrt_x));
+                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+5] as u64, recip[i+5]) as usize, sqrt_x));
+                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+6] as u64, recip[i+6]) as usize, sqrt_x));
+                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+7] as u64, recip[i+7]) as usize, sqrt_x));
+                    }
+                    local += big_pi.pi(std::cmp::min(fast_div(xp, primes[i] as u64, recip[i]) as usize, sqrt_x)) as i64
+                           + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+1] as u64, recip[i+1]) as usize, sqrt_x)) as i64
+                           + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+2] as u64, recip[i+2]) as usize, sqrt_x)) as i64
+                           + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+3] as u64, recip[i+3]) as usize, sqrt_x)) as i64;
+                    i += 4;
+                }
+                while i <= max_i1 && i < primes.len() {
+                    let xpq = fast_div(xp, primes[i] as u64, recip[i]) as usize;
+                    local += big_pi.pi(std::cmp::min(xpq, sqrt_x)) as i64;
+                    i += 1;
+                }
             }
 
             // x/pq < y: sum += 2 · π(x/pq)
             let i_start = std::cmp::max(max_i1 + 1, min_i);
-            for i in i_start..=max_i {
-                if i >= primes.len() { break; }
-                let xpq = fast_div(xp, primes[i] as u64, recip[i]) as usize;
-                local += 2 * big_pi.pi(std::cmp::min(xpq, sqrt_x)) as i64;
+            {
+                let mut i = i_start;
+                while i + 3 <= max_i && i + 3 < primes.len() {
+                    if i + 7 <= max_i && i + 7 < primes.len() {
+                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+4] as u64, recip[i+4]) as usize, sqrt_x));
+                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+5] as u64, recip[i+5]) as usize, sqrt_x));
+                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+6] as u64, recip[i+6]) as usize, sqrt_x));
+                        big_pi.prefetch(std::cmp::min(fast_div(xp, primes[i+7] as u64, recip[i+7]) as usize, sqrt_x));
+                    }
+                    local += 2 * (big_pi.pi(std::cmp::min(fast_div(xp, primes[i] as u64, recip[i]) as usize, sqrt_x)) as i64
+                                + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+1] as u64, recip[i+1]) as usize, sqrt_x)) as i64
+                                + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+2] as u64, recip[i+2]) as usize, sqrt_x)) as i64
+                                + big_pi.pi(std::cmp::min(fast_div(xp, primes[i+3] as u64, recip[i+3]) as usize, sqrt_x)) as i64);
+                    i += 4;
+                }
+                while i <= max_i && i < primes.len() {
+                    let xpq = fast_div(xp, primes[i] as u64, recip[i]) as usize;
+                    local += 2 * big_pi.pi(std::cmp::min(xpq, sqrt_x)) as i64;
+                    i += 1;
+                }
             }
 
             local
@@ -1209,10 +1267,23 @@ fn count_primes(x: u64) -> u64 {
 
     // B uses its own BigPiTable (parallel construction + parallel lookups)
     // Run B, D, AC all concurrently — they share the rayon pool
+    let show_timing = std::env::var("SHOW_TIMING").is_ok();
     let (ac, d, b_val) = std::thread::scope(|s| {
-        let b_handle = s.spawn(|| compute_b(x, y, pi_y));
-        let ac_handle = s.spawn(|| compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi));
+        let b_handle = s.spawn(|| {
+            let t = Instant::now();
+            let r = compute_b(x, y, pi_y);
+            if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
+            r
+        });
+        let ac_handle = s.spawn(|| {
+            let t = Instant::now();
+            let r = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi);
+            if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
+            r
+        });
+        let t = Instant::now();
         let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth);
+        if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
         let ac = ac_handle.join().unwrap();
         let b_val = b_handle.join().unwrap();
         (ac, d, b_val)
