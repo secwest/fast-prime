@@ -1288,6 +1288,80 @@ Table:
 **Results — MASSIVE improvement**:
 - 100Q: 2.74s (Opt 2: 2.76s, same)
 - 1Q: 10.8s (Opt 2: 16.4s, **1.52x faster**)
+
+---
+
+## V7 Opt 13: Alpha Retune for Balanced D
+
+**Context**: After Opt 12 balanced D chunks, the component balance shifted. Re-swept alpha_y.
+
+**Findings**:
+- alpha_y=13.5 optimal at Max i64 (was 9.8), saves 15%: 29.1→24.9s
+- 1e17: alpha_y=10 (was 8), 1e18: alpha_y=12 (was 9)
+- alpha_z=2.0 still optimal
+
+## V7 Opt 14: AC Profiling + B Pre-sieve
+
+**AC Profiling** — discovered 33.4B BigPiTable lookups at Max i64:
+- A: 27.4B lookups (82% of total, random access to 378MB table)
+- C2: 6.06B lookups (clustering saves 2.59B)
+- Per-lookup: ~8ns (97% L2/L3 hit rate via 4-ahead prefetch)
+
+**SegmentedPiTable attempts** — BOTH FAILED:
+1. Per-segment parallel: load imbalance (155K sequential b-iters near sqrt_x)
+2. Per-b thread cache (128K segments): 0% hit rate, step > segment size
+
+**Conclusion**: Current prefetch achieves near-optimal memory perf for AC.
+
+**B changes**: Added pre-sieve for prime 17, increased nchunks to 768. Marginal.
+
+**Other experiments**:
+- Sequential B/AC/D: MUCH slower (39.2s) — D doesn't scale past 8 threads
+- Deeper AC prefetch (8-12 ahead): no improvement (prefetch distance already sufficient)
+
+## V7 Opt 15: Mod-30 Wheel Sieve for D — 24.7s → 23.5s
+
+**Concept**: Replace odd-only sieve with mod-30 wheel (8 bits/30 numbers vs 1 bit/2 numbers).
+Theoretical 1.875× fewer cross-off operations.
+
+**First attempt — byte-level wheel stepping**: Precomputed 8×8 lookup tables for
+byte advance and bit-to-clear per step. CORRECT but NOT FASTER (~22.5s, same as before).
+Root cause: 4 extra cycles of lookup table overhead per cross-off canceled the 47% reduction.
+The old 4x-unrolled word-level code was ~3 cycles/cross; wheel stepping was ~7 cycles/cross.
+
+**Second attempt — per-residue cross-off**: Process each of the 8 coprime residues
+separately with UNIFORM step (p*8 bits in wheel space). This allows 4x-unrolled
+word-level access (same perf as old code) while achieving 47% fewer total crosses.
+
+**Result**: D=21.3s (was 22.5s, -5.3%). Wall time 23.5s (was 24.7s, -4.9%).
+B and AC also benefit from freed rayon threads: B=20.4s, AC=20.3s (from 22.5s).
+
+**PreSieveTemplate change**: Now pre-sieves {7,11,13,17} only (2,3,5 implicit in wheel).
+Period = 17017 bytes (was 510510 odd-indices). Template ~17KB fits L1.
+
+**Key insight**: Per-operation overhead matters MORE than total operation count for
+cached sieves. The wheel's benefit comes from eliminating iterations, not from
+faster per-iteration execution. Byte-level stepping with lookup tables is SLOWER
+per-step than uniform word-level stepping, even though it follows the optimal order.
+
+## Current Performance at Max i64
+
+| Component | V7 Opt 13 | V7 Opt 15 | Improvement |
+|-----------|-----------|-----------|-------------|
+| Setup     | 2.11s     | 2.12s     | —           |
+| B         | 22.6s     | 20.4s     | -9.7%       |
+| AC        | 22.5s     | 20.3s     | -9.8%       |
+| D         | 22.5s     | 21.3s     | -5.3%       |
+| **Wall**  | **24.9s** | **23.5s** | **-5.6%**   |
+
+primecount: 8.52s = 2.76× faster (was 2.92×).
+
+## Next Steps
+
+1. **Wheel sieve for B** — B is still odd-only. Converting to wheel-30 should save ~38% of B.
+2. **Higher alpha_y** — with faster D, alpha can increase further (primecount uses 17).
+3. **SegmentedPiTable for AC** — different algorithm structure needed (iterate sieve segments).
+4. **k=8 PhiTinyCache** — compressed bitset to eliminate crosses for primes 19, 23.
 - Max i64: 95.4s (Opt 2: ~200s, **2.1x faster**)
 
 Cumulative V7 vs V6:

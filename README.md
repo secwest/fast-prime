@@ -55,20 +55,20 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 
 ### V7 vs Kim Walisch's primecount v8.2 (Gourdon, state of the art)
 
-| Scale | V7 (Opt 11) | primecount | Ratio | primesieve |
+| Scale | V7 (Opt 15) | primecount | Ratio | primesieve |
 |---|---|---|---|---|
 | 1e10 | 0.005s | — | — | 0.054s |
-| 1e11 | 0.005s | — | — | 0.565s |
+| 1e11 | 0.004s | — | — | 0.565s |
 | 1e12 | 0.006s | 0.014s | **0.4×** ✓ | 6.85s |
-| 1e13 | 0.015s | 0.015s | **1.0×** ✓ | 84s |
-| 1e14 | 0.032s | 0.023s | 1.4× | — |
-| 1e15 | 0.108s | 0.059s | 1.8× | — |
-| 1e16 | 0.477s | 0.178s | 2.7× | — |
-| 1e17 | 1.94s | 0.598s | 3.2× | — |
-| 1e18 | 8.26s | 2.279s | 3.6× | — |
-| Max i64 | 31.40s | 8.520s | 3.7× | — |
+| 1e13 | 0.010s | 0.015s | **0.7×** ✓ | 84s |
+| 1e14 | 0.024s | 0.023s | 1.0× | — |
+| 1e15 | 0.099s | 0.059s | 1.7× | — |
+| 1e16 | 0.334s | 0.178s | 1.9× | — |
+| 1e17 | 1.34s | 0.598s | 2.2× | — |
+| 1e18 | 5.99s | 2.279s | 2.6× | — |
+| Max i64 | 23.5s | 8.520s | 2.76× | — |
 
-primecount is the fastest published prime counting code, developed by Kim Walisch over 10+ years. V7 Opt 11 is within 1.0-3.7× of it at large scales, and **faster at 1e12** where our startup is lighter. The gap has closed from 6.0× to 3.7× at Max i64 through systematic optimization. primesieve (segmented Sieve of Eratosthenes) becomes impractical above 1e12 — V7 is already 3,400× faster at that scale.
+primecount is the fastest published prime counting code, developed by Kim Walisch over 10+ years. V7 Opt 15 is within 0.4-2.8× of it at large scales, and **faster at 1e12-1e13** where our startup is lighter. The gap has closed from 3.7× to 2.76× at Max i64 through systematic optimization (mod-30 wheel sieve, alpha retuning, work-balanced D). primesieve (segmented Sieve of Eratosthenes) becomes impractical above 1e12 — V7 is already 3,400× faster at that scale.
 
 ### Best (V7) vs V1 Speedup
 
