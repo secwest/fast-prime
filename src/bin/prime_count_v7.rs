@@ -1553,6 +1553,13 @@ fn count_primes(x: u64) -> u64 {
 }
 
 fn main() {
+    // Oversubscribe rayon thread pool for better work-stealing across B/AC/D
+    let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(24);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_cpus * 3)
+        .build_global()
+        .ok();
+
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  Prime Counter V7 — Gourdon's Algorithm                    ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
