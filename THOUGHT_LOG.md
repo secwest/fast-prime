@@ -1977,3 +1977,47 @@ the valid_m_list.
    or compressed format could reduce L3 pressure.
 4. **NUMA-aware allocation**: With 96GB RAM, ensure valid_m_list and BigPiTable
    are allocated near the cores that use them.
+
+---
+
+## V7 Optimization 23: Streaming Merge for B
+
+### Insight
+The Opt 21-22 approach built a wheel-30 bitmap in each B segment: iterate
+primesieve primes → set individual bits in bitmap → build prefix sums → do
+lookups. This has overhead from zeroing buffers, MOD30 computation, bit-setting,
+and prefix sum building (32K popcounts per segment).
+
+Key observation: we don't NEED the bitmap! If both primes and x/p values are
+in ascending order, we can merge them with a simple running counter:
+```
+while p <= v: running++; p = next_prime()
+sum += running
+```
+
+### Implementation
+- Collect actual x/p values (not wheel positions) in ascending order
+- Divide value range [sqrt_x+1, max_xp] into nchunks = nthreads × 8
+- For each chunk (parallel): start primesieve iterator, merge with xp values
+- After last xp in chunk, continue iterating to count total primes (for prefix)
+- Post-hoc: apply prefix corrections (same pattern as before)
+
+### Results (alpha_y=6.0, alpha_z=2.0)
+- B: 18.17s → 16.49s (streaming merge)
+- Total: 19.17s → 17.36s (-9.4%)
+- All 15 test cases pass
+- vs primecount: 2.04× (was 2.26×)
+
+### Benchmark (Max i64)
+| Metric | Opt 20 | Opt 22 | Opt 23 |
+|--------|--------|--------|--------|
+| B | 15.93s | 18.17s | 16.49s |
+| D | 20.81s | 18.15s | 16.46s |
+| Total | 22.33s | 19.17s | 17.36s |
+| vs primecount | 2.63× | 2.26× | 2.04× |
+
+### Next optimization targets
+- D valid_m_list memory latency (~75MB vs 36MB L3)
+- Consider SoA for ValidM (separate m, recip_m arrays for cache efficiency)
+- Try reducing valid_m entries via better filtering
+- Explore different D chunking strategies
