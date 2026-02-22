@@ -898,7 +898,12 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     } else { vec![] };
 
     let target_segs = rayon::current_num_threads() * 32;
-    let segment_size = std::cmp::max(xz / std::cmp::max(target_segs, 1), 1 << 17).next_power_of_two();
+    let seg_cap = std::env::var("D_SEG_CAP").ok()
+        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(21);
+    let segment_size = std::cmp::max(
+        std::cmp::min(xz / std::cmp::max(target_segs, 1), 1usize << seg_cap),
+        1 << 17
+    ).next_power_of_two();
     let num_segments = if xz == 0 { 1 } else { (xz / segment_size) + 1 };
 
     if num_segments <= 2 {
@@ -1247,6 +1252,9 @@ fn count_primes(x: u64) -> u64 {
 
     let max_a_prime = isqrt(x / std::cmp::max(x_star, 1) as u64) as usize;
     let pi_table_limit = std::cmp::max(z, max_a_prime);
+    let show_timing = std::env::var("SHOW_TIMING").is_ok();
+
+    let t_setup = Instant::now();
     let pi_sieve = Sieve::new(pi_table_limit);
     let mut primes: Vec<u32> = vec![0];
     primes.extend(pi_sieve.primes_from(2).take_while(|&p| p <= y).map(|p| p as u32));
@@ -1255,19 +1263,19 @@ fn count_primes(x: u64) -> u64 {
     let phi_cache = PhiTinyCache::new(k);
     let pi = generate_pi(pi_table_limit, &pi_sieve);
     let (mu, lpf, y_smooth) = generate_tables(z, y);
+    if show_timing { eprintln!("  setup tables: {:.2}s", t_setup.elapsed().as_secs_f64()); }
 
     // BigPiTable for AC lookups (covers [0, √x])
+    let t_bpi = Instant::now();
     let big_pi = BigPiTable::new(sqrt_x);
+    if show_timing { eprintln!("  BigPiTable(AC): {:.2}s", t_bpi.elapsed().as_secs_f64()); }
 
     // Sigma
     let sigma = compute_sigma(x, y, x_star, &primes, &pi, &big_pi);
-
     // Phi0
     let phi0 = compute_phi0(x, y, z, k, &primes, &phi_cache);
 
-    // B uses its own BigPiTable (parallel construction + parallel lookups)
     // Run B, D, AC all concurrently — they share the rayon pool
-    let show_timing = std::env::var("SHOW_TIMING").is_ok();
     let (ac, d, b_val) = std::thread::scope(|s| {
         let b_handle = s.spawn(|| {
             let t = Instant::now();
