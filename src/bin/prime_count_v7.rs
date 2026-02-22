@@ -195,8 +195,7 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
     let logx = (x as f64).ln();
 
     // Lookup table tuned for Intel Core Ultra 9 285K (24 threads, 36MB L3)
-    // Re-tuned Opt 22: with primesieve B, optimal alpha_y drops to ~6.5
-    // Lower alpha_y → more B work but less D work → balanced at 18.2s each
+    // Re-tuned Opt 23: streaming merge B is faster → alpha_y=6.0 optimal
     // (logx, alpha_y, alpha_z)
     const TABLE: &[(f64, f64, f64)] = &[
         (20.0,  2.0, 1.5),   // x ~ 5e8
@@ -206,9 +205,9 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
         (32.2,  6.0, 2.0),   // x ~ 1e14
         (34.5,  6.0, 2.0),   // x ~ 1e15
         (36.8,  6.0, 2.0),   // x ~ 1e16
-        (39.1,  6.5, 2.0),   // x ~ 1e17
-        (41.4,  6.5, 2.0),   // x ~ 1e18
-        (43.6,  6.5, 2.0),   // x ~ Max i64
+        (39.1,  6.0, 2.0),   // x ~ 1e17
+        (41.4,  6.0, 2.0),   // x ~ 1e18
+        (43.6,  6.0, 2.0),   // x ~ Max i64
     ];
 
     let (alpha_y, alpha_z) = if logx <= TABLE[0].0 {
@@ -508,22 +507,21 @@ fn compute_phi0(x: u64, _y: usize, z: usize, k: usize,
 
 // ── B: equivalent to P2 ─────────────────────────────────────────────────────
 // Sum of π(x/p) for primes y < p ≤ √x.
-// Uses BigPiTable bits to iterate primes (eliminates redundant Sieve::new(√x)).
-// Pre-sieves 3,5,7,11,13 for faster segmented sieve over [0, x/y].
+// Streaming merge: iterate primes via primesieve and merge with sorted x/p
+// values. No bitmap construction, no prefix sums — just a running count.
 
 fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
     let sqrt_x = isqrt(x) as usize;
     if y >= sqrt_x { return 0; }
 
-    // Iterate BigPiTable bits in reverse to collect x/p values ascending
-    let bp_start = (y + 1) / 2;  // first odd-index > y
+    // Collect x/p values as actual numbers in ascending order
+    let bp_start = (y + 1) / 2;
     let bp_end = (sqrt_x - 1) / 2;
     if bp_start > bp_end { return 0; }
     let bp_sw = bp_start / 64;
     let bp_ew = bp_end / 64;
 
-    let mut xp_wheel_asc: Vec<usize> = Vec::new();
-    let mut max_xp: usize = 0;
+    let mut xp_asc: Vec<u64> = Vec::new();
     for word_idx in (bp_sw..=bp_ew).rev() {
         let mut w = big_pi.bits_word(word_idx);
         if word_idx == bp_sw {
@@ -534,125 +532,85 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
             let eb = bp_end % 64;
             if eb < 63 { w &= (1u64 << (eb + 1)) - 1; }
         }
-        // Extract bits high-to-low for descending p (ascending x/p)
         while w != 0 {
             let bit = 63 - w.leading_zeros() as usize;
             w ^= 1u64 << bit;
             let p = (2 * (word_idx * 64 + bit) + 1) as u64;
-            let xp = (x / p) as usize;
-            if xp > max_xp { max_xp = xp; }
-            xp_wheel_asc.push(num_to_wheel_pos(xp, 0));
+            xp_asc.push(x / p);
         }
     }
 
-    if xp_wheel_asc.is_empty() || max_xp < 2 { return 0; }
+    if xp_asc.is_empty() { return 0; }
+    let max_xp = *xp_asc.last().unwrap();
 
-    // Use primesieve for the segmented sieve — much faster than our custom sieve
-    // Segment parameters in wheel-30 format (8 bits per 30 numbers)
-    let seg_words: usize = 32768; // 256KB
-    let seg_bits = seg_words * 64;
-    let seg_nums = seg_words * 240; // 1 word = 8 groups × 30 numbers = 240 numbers
-    let groups_per_seg = seg_words * 8;
-    let total_groups = max_xp / 30 + 1;
-    let total_wheel_bits = total_groups * 8;
-    let num_segs = (total_wheel_bits + seg_bits - 1) / seg_bits;
+    // Handle xp values within BigPiTable range (≤ sqrt_x) directly
+    let split_idx = xp_asc.partition_point(|&v| v <= sqrt_x as u64);
+    let mut pre_sum: i64 = 0;
+    for i in 0..split_idx {
+        pre_sum += big_pi.pi(xp_asc[i] as usize) as i64;
+    }
+
+    if split_idx >= xp_asc.len() { return pre_sum; }
+
+    // Streaming merge over [sqrt_x+1, max_xp]
+    let base_pi = big_pi.pi(sqrt_x);
+    let range_start = sqrt_x as u64 + 1;
 
     let nthreads = rayon::current_num_threads();
-    let nchunks = std::cmp::min(nthreads * 32, num_segs).max(1);
-    let chunk_segs = (num_segs + nchunks - 1) / nchunks;
+    let nchunks = (nthreads * 8).max(1);
+    let range = max_xp - range_start + 1;
+    let chunk_size = (range + nchunks as u64 - 1) / nchunks as u64;
 
+    // Assign xp values to chunks based on value ranges
     let chunk_xp_bounds: Vec<usize> = (0..=nchunks).map(|k| {
-        let chunk_bit_start = std::cmp::min(
-            k as u64 * chunk_segs as u64 * seg_bits as u64,
-            total_wheel_bits as u64) as usize;
-        xp_wheel_asc.partition_point(|&v| v < chunk_bit_start)
+        if k == 0 { split_idx }
+        else {
+            let boundary = range_start + k as u64 * chunk_size;
+            xp_asc.partition_point(|&v| v < boundary)
+        }
     }).collect();
 
-    // Set primesieve to single-threaded (we parallelize at chunk level)
     unsafe { primesieve_set_num_threads(1); }
 
+    // Single-pass: stream primes, merge with xp values, record local sums
     let chunk_results: Vec<(i64, u64, usize)> = (0..nchunks).into_par_iter().map(|k| {
-        let seg_lo = k * chunk_segs;
-        let seg_hi = std::cmp::min(seg_lo + chunk_segs, num_segs);
         let xp_lo = chunk_xp_bounds[k];
         let xp_hi = chunk_xp_bounds[k + 1];
 
-        let mut local_sum: i64 = 0;
-        let mut local_pi: u64 = 0;
-        let mut xp_idx = xp_lo;
-        let mut buf = vec![0u64; seg_words];
-        let mut seg_prefix = vec![0u64; seg_words + 1];
+        let chunk_start = range_start + k as u64 * chunk_size;
+        let chunk_end = std::cmp::min(range_start + (k as u64 + 1) * chunk_size - 1, max_xp);
 
-        // Initialize primesieve iterator for this chunk's range
-        let chunk_start_num = (seg_lo * seg_nums) as u64;
-        let chunk_end_num = std::cmp::min((seg_hi * seg_nums) as u64, max_xp as u64 + 30);
         let mut ps_iter = PrimesieveIterator::new();
-        // Start at 7 for first chunk (skip 2,3,5), otherwise at chunk start
-        let iter_start = if chunk_start_num < 7 { 7 } else { chunk_start_num };
-        ps_iter.jump_to(iter_start, chunk_end_num);
-        let mut next_prime = ps_iter.next_prime();
+        ps_iter.jump_to(chunk_start, chunk_end + 1);
+        let mut p = ps_iter.next_prime();
+        let mut running: u64 = 0;
+        let mut local_sum: i64 = 0;
 
-        for seg in seg_lo..seg_hi {
-            let low_num = seg * seg_nums;
-            let seg_groups = std::cmp::min(groups_per_seg, total_groups.saturating_sub(seg * groups_per_seg));
-            let seg_nbits = seg_groups * 8;
-            let seg_nw = (seg_nbits + 63) / 64;
-            let end_num = low_num + seg_groups * 30;
-
-            // Zero the buffer
-            for w in 0..seg_nw { unsafe { *buf.get_unchecked_mut(w) = 0; } }
-
-            // Fill bitmap with primes from primesieve iterator
-            while next_prime < end_num as u64 {
-                if next_prime >= low_num as u64 {
-                    let offset = (next_prime as usize) - low_num;
-                    let group = offset / 30;
-                    let r = offset % 30;
-                    let idx = MOD30_TO_IDX[r];
-                    if idx != 255 {
-                        let pos = group * 8 + idx as usize;
-                        if pos < seg_nbits {
-                            unsafe {
-                                *buf.get_unchecked_mut(pos >> 6) |= 1u64 << (pos & 63);
-                            }
-                        }
-                    }
-                }
-                next_prime = ps_iter.next_prime();
+        // Merge primes with xp values
+        for i in xp_lo..xp_hi {
+            let v = unsafe { *xp_asc.get_unchecked(i) };
+            while p <= v {
+                running += 1;
+                p = ps_iter.next_prime();
             }
-
-            seg_prefix[0] = 0;
-            for w in 0..seg_nw {
-                seg_prefix[w + 1] = seg_prefix[w]
-                    + unsafe { *buf.get_unchecked(w) }.count_ones() as u64;
-            }
-            let seg_prime_count = seg_prefix[seg_nw];
-
-            let global_seg_start = seg * seg_bits;
-            while xp_idx < xp_hi {
-                let wp = unsafe { *xp_wheel_asc.get_unchecked(xp_idx) };
-                if wp >= global_seg_start + seg_nbits { break; }
-                let pos = wp - global_seg_start;
-                let word = pos >> 6;
-                let bit = pos & 63;
-                let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
-                let count = unsafe { *seg_prefix.get_unchecked(word) }
-                    + (unsafe { *buf.get_unchecked(word) } & mask).count_ones() as u64;
-                local_sum += (3 + local_pi + count) as i64; // 3 for primes {2,3,5}
-                xp_idx += 1;
-            }
-
-            local_pi += seg_prime_count;
+            local_sum += running as i64;
         }
 
-        (local_sum, local_pi, xp_idx - xp_lo)
+        // Count remaining primes in chunk (for prefix correction)
+        while p <= chunk_end {
+            running += 1;
+            p = ps_iter.next_prime();
+        }
+
+        (local_sum, running, xp_hi - xp_lo)
     }).collect();
 
-    let mut total_sum: i64 = 0;
-    let mut prefix_pi: u64 = 0;
-    for &(local_sum, local_pi, num_lookups) in &chunk_results {
+    // Combine with prefix corrections
+    let mut total_sum: i64 = pre_sum;
+    let mut prefix_pi: u64 = base_pi;
+    for &(local_sum, chunk_primes, num_lookups) in &chunk_results {
         total_sum += local_sum + prefix_pi as i64 * num_lookups as i64;
-        prefix_pi += local_pi;
+        prefix_pi += chunk_primes;
     }
 
     total_sum
