@@ -226,6 +226,10 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
         (ay, az)
     };
 
+    // Allow env var overrides for alpha parameter sweeps
+    let alpha_y = std::env::var("ALPHA_Y").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(alpha_y);
+    let alpha_z = std::env::var("ALPHA_Z").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(alpha_z);
+
     let x16 = (x as f64).powf(1.0 / 6.0);
     let alpha_y = alpha_y.max(1.0).min(x16);
     let max_alpha_z = (x16 / alpha_y).max(1.0);
@@ -650,7 +654,8 @@ fn fast_div(n: u64, d: u64, recip_d: u64) -> u64 {
 }
 
 fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
-              primes: &[u32], pi: &[u32], big_pi: &BigPiTable) -> i64 {
+              primes: &[u32], pi: &[u32], big_pi: &BigPiTable,
+              recip: &[u64]) -> i64 {
     let pi_limit = pi.len() - 1;
     let x13 = icbrt(x) as usize;
     let sqrt_x = isqrt(x) as usize;
@@ -678,13 +683,6 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     }
 
     // ── C2 + A: round-based processing for cache-friendly BigPiTable access ──
-    // Instead of parallel over b (random BigPiTable access), process BigPiTable
-    // in segments from high to low, keeping working set in L2/L3 cache.
-    // Precompute reciprocals
-    let recip: Vec<u64> = primes.iter().map(|&p| {
-        if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
-    }).collect();
-
     let min_c2_b = std::cmp::max(k, std::cmp::max(pi_root3_xy, pi_sqrtz)) + 1;
 
     // Build per-b info for C2 and A
@@ -746,12 +744,88 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         // Each pair covers 128 numbers (64 odd numbers per word * 2 numbers per odd)
         let numbers_per_seg = seg_pairs * 128;
 
-        let mut total: i64 = 0;
-        for seg in (0..num_segs).rev() {
-            let n_lo = if seg == 0 { 0usize } else { seg * numbers_per_seg };
-            let n_hi = std::cmp::min((seg + 1) * numbers_per_seg - 1, sqrt_x);
+        // Partition b_lookups into narrow (xpq range fits in ~1 segment, process unsegmented)
+        // and wide (needs segmented processing to keep BigPiTable in L2).
+        // Narrow b_lookups skip the segment loop overhead entirely.
+        let mut narrow_indices: Vec<u32> = Vec::new();
+        let mut wide_indices: Vec<u32> = Vec::new();
+        for (i, info) in b_lookups.iter().enumerate() {
+            let xpq_min = info.xp / primes[info.l_max] as u64;
+            let xpq_max = info.xp / primes[info.l_cur] as u64;
+            if (xpq_max - xpq_min) < numbers_per_seg as u64 {
+                narrow_indices.push(i as u32);
+            } else {
+                wide_indices.push(i as u32);
+            }
+        }
 
-            let seg_sum: i64 = b_lookups.par_iter().map(|info| {
+        // Process narrow b_lookups unsegmented (their BigPiTable access is naturally localized)
+        let narrow_sum: i64 = narrow_indices.par_iter().map(|&bi| {
+            let info = &b_lookups[bi as usize];
+            let eff_lo = info.l_cur;
+            let eff_hi = std::cmp::min(info.l_max, primes_len - 1);
+            if eff_lo > eff_hi { return 0; }
+
+            let mut local = 0i64;
+            let mut l = eff_lo;
+
+            while l + 3 <= eff_hi {
+                let xpq0 = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
+                let xpq1 = fast_div(info.xp, primes[l+1] as u64, recip[l+1]) as usize;
+                let xpq2 = fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize;
+                let xpq3 = fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize;
+
+                unsafe {
+                    if info.is_c2 {
+                        local += (big_pi.pi_fast(xpq0) as i64 - info.b as i64 + 2)
+                               + (big_pi.pi_fast(xpq1) as i64 - info.b as i64 + 2)
+                               + (big_pi.pi_fast(xpq2) as i64 - info.b as i64 + 2)
+                               + (big_pi.pi_fast(xpq3) as i64 - info.b as i64 + 2);
+                    } else {
+                        let p0 = big_pi.pi_fast(xpq0) as i64;
+                        let p1 = big_pi.pi_fast(xpq1) as i64;
+                        let p2 = big_pi.pi_fast(xpq2) as i64;
+                        let p3 = big_pi.pi_fast(xpq3) as i64;
+                        if l + 3 <= info.y_boundary_l {
+                            local += p0 + p1 + p2 + p3;
+                        } else if l > info.y_boundary_l {
+                            local += 2 * (p0 + p1 + p2 + p3);
+                        } else {
+                            for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
+                                local += if ll <= info.y_boundary_l { pv } else { 2 * pv };
+                            }
+                        }
+                    }
+                }
+                l += 4;
+            }
+
+            while l <= eff_hi {
+                let xpq = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
+                let pi_val = unsafe { big_pi.pi_fast(xpq) } as i64;
+                if info.is_c2 {
+                    local += pi_val - info.b as i64 + 2;
+                } else if l <= info.y_boundary_l {
+                    local += pi_val;
+                } else {
+                    local += 2 * pi_val;
+                }
+                l += 1;
+            }
+
+            local
+        }).sum();
+
+        // Process wide b_lookups with segmented approach
+        let mut wide_sum: i64 = 0;
+        if !wide_indices.is_empty() {
+            for seg in (0..num_segs).rev() {
+                let n_lo = if seg == 0 { 0usize } else { seg * numbers_per_seg };
+                let n_hi = std::cmp::min((seg + 1) * numbers_per_seg - 1, sqrt_x);
+
+                let seg_sum: i64 = wide_indices.par_iter().map(|&bi| {
+                    let info = &b_lookups[bi as usize];
+
                 let l_lo = if seg == num_segs - 1 {
                     info.l_cur
                 } else {
@@ -823,12 +897,13 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 }
 
                 local
-            }).sum();
+                }).sum();
 
-            total += seg_sum;
+                wide_sum += seg_sum;
+            }
         }
 
-        total
+        narrow_sum + wide_sum
     };
 
     c1 + c2_a_sum
@@ -1146,7 +1221,8 @@ struct ValidM {
 
 fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
              primes: &[u32], pi: &[u32],
-             mu: &[i8], lpf: &[u16], y_smooth: &[bool]) -> i64 {
+             mu: &[i8], lpf: &[u16], y_smooth: &[bool],
+             prime_recip: &[u64]) -> i64 {
     if z == 0 { return 0; }
 
     let xz = (x / z as u64) as usize;
@@ -1160,10 +1236,6 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     if c >= pi_x_star { return 0; }
 
     let template = PreSieveTemplate::new(primes, std::cmp::min(c, nprimes - 1));
-
-    let prime_recip: Vec<u64> = primes.iter().map(|&p| {
-        if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
-    }).collect();
 
     // Precompute ValidM list for Type 1 leaves
     let min_lpf_threshold = if c + 1 < primes.len() { primes[c + 1] as u16 } else { u16::MAX };
@@ -1600,32 +1672,50 @@ fn count_primes(x: u64) -> u64 {
     let sigma = compute_sigma(x, y, x_star, &primes, &pi, &big_pi);
     let phi0 = compute_phi0(x, y, z, k, &primes, &phi_cache);
 
-    // Run B, AC, D all concurrently
-    // B gets its own smaller thread pool to avoid starving AC/D
+    // Precompute reciprocals once, shared between AC and D (saves 14.8MB)
+    let recip: Vec<u64> = primes.iter().map(|&p| {
+        if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
+    }).collect();
+
+    // Run B, AC, D — sequential if SEQ_MODE set, concurrent otherwise
+    let seq_mode = std::env::var("SEQ_MODE").is_ok();
     let b_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(24))
         .build()
         .unwrap();
-    let (ac, d, b_val) = std::thread::scope(|s| {
-        let b_handle = s.spawn(|| {
-            let t = Instant::now();
-            let r = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
-            if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
-            r
-        });
-        let ac_handle = s.spawn(|| {
-            let t = Instant::now();
-            let r = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi);
-            if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
-            r
-        });
+    let (ac, d, b_val) = if seq_mode {
         let t = Instant::now();
-        let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth);
+        let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
+        if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
+        let t = Instant::now();
+        let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
         if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
-        let ac = ac_handle.join().unwrap();
-        let b_val = b_handle.join().unwrap();
+        let t = Instant::now();
+        let b_val = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
+        if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
         (ac, d, b_val)
-    });
+    } else {
+        std::thread::scope(|s| {
+            let b_handle = s.spawn(|| {
+                let t = Instant::now();
+                let r = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
+                if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
+                r
+            });
+            let ac_handle = s.spawn(|| {
+                let t = Instant::now();
+                let r = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
+                if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
+                r
+            });
+            let t = Instant::now();
+            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
+            if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
+            let ac = ac_handle.join().unwrap();
+            let b_val = b_handle.join().unwrap();
+            (ac, d, b_val)
+        })
+    };
 
     (ac - b_val + d + phi0 + sigma) as u64
 }
