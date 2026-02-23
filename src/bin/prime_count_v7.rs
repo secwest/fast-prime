@@ -1220,13 +1220,35 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                                 &valid_m_list);
     }
 
-    // Work-balanced chunk assignment: early segments have much higher cur_max_b
-    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 32);
+    // Work-balanced chunk assignment based on estimated Type 1 VM iterations per segment
+    // The key insight: for each segment at position `low`, Type 1 work depends on
+    // how many ValidM entries fall in the m-range for each b value.
+    // We estimate by sampling a few representative b values.
+    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 256);
     let work_per_seg: Vec<usize> = (0..num_segments).map(|seg_idx| {
-        let low = std::cmp::max(seg_idx * segment_size, 1);
-        std::cmp::min(
-            pi[std::cmp::min(isqrt(x / low as u64) as usize, pi_limit)] as usize,
-            pi_x_star)
+        let low = std::cmp::max(seg_idx * segment_size, 1) as u64;
+        let high = std::cmp::min(low + segment_size as u64, xz as u64 + 1);
+        let mut work = 0usize;
+        // Estimate VM iterations by sampling a few b values across the Type 1 range
+        let sample_bs = [8, 100, 300, 500, 700, 833];
+        for &b in &sample_bs {
+            if b >= primes.len() || b > pi_sqrtz { break; }
+            let prime = primes[b] as u64;
+            let x_div_prime = x / prime;
+            let xp_low = std::cmp::min(x_div_prime / low, z as u64) as usize;
+            let xp_high = std::cmp::min(x_div_prime / high, z as u64) as usize;
+            let min_m = std::cmp::max(xp_high, z / prime as usize);
+            let max_m = std::cmp::min((x_div_prime / (prime * prime)) as usize, xp_low);
+            if max_m > min_m {
+                work += max_m - min_m;
+            }
+        }
+        // Also add base cost for cross-offs (proportional to number of b values)
+        let cur_max_b = std::cmp::min(
+            pi[std::cmp::min(isqrt(x / low) as usize, pi_limit)] as usize,
+            pi_x_star);
+        work += cur_max_b * 10; // base cross-off cost
+        std::cmp::max(work, 1)
     }).collect();
     let total_work: usize = work_per_seg.iter().sum();
     let target_work = total_work / nchunks;
