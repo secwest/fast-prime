@@ -754,28 +754,26 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
             let seg_sum: i64 = b_lookups.par_iter().map(|info| {
                 // Find l range where n_lo <= xp/primes[l] <= n_hi
+                // Using pi table for O(1) lookup instead of partition_point
                 let l_lo = if seg == num_segs - 1 {
                     info.l_cur // highest segment includes clamped values
                 } else {
-                    // primes[l] >= ceil(xp / (n_hi + 1))
-                    let thresh = (info.xp / (n_hi as u64 + 1)) as u32;
-                    let start = info.l_cur;
-                    let end = std::cmp::min(info.l_max + 1, primes_len);
-                    if start >= end { return 0; }
-                    start + primes[start..end].partition_point(|&p| p <= thresh)
+                    // First l where primes[l] > xp/(n_hi+1), i.e. xp/primes[l] < n_hi+1
+                    let thresh = std::cmp::min(
+                        (info.xp / (n_hi as u64 + 1)) as usize, pi_limit);
+                    let l_candidate = pi[thresh] as usize + 1;
+                    std::cmp::max(l_candidate, info.l_cur)
                 };
 
                 let l_hi = if n_lo <= 1 {
                     info.l_max
                 } else {
-                    // primes[l] <= floor(xp / n_lo)
-                    let thresh = std::cmp::min(info.xp / n_lo as u64, u32::MAX as u64) as u32;
-                    let start = info.l_cur;
-                    let end = std::cmp::min(info.l_max + 1, primes_len);
-                    if start >= end { return 0; }
-                    let pos = primes[start..end].partition_point(|&p| p <= thresh);
-                    if pos == 0 { return 0; }
-                    start + pos - 1
+                    // Last l where primes[l] <= xp/n_lo
+                    let thresh_raw = info.xp / n_lo as u64;
+                    if thresh_raw == 0 { return 0; }
+                    let thresh = std::cmp::min(thresh_raw as usize, pi_limit);
+                    let l_candidate = pi[thresh] as usize;
+                    std::cmp::min(l_candidate, info.l_max)
                 };
 
                 let eff_lo = std::cmp::max(l_lo, info.l_cur);
@@ -786,10 +784,10 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 let mut l = eff_lo;
 
                 while l + 3 <= eff_hi {
-                    let xpq0 = std::cmp::min(fast_div(info.xp, primes[l] as u64, recip[l]) as usize, sqrt_x);
-                    let xpq1 = std::cmp::min(fast_div(info.xp, primes[l+1] as u64, recip[l+1]) as usize, sqrt_x);
-                    let xpq2 = std::cmp::min(fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize, sqrt_x);
-                    let xpq3 = std::cmp::min(fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize, sqrt_x);
+                    let xpq0 = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
+                    let xpq1 = fast_div(info.xp, primes[l+1] as u64, recip[l+1]) as usize;
+                    let xpq2 = fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize;
+                    let xpq3 = fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize;
 
                     if info.is_c2 {
                         local += (big_pi.pi(xpq0) as i64 - info.b as i64 + 2)
@@ -815,7 +813,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 }
 
                 while l <= eff_hi {
-                    let xpq = std::cmp::min(fast_div(info.xp, primes[l] as u64, recip[l]) as usize, sqrt_x);
+                    let xpq = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
                     let pi_val = big_pi.pi(xpq) as i64;
                     if info.is_c2 {
                         local += pi_val - info.b as i64 + 2;
