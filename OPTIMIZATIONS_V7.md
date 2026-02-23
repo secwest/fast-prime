@@ -989,3 +989,38 @@ With the new D work balancing from Opt 39 changing the D/AC balance, alpha param
 - Current: 10.68s, primecount: 8.49s → **1.26× gap** (was 1.31×)
 - Critical path: setup (0.87s) + AC (9.77s) = 10.64s ≈ wall time
 - **AC remains the sole bottleneck**: need AC ≤ ~7.6s (-22%) to match primecount
+
+---
+
+## Opt 41: Shared Reciprocals + Infrastructure (10.67s)
+
+**Commit**: 60b756a
+
+### Changes
+1. **Shared reciprocal array** — Precompute reciprocals once in count_primes, pass to both compute_ac and compute_d. Saves 14.8MB allocation and reduces memory pressure.
+2. **SEQ_MODE env var** — Set SEQ_MODE=1 to run AC, D, B sequentially for exclusive component timing
+3. **ALPHA_Y/ALPHA_Z env var overrides** — Runtime alpha parameter sweeps without recompilation
+4. **Narrow/wide AC b_lookup split** — Partition b_lookups by xpq range; narrow b_lookups skip segment loop overhead
+
+### Results (3-run median at Max i64)
+| Component | Opt 40 | Opt 41 | Change |
+|-----------|--------|--------|--------|
+| Setup | 0.87s | 0.85s | -2% |
+| AC | 9.77s | 9.74s | -0.3% |
+| D | 6.75s | 7.18s | +6% (noise) |
+| B | 9.22s | 8.75s | -5% |
+| Wall | 10.68s | **10.67s** | -0.1% |
+
+Exclusive (SEQ_MODE): AC=2.25s, D=5.44s, B=3.34s, total=11.86s
+
+### Failed Experiments (this session)
+- **Compact ValidM split**: 8% D regression from extra L3 miss on separate recip_m array
+- **u16 BigPiTable prefix**: 9% AC regression from extra load instruction per pi_fast call
+- **Separate vm_lpf scan array**: 4% D regression from dual-stream prefetch conflicts
+- **D Type 1 profiling**: 60.7% of 4.8B VM iterations fail lpf check (waste), but optimizing this is limited by prefetch efficiency
+
+### Analysis
+At Max i64: 10.67s vs primecount 8.49s = 1.26× gap.
+Exclusive sum = 0.85 + 2.25 + 5.44 + 3.34 = 11.88s (vs 8.49s = 1.40× gap).
+Concurrent wins by 1.21s overlap but components suffer 2-4× contention.
+All data-structure micro-optimizations have been exhausted — further gains require algorithmic restructuring.

@@ -2627,3 +2627,60 @@ With D work balancing from Opt 39, the alpha parameters needed re-evaluation sin
 | Wall | 10.68s |
 
 **Gap to primecount**: 1.26× (was 1.31×). Critical path: setup (0.87s) + AC (9.77s) = 10.64s.
+
+---
+
+## Session 12: Continued V7 Optimization (Opt 41+)
+
+### Baseline: Opt 40 → Opt 41 (committed)
+- Committed Opt 41: Shared reciprocal array between AC and D, SEQ_MODE/ALPHA env var overrides, narrow/wide AC b_lookup split
+- Performance: 10.67s at Max i64 (marginal improvement from shared recip, saves 14.8MB allocation)
+- Exclusive times: AC=2.25s, D=5.44s, B=3.34s, setup=0.85s (total=11.86s)
+
+### D Type 1 Inner Loop Profiling
+Added diagnostic counters to D's Type 1 ValidM scanning loop:
+- **vm_total = 4,779.2M iterations** across all primes and segments
+- **vm_pass = 1,877.6M (39.3%)** — iterations passing lpf check
+- **vm_fail = 2,901.6M (60.7%)** — iterations failing lpf check (WASTED)
+- **type2 = 845.3M** Type 2 iterations
+- **crossoff = 134.2M** Type 2 cross_off_sieve calls
+- D processes ~245,000 segments (xz ≈ 245B, segment_size = 1MB)
+- Key finding: 60.7% of VM iterations are wasted on entries that fail the lpf check
+
+### Attempt: Compact ValidM Struct Split (FAILED — 8% D regression)
+**Idea**: Split 16-byte ValidM (m+lpf+mu+recip_m) into compact 8-byte (m+lpf+mu) scan array + separate recip_m array. Only load recip_m when lpf check passes (~39% of entries).
+- Result: D went from 5.44s to 7.28-7.44s (8% worse)
+- **Root cause**: Loading recip_m from a separate 48.8MB array causes extra L3/memory miss. The original interleaved layout keeps recip_m in the same cache line as m/lpf, so it's already loaded for free when the entry is read.
+- REVERTED
+
+### Attempt: u16 BigPiTable Prefix (FAILED — AC regression)
+**Idea**: Replace u32 prefix (95MB) with u16 local prefix + u32 block prefix (48MB total). Saves 47MB (17% of BigPiTable).
+- Added BLOCK_WORDS=256 structure: block_prefix[block] + prefix[word_in_block]
+- Result: AC exclusive went from 2.25s to 2.45s (9% regression)
+- **Root cause**: Extra memory load instruction for block_prefix on every pi_fast call. Even though block_prefix is L1-hot (2KB per segment), the extra instruction adds ~2 cycles to the critical path. With billions of pi_fast calls, this outweighs the memory savings.
+- REVERTED
+
+### Attempt: Separate vm_lpf Scan Array (FAILED — 4% D regression)
+**Idea**: Create Vec<u16> of just lpf values for D's inner loop scanning. Read only 2 bytes per iteration instead of 16 bytes. Reduces scan bandwidth by ~48% for failing entries (which are 60.7%).
+- Implementation: Separate vm_lpf array, inner loop scans vm_lpf[i] first, only loads full ValidM[i] when passing
+- Result: D went from 5.44s to 5.70-5.79s (4-6% worse)
+- **Root cause**: Two prefetch streams (vm_lpf + valid_m_list) compete for L1/L2 cache. Original single-stream sequential scan of ValidM is better for hardware prefetcher. Index-based access also generates slightly worse code than Rust's optimized slice iterator.
+- REVERTED
+
+### Current State (Opt 41, committed)
+| Component | Exclusive | Concurrent |
+|-----------|-----------|------------|
+| Setup | 0.85s | 0.85s |
+| AC | 2.25s | ~9.74s |
+| D | 5.44s | ~7.18s |
+| B | 3.34s | ~8.75s |
+| Wall | 11.86s | **10.67s** |
+
+**Gap to primecount**: 1.26× (target: 8.49s)
+
+### Key Insights
+1. ValidM data structure is already well-optimized — splitting (SoA or compact) always hurts due to extra cache misses or prefetch conflicts
+2. BigPiTable prefix is at the load-instruction limit — any two-level scheme adds latency to the most frequently called function
+3. D's bottleneck is the massive number of iterations (4.8B VM + 845M Type 2 + 134M crossoff), NOT per-iteration efficiency
+4. To significantly reduce D, would need algorithmic change (on-the-fly m generation like primecount, avoiding the precomputed ValidM entirely)
+5. AC contention (4× blowup concurrent vs exclusive) is caused by L3/memory bandwidth saturation, not thread pool contention
