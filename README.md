@@ -30,7 +30,7 @@ Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized seg
 
 ### V7 — Gourdon's Algorithm (`src/bin/prime_count_v7.rs`)
 
-Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ. Uses two independent alpha parameters (α_y for y, α_z for z) instead of V6's single alpha, allowing independent tuning of the easy-leaf and hard-leaf domains. D (hard leaves) processes fewer iterations than V6's S2_hard by using tighter x* bounds. Parallel D via chunk-based phi correction with L2-cache-sized segments. BigPiTable provides O(1) π(n) lookups for AC and B with branchless unsafe pi_fast. ValidM list pre-filters D Type 1 for 8.5× fewer iterations. Compact generate_tables with u16 lpf and packed y-smooth encoding. Piecewise-linear alpha lookup table tuned per-scale. **Currently the fastest implementation — 29.6× faster than V6 at Max i64.**
+Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ. Uses two independent alpha parameters (α_y for y, α_z for z) instead of V6's single alpha, allowing independent tuning of the easy-leaf and hard-leaf domains. D (hard leaves) processes fewer iterations than V6's S2_hard by using tighter x* bounds. Parallel D via chunk-based phi correction with L2-cache-sized segments. BigPiTable provides O(1) π(n) lookups for AC and B with branchless unsafe pi_fast. ValidM list pre-filters D Type 1 for 8.5× fewer iterations. Compact generate_tables with u16 lpf and packed y-smooth encoding. Bidirectional count() in BitSieve halves average scan distance. Piecewise-linear alpha lookup table tuned per-scale. **Currently the fastest implementation — 30.2× faster than V6 at Max i64.**
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -49,7 +49,7 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 │ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.31895s  │    0.65938s  │279,238,341,033,925│
 │ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    1.07000s  │2,623,557,157,654,233│
 │ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │    3.29000s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │   11.58000s  │216,289,611,853,439,384│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │   11.33000s  │216,289,611,853,439,384│
 └───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
 
@@ -66,9 +66,9 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 | 1e16 | 0.222s | 0.178s | 1.2× | — |
 | 1e17 | 0.790s | 0.598s | 1.3× | — |
 | 1e18 | 2.97s | 2.27s | 1.3× | — |
-| Max i64 | 11.58s | 8.49s | 1.36× | — |
+| Max i64 | 11.33s | 8.49s | 1.33× | — |
 
-V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI streaming merge, with alpha parameters tuned through 36 rounds of optimization. primecount is the fastest published prime counting code. V7 Opt 36 is **faster at 1e12-1e13**, with the gap narrowed to **1.36× at Max i64** (down from 1.45× at Opt 34).
+V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI streaming merge, with alpha parameters tuned through 37 rounds of optimization. primecount is the fastest published prime counting code. V7 Opt 37 is **faster at 1e12-1e13**, with the gap narrowed to **1.33× at Max i64** (down from 1.45× at Opt 34).
 
 ### Best (V7) vs V1 Speedup
 
@@ -96,7 +96,7 @@ V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI streaming merge, 
 | 10 Quadrillion | 2.319s | 0.222s | **10.4×** |
 | 100 Quadrillion | 14.379s | 0.790s | **18.2×** |
 | 1 Quintillion | 51.840s | 2.970s | **17.5×** |
-| Max i64 | 342.460s | 11.580s | **29.6×** |
+| Max i64 | 342.460s | 11.330s | **30.2×** |
 
 ### Comparison vs Strix Halo Reference
 

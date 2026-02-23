@@ -2515,3 +2515,48 @@ Component breakdown at Max i64 (5-run median):
 Need max(AC, D) ≤ ~7.0s to match primecount. Both AC and D need ~35% reduction.
 
 The remaining gap is likely algorithmic: primecount uses Deleglise-Rivat with optimized binary indexed tree for D counting. Our bitvector scan approach fundamentally can't match O(log n) structures for this workload. The block-sum experiment confirmed this — any O(1) counting structure costs as much to maintain as it saves.
+
+## Session 8: Opts 35-36 + Failed Experiments
+
+**Opt 35: Branchless pi_fast** — Removed bounds check and safety wrapper; marked `unsafe` inline. AC -3%.
+
+**Opt 36: Compact generate_tables** — u16 lpf + eliminate is_prime array. Setup -37%.
+
+**Failed experiments**: Packed mu+y_smooth (neutral), overlapped B/AC with generate_tables (neutral/CPU-starved), individual D segments as rayon tasks (2.2× regression), thread pool size tuning (3× confirmed optimal at 72 threads), alpha parameter re-sweep (ay=13/az=1.5 confirmed optimal).
+
+Result: 12.33s → 11.58s (Opt 36, commit 9dc697e).
+
+## Session 9: Opt 37 + Continued Investigation
+
+**Context**: Recovered from session crash (5th+ crash). Committed Opt 36 docs, then implemented Opt 37.
+
+**Opt 37: Bidirectional count()** — BitSieve::count(pos) now picks shorter direction: forward from 0 or backward from total. For positions past midpoint, counts suffix and subtracts from total. Halves average scan distance. D -2.5%, Wall -2.2%.
+
+Result: 11.58s → 11.33s (Opt 37, commit 0f31b3e).
+
+### Current State (Opt 37)
+
+| Scale | V7 | primecount | Ratio |
+|-------|-----|------------|-------|
+| 1e12 | 0.006s | 0.014s | **0.4×** ✓ |
+| 1e13 | 0.013s | 0.015s | **0.9×** ✓ |
+| 1e14 | 0.026s | 0.023s | 1.1× |
+| 1e15 | 0.065s | 0.059s | 1.1× |
+| 1e16 | 0.222s | 0.178s | 1.2× |
+| 1e17 | 0.790s | 0.598s | 1.3× |
+| 1e18 | 2.97s | 2.27s | 1.3× |
+| Max i64 | 11.33s | 8.49s | 1.33× |
+
+Component breakdown at Max i64:
+| Component | Time |
+|-----------|------|
+| Setup | 0.93s |
+| B | 7.82s |
+| AC | 10.12s |
+| D | 10.34s |
+| Wall | 11.33s |
+
+### Gap Analysis
+
+Critical path: setup (0.93s) + max(AC, D) ≈ 11.27s. Need max(AC, D) ≤ 7.5s (26-27% reduction).
+B finishes ~2.5s before AC/D; threads auto-redistribute via rayon work-stealing.

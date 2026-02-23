@@ -864,10 +864,52 @@ Component breakdown at Max i64 (3-run median):
 | D | 10.61s | -0.19s (-2%) |
 | Wall | 11.58s | -0.75s (-6%) |
 
+## Optimization 37: Bidirectional count() for D Sieve
+
+**Technique**: For positions past the sieve midpoint, count from the end instead of the start.
+
+**Details**:
+- BitSieve::count(pos) now picks the shorter direction: forward from 0, or backward from total
+- For backward scan: counts suffix bits after pos, subtracts from cached self.total
+- Sieve has ~547 words. Old avg count scan: ~274 words. New avg: ~137 words (50% reduction)
+- D improvement: ~0.27s from 66.8M count() calls each scanning fewer words of popcnt work
+
+**Result (Max i64, 3-run median)**:
+| Component | Before | After | Change |
+|-----------|--------|-------|--------|
+| D | 10.61s | 10.34s | -2.5% |
+| Wall | 11.58s | 11.33s | -2.2% |
+| B, AC | unchanged | unchanged | — |
+
+---
+
+### Current Benchmark (Opt 37)
+
+| Scale | V7 | primecount | Ratio |
+|-------|-----|------------|-------|
+| 1e12 | 0.006s | 0.014s | **0.4×** ✓ |
+| 1e13 | 0.013s | 0.015s | **0.9×** ✓ |
+| 1e14 | 0.026s | 0.023s | 1.1× |
+| 1e15 | 0.065s | 0.059s | 1.1× |
+| 1e16 | 0.222s | 0.178s | 1.2× |
+| 1e17 | 0.790s | 0.598s | 1.3× |
+| 1e18 | 2.97s | 2.27s | 1.3× |
+| Max i64 | 11.33s | 8.49s | 1.33× |
+
+Component breakdown at Max i64 (3-run median):
+| Component | Time | Change from Opt 36 |
+|-----------|------|--------------------|
+| Setup | 0.93s | — |
+| B | 7.82s | -0.29s (-3%) |
+| AC | 10.12s | -0.28s (noise) |
+| D | 10.34s | -0.27s (-2.5%) |
+| Wall | 11.33s | -0.25s (-2.2%) |
+
 ### Gap Analysis
 
-- Current: 11.58s, primecount: 8.49s → 1.36× gap
-- Critical path: setup (0.93s) + max(AC=10.40, D=10.61) = 11.54s
-- To match primecount: need max(AC, D) ≤ 7.5s (28-29% reduction)
-- AC: memory-latency bound (31.2B pi_fast lookups, ~32 cycles each, BigPiTable 285MB)
-- D: compute-bound (200.4B popcnt operations, hardware throughput limit)
+- Current: 11.33s, primecount: 8.49s → 1.33× gap
+- Critical path: setup (0.93s) + max(AC=10.12, D=10.34) = 11.27s
+- To match primecount: need max(AC, D) ≤ 7.5s (26-27% reduction)
+- AC: memory-latency bound (31.2B pi_fast lookups, BigPiTable 285MB)
+- D: compute-bound (popcnt operations, hardware throughput limit)
+- B/AC/D all share rayon pool — B finishes ~2.5s before AC/D, threads auto-redistribute
