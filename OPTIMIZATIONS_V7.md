@@ -613,3 +613,71 @@ Instrumented D with atomic counters to understand cost distribution:
 - Max i64: 15.5s → 13.8s (11% improvement)
 - 1e18: 4.16s → 3.49s (16% improvement)
 - Gap vs primecount: 1.93× → 1.63×
+
+## Optimization 29: Fine-tune Max i64 alpha to ay=13/az=1.5
+- Explored az from 1.25 to 2.0 with ay=13 fixed
+- az=1.5 optimal: reduces z from 54M to 41M, fewer D segments
+- 3-run median: 13.66s (was 13.91s with az=1.75)
+- Gap vs primecount: 1.63× → 1.61×
+
+## Optimization 30: D Segment Size 2^20 (1MB)
+- Reduced from 2^21 (2MB) to 2^20 (1MB)
+- Better L1 cache utilization (34KB wheel-30 sieve fits in 80KB L1D)
+- 3-run median: 13.50s vs 13.74s (~0.24s improvement)
+
+## Optimization 31: AC Segment Size 130K pairs (~2MB)
+- Reduced AC segment from larger default to 130K pairs per segment
+- More frequent segment transitions allow D threads to pick up rayon work sooner
+- Better thread distribution across B/AC/D via work-stealing
+- 5-run median: 13.05s vs 13.53s (~3.5% improvement)
+
+## Optimization 31b: Overlap Setup Tasks
+- Run ALL setup tasks concurrently in a single thread::scope:
+  - Thread 1: BigPiTable::new (parallel via rayon)
+  - Thread 2: generate_tables (sequential mu/lpf/y_smooth)
+  - Main thread: pi_sieve, primes, phi_cache, generate_pi (sequential)
+- Setup: 1.57s → 1.47s (~6% setup improvement)
+- Wall: ~12.8s median
+
+## Optimization 32: Split BigPiTable (380MB → 285MB)
+- Separate interleaved Vec<u64> into Vec<u64> bits + Vec<u32> prefix
+- prefix values fit in u32 since pi(3B) < 2^32
+- Saves ~95MB memory (285MB vs 380MB)
+- Performance neutral (5-run median: 12.62s)
+- All 15 tests pass
+
+### Failed Attempts (Sessions 4-5)
+
+**Block Counter Sieve for D (primecount-style)**: Implemented counter array maintained during cross_off for O(sqrt(n)) count queries. Tested 3 variants: (1) no unrolling: D 12.3s, (2) 4x unrolled with counters: D 12.46s, (3) simplified: D 12.30s. All WORSE than baseline 11.1s. Root cause: counter updates during cross_off add ~1.5s overhead due to read-modify-write dependency chains when consecutive bits map to same counter block. Our leaves are clustered with short count_delta spans, so block jumps rarely activate.
+
+**Fenwick Tree for D counting**: O(log n) update per cleared bit exceeds current count_delta cost.
+
+**Block Prefix Sums recomputed after cross_off**: 5700 recomputations × 4353 ops per rebuild = too expensive.
+
+**MIMALLOC_LARGE_OS_PAGES**: Set env var in code — no effect because mimalloc initializes before main(). A/B test confirmed: WITH=12.88s median, WITHOUT=12.84s median.
+
+**min_b pre-sieve for D**: Savings negligible since leaf processing for empty b is near-zero cost.
+
+---
+
+### Current Benchmark (Opt 32)
+
+| Scale | V7 | primecount | Ratio |
+|-------|-----|------------|-------|
+| 1e12 | 0.006s | 0.014s | **0.4×** ✓ |
+| 1e13 | 0.014s | 0.015s | **0.9×** ✓ |
+| 1e14 | 0.029s | 0.023s | 1.3× |
+| 1e15 | 0.079s | 0.059s | 1.3× |
+| 1e16 | 0.261s | 0.178s | 1.5× |
+| 1e17 | 0.932s | 0.598s | 1.6× |
+| 1e18 | 3.38s | 2.27s | 1.5× |
+| Max i64 | 12.62s | 8.49s | 1.49× |
+
+Component breakdown at Max i64 (5-run median):
+| Component | Time |
+|-----------|------|
+| Setup | 1.47s |
+| B | 8.25s |
+| AC | 11.15s |
+| D | 11.11s |
+| Wall | 12.62s |

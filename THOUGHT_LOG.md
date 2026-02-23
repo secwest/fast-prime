@@ -1712,6 +1712,93 @@ rebuild, same as the original linear scan.
 | 1e14 | 0.028s | 0.023s | 1.2× |
 | 1e15 | 0.095s | 0.059s | 1.6× |
 | 1e16 | 0.487s | 0.178s | 2.7× |
+
+---
+
+## Session 6: Optimizations 29-32 + Block Counter Analysis
+
+### Opt 29: Fine-tune Alpha az=1.5
+
+Explored az from 1.25 to 2.0 at Max i64 with ay=13 fixed. az=1.5 reduces z from 54M to 41M, giving D fewer segments to process. 3-run median: 13.66s → 13.50s after combined with Opt 30.
+
+### Opt 30: D Segment Size 2^20
+
+Reduced D segment from 2^21 (2MB) to 2^20 (1MB). The wheel-30 sieve for 1M numbers is ~34KB, which fits comfortably in the 80KB L1D of Arrow Lake P-cores. 3-run median: 13.74s → 13.50s.
+
+### Opt 31: AC Segment Size 130K Pairs
+
+Reduced AC BigPiTable segment from default to 130K pairs (~2MB). This creates more frequent segment boundaries, allowing D's rayon threads to pick up work sooner via work-stealing. Net 3.5% wall improvement: 13.53s → 13.05s.
+
+### Opt 31b: 3-Way Overlapped Setup
+
+Overlap all setup work in a single thread::scope:
+- Thread 1: BigPiTable::new (uses rayon internally)
+- Thread 2: generate_tables (sequential mu/lpf/y_smooth)
+- Main thread: pi_sieve + primes + phi_cache + generate_pi
+
+Setup dropped from 1.57s to 1.47s. Wall: ~12.8s.
+
+### Deep Analysis: primecount's D Sieve Architecture
+
+Studied primecount's Sieve.hpp, Sieve.cpp, D.cpp to understand their block counter approach:
+- `cross_off_count()` simultaneously clears bits AND decrements counter entries
+- Counter array maintained at block granularity (per 512 bits)
+- `count(stop)` uses running state with monotonically increasing stops — counter blocks provide O(1) jumps
+- Quote from primecount: "Fenwick tree is bad for performance as it causes many cache misses and branch mispredictions"
+
+### Failed: Block Counter Sieve (3 variants tested)
+
+Implemented primecount's approach: counter array (Vec<u32>) updated during cross_off, with O(sqrt(n)) block-jumping count queries.
+
+**Variant 1**: Removed 4x unrolling for simpler counter integration. D: 11.1s → 12.3s (WORSE by 10.8%)
+**Variant 2**: Kept 4x unrolling with counter updates per bit. D: 11.1s → 12.46s (WORSE by 12.3%)
+**Variant 3**: Simplified counter with no unrolling. D: 12.30s (WORSE by 10.8%)
+
+Root cause analysis:
+1. Counter updates during cross_off add ~1.5s overhead from read-modify-write dependency chains when consecutive bits map to the same counter block
+2. Our leaves are clustered (short count_delta spans), so block jumps rarely activate — the O(sqrt(n)) improvement doesn't manifest
+3. Initial count() calls are already cheap because first leaf positions are near beginning of segment
+4. primecount's approach works for THEIR architecture (byte-level sieve, dynamic segments, different cross_off with switch/case)
+
+**CONCLUSION**: Block counter sieve is fundamentally incompatible with our architecture. Reverted.
+
+### Failed: Other D Count Optimizations
+
+- **Fenwick tree**: O(log n) update per cleared bit > current count_delta cost
+- **Block prefix sums recomputed after cross_off**: 5700 × 4353 = too expensive
+- **Lazy prefix sums with dirty tracking**: Complex with marginal gains
+- **min_b pre-sieve**: Negligible savings (empty b is near-zero cost)
+
+### Failed: Large Pages via MIMALLOC_LARGE_OS_PAGES
+
+Set `std::env::set_var("MIMALLOC_LARGE_OS_PAGES", "1")` in main(). A/B test: WITH=12.88s, WITHOUT=12.84s. No improvement because mimalloc initializes its allocation strategy before main() executes.
+
+### Opt 32: Split BigPiTable (380MB → 285MB)
+
+Separated interleaved Vec<u64> into Vec<u64> bits + Vec<u32> prefix. prefix values fit in u32 since pi(3B) < 2^32. Saves 95MB memory.
+
+5-run median:
+- D: 11.11s (baseline 11.09s — neutral)
+- AC: 11.15s (baseline 11.31s — slight improvement)
+- B: 8.25s (baseline 8.26s — neutral)
+- Wall: 12.62s (baseline 12.80s — slight improvement)
+
+### Current State (Opt 32)
+
+| Scale | V7 | primecount | Ratio |
+|-------|-----|------------|-------|
+| 1e12 | 0.006s | 0.014s | **0.4×** ✓ |
+| 1e13 | 0.014s | 0.015s | **0.9×** ✓ |
+| Max i64 | 12.62s | 8.49s | **1.49×** |
+
+Component breakdown (Max i64, 5-run median):
+- setup: 1.47s
+- B: 8.25s
+- AC: 11.15s ← PRIMARY BOTTLENECK
+- D: 11.11s
+- Wall: 12.62s
+
+AC is near-optimal at ~8.7ns per pi() lookup (31.2B lookups, within 3% of theoretical 42-cycle minimum). The remaining gap vs primecount requires either algorithmic changes (fewer lookups) or fundamentally different data structures.
 | 1e17 | 2.00s | 0.598s | 3.3× |
 | 1e18 | 7.82s | 2.279s | 3.4× |
 | Max i64 | 31.52s | 8.520s | 3.7× |
