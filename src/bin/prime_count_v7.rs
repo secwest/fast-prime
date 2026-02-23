@@ -103,33 +103,90 @@ fn iroot4(n: u64) -> u64 {
 
 fn generate_tables(limit: usize, y: usize) -> (Vec<i8>, Vec<u16>, Vec<bool>) {
     let mut mu = vec![1i8; limit + 1];
-    // u16 lpf: composites ≤ sqrt(limit) ≈ 5196 fit in u16; primes use u16::MAX
-    // lpf==0 means "not yet factored" (prime candidate), eliminating is_prime array
     let mut lpf = vec![0u16; limit + 1];
     let mut y_smooth = vec![true; limit + 1];
     mu[0] = 0;
     y_smooth[0] = false;
 
-    for p in 2..=limit {
-        if lpf[p] != 0 { continue; } // composite, skip
-        // p is prime
-        let p_u16 = std::cmp::min(p, u16::MAX as usize) as u16;
-        lpf[p] = p_u16;
-        mu[p] = -mu[p]; // mu(prime) = -1
-        for m in (2 * p..=limit).step_by(p) {
-            if lpf[m] == 0 { lpf[m] = p_u16; }
-            mu[m] = -mu[m];
-        }
-        let p2 = p * p;
-        if p2 <= limit {
-            for m in (p2..=limit).step_by(p2) { mu[m] = 0; }
-        }
-        if p > y {
-            for m in (p..=limit).step_by(p) {
-                y_smooth[m] = false;
+    let sqrt_limit = isqrt(limit as u64) as usize;
+
+    let small_sieve = Sieve::new(sqrt_limit);
+    let small_primes: Vec<usize> = small_sieve.primes_from(2)
+        .take_while(|&p| p <= sqrt_limit).collect();
+
+    // Phase 1: Parallel segmented sieve — small primes mark mu/lpf per segment
+    // Each segment's mu(S)+lpf(2S) ≈ 1.5MB fits in L2
+    let seg_size: usize = 512 * 1024;
+    let n = limit + 1;
+    let mu_raw = mu.as_mut_ptr() as usize;
+    let lpf_raw = lpf.as_mut_ptr() as usize;
+    let num_segs = (n + seg_size - 1) / seg_size;
+
+    (0..num_segs).into_par_iter().for_each(move |seg| {
+        let lo = seg * seg_size;
+        let hi = std::cmp::min(lo + seg_size, n);
+        let mu_p = mu_raw as *mut i8;
+        let lpf_p = lpf_raw as *mut u16;
+
+        unsafe {
+            for &p in &small_primes {
+                let p_u16 = p as u16;
+                let first = std::cmp::max(2 * p, ((lo + p - 1) / p) * p);
+                let mut m = first;
+                while m < hi {
+                    if *lpf_p.add(m) == 0 { *lpf_p.add(m) = p_u16; }
+                    *mu_p.add(m) = -*mu_p.add(m);
+                    m += p;
+                }
+                let p2 = p * p;
+                if p2 < hi {
+                    let first2 = std::cmp::max(p2, ((lo + p2 - 1) / p2) * p2);
+                    let mut m2 = first2;
+                    while m2 < hi {
+                        *mu_p.add(m2) = 0;
+                        m2 += p2;
+                    }
+                }
             }
         }
+    });
+
+    // Phase 2: identify primes, then parallel medium/large prime marking
+    // No two medium primes share a multiple (p1*p2 > z), so parallel is race-free
+    let all_primes: Vec<usize> = (2..=limit).filter(|&p| lpf[p] == 0).collect();
+    for &p in &all_primes {
+        let p_u16 = std::cmp::min(p, u16::MAX as usize) as u16;
+        lpf[p] = p_u16;
+        mu[p] = -1;
     }
+
+    // Parallel marking: no two medium primes share a multiple (p1*p2 > z)
+    let mu_raw2 = mu.as_mut_ptr() as usize;
+    let ys_raw = y_smooth.as_mut_ptr() as usize;
+    let limit_copy = limit;
+    let y_copy = y;
+    all_primes.par_iter()
+        .filter(|&&p| p > sqrt_limit)
+        .for_each(|&p| {
+            let mu_p = mu_raw2 as *mut i8;
+            unsafe {
+                let mut m = 2 * p;
+                while m <= limit_copy {
+                    *mu_p.add(m) = -*mu_p.add(m);
+                    m += p;
+                }
+            }
+            if p > y_copy {
+                let ys_p = ys_raw as *mut u8;
+                unsafe {
+                    let mut m = p;
+                    while m <= limit_copy {
+                        *ys_p.add(m) = 0;
+                        m += p;
+                    }
+                }
+            }
+        });
 
     (mu, lpf, y_smooth)
 }
@@ -1273,13 +1330,17 @@ fn build_valid_m(z: usize, k: usize, primes: &[u32], pi: &[u32],
     let c = k;
     let min_lpf_threshold = if c + 1 < primes.len() { primes[c + 1] as u16 } else { u16::MAX };
     let valid_m_list: Vec<ValidM> = if pi_sqrtz > c {
-        (1..=z).filter(|&m| m < mu.len() && mu[m] != 0 && lpf[m] > min_lpf_threshold && y_smooth[m])
-            .map(|m| ValidM {
-                m: m as u32,
-                lpf: lpf[m],
-                mu_val: mu[m],
-                _pad: 0,
-                recip_m: ((1u128 << 64) / m as u128) as u64,
+        (1..=z).into_par_iter()
+            .filter_map(|m| {
+                if m < mu.len() && mu[m] != 0 && lpf[m] > min_lpf_threshold && y_smooth[m] {
+                    Some(ValidM {
+                        m: m as u32,
+                        lpf: lpf[m],
+                        mu_val: mu[m],
+                        _pad: 0,
+                        recip_m: ((1u128 << 64) / m as u128) as u64,
+                    })
+                } else { None }
             }).collect()
     } else { vec![] };
 
@@ -1702,9 +1763,10 @@ fn count_primes(x: u64) -> u64 {
     // Thread 2: generate_tables (sequential)
     // Main thread: pi_sieve, primes, phi_cache, generate_pi (sequential)
     let (big_pi, primes, pi_y, k, phi_cache, pi, valid_m_list, vm_index) = std::thread::scope(|s| {
-        let bpi_handle = s.spawn(|| BigPiTable::new(sqrt_x));
-        let tables_handle = s.spawn(|| generate_tables(z, y));
+        let bpi_handle = s.spawn(|| { let t = Instant::now(); let r = BigPiTable::new(sqrt_x); if show_timing { eprintln!("    BigPiTable: {:.3}s", t.elapsed().as_secs_f64()); } r });
+        let tables_handle = s.spawn(|| { let t = Instant::now(); let r = generate_tables(z, y); if show_timing { eprintln!("    gen_tables: {:.3}s", t.elapsed().as_secs_f64()); } r });
 
+        let t_main = Instant::now();
         let pi_sieve = Sieve::new(pi_table_limit);
         let mut primes: Vec<u32> = vec![0];
         primes.extend(pi_sieve.primes_from(2).take_while(|&p| p <= y).map(|p| p as u32));
@@ -1712,13 +1774,16 @@ fn count_primes(x: u64) -> u64 {
         let k = std::cmp::min(7, pi_y);
         let phi_cache = PhiTinyCache::new(k);
         let pi = generate_pi(pi_table_limit, &pi_sieve);
+        if show_timing { eprintln!("    main_setup: {:.3}s", t_main.elapsed().as_secs_f64()); }
 
         let big_pi = bpi_handle.join().unwrap();
         let (mu, lpf, y_smooth) = tables_handle.join().unwrap();
 
         // Build ValidM in setup and drop mu/lpf/y_smooth (151MB freed before concurrent phase)
+        let t_vm = Instant::now();
         let (valid_m_list, vm_index) = build_valid_m(z, k, &primes, &pi, &mu, &lpf, &y_smooth);
         drop(mu); drop(lpf); drop(y_smooth);
+        if show_timing { eprintln!("    build_vm:   {:.3}s", t_vm.elapsed().as_secs_f64()); }
 
         (big_pi, primes, pi_y, k, phi_cache, pi, valid_m_list, vm_index)
     });
@@ -1849,6 +1914,9 @@ fn count_primes(x: u64) -> u64 {
         }
     } else {
         // Default: AC+D on global pool, B on dedicated pool
+        // D_DELAY: milliseconds to delay D start, giving AC clean cache time
+        let d_delay: u64 = std::env::var("D_DELAY").ok()
+            .and_then(|s| s.parse().ok()).unwrap_or(0);
         std::thread::scope(|s| {
             let b_handle = s.spawn(|| {
                 let t = Instant::now();
@@ -1862,6 +1930,9 @@ fn count_primes(x: u64) -> u64 {
                 if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
                 r
             });
+            if d_delay > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(d_delay));
+            }
             let t = Instant::now();
             let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
             if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
