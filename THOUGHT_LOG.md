@@ -2560,3 +2560,35 @@ Component breakdown at Max i64:
 
 Critical path: setup (0.93s) + max(AC, D) ≈ 11.27s. Need max(AC, D) ≤ 7.5s (26-27% reduction).
 B finishes ~2.5s before AC/D; threads auto-redistribute via rayon work-stealing.
+
+## Session 10: Opts 38-39 — Separate B Pool + D Work Balancing Breakthrough
+
+**Context**: Recovered from session crash (6th+ crash). Defensive commit/push protocol in effect.
+
+**Opt 38: Separate Rayon Pool for B** — Created dedicated 24-thread pool for B computation. AC+D get exclusive access to 72-thread global pool. D benefits most from uncontested work-stealing: 10.34→9.52s (-7.9%). Wall: 11.33→11.02s (-2.7%). Commit c08c59b.
+
+**Failed experiments (session 10)**:
+- AC segment size sweep (30K-300K): AC time unchanged at ~10.06s regardless — confirms AC is compute-bound, not memory-bound
+- Alpha re-sweep with separate B pool: ay=13 still optimal
+- Unsegmented AC: 12% regression from L3 thrashing affecting D/B
+- Analyzed and rejected: BIT/Fenwick trees, wheel-6/30 BigPiTable, SoA ValidM, streaming pi, SIMD gathers, float-based fast_div
+
+**Opt 39: D Work Balancing Breakthrough** — This was the big win.
+- **Instrumentation revealed**: xz=225.5B (not 225.5M!), 215K segments, 5.05B VM iterations, 2.55B leaves. The work estimate pi[isqrt(x/low)]≈5600 was nearly CONSTANT across all segments, causing max chunk=6.43s vs avg=0.18s (35× imbalance!).
+- **Fix**: Sample 6 b-values per segment to estimate ValidM m-range widths. Segments with many Type 1 leaves get proportionally more work weight. Increased chunks from 32× to 256× threads.
+- **Result**: Max chunk 6.43→0.39s, D: 9.52→6.45s (-32.2%). Wall unchanged since AC (10.16s) is sole bottleneck.
+- Commit 5ac5664.
+
+### Current State (Opt 39)
+
+| Component | Time |
+|-----------|------|
+| Setup | 0.92s |
+| B | 8.12s |
+| AC | 10.16s |
+| D | 6.45s |
+| Wall | 11.13s |
+
+**Critical path**: setup (0.92s) + AC (10.16s) = 11.08s ≈ wall time. AC is the SOLE bottleneck.
+**D is 3.71s faster than AC** — no longer on critical path.
+**To match primecount (8.49s)**: need AC ≤ ~7.5s (26% reduction). AC is compute-bound (fast_div multiply-port throughput).

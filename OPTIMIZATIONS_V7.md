@@ -883,33 +883,72 @@ Component breakdown at Max i64 (3-run median):
 
 ---
 
-### Current Benchmark (Opt 37)
+## Optimization 38: Separate Rayon Pool for B Computation
+
+**Technique**: Give B its own 24-thread (1× cores) rayon pool, leaving the 72-thread global pool exclusively for AC+D.
+
+**Details**:
+- B previously shared the global 72-thread pool with AC and D
+- With its own pool, B doesn't compete for work-stealing slots
+- D benefits most: gets uncontested access to work-stealing, improving load balance
+- B slightly slower (8.06 vs 7.82s) in smaller pool, but not on critical path
+
+**Result (Max i64, 3-run median)**:
+| Component | Before | After | Change |
+|-----------|--------|-------|--------|
+| D | 10.34s | 9.52s | -7.9% |
+| B | 7.82s | 8.06s | +3.1% (own pool, not critical) |
+| Wall | 11.33s | 11.02s | -2.7% |
+
+---
+
+## Optimization 39: Improved D Work Balancing with VM-Range Estimate
+
+**Technique**: Replace the constant-value work estimate with sampled ValidM m-range widths that capture actual Type 1 leaf density variation across segments.
+
+**Details**:
+- **Root cause found**: Instrumented D revealed 215K segments, 5.05B VM iterations, 2.55B leaves, 304M cross-offs. Max chunk took 6.43s (35× avg) because work estimate pi[isqrt(x/low)] ≈ 5600 for ALL segments — treating wildly different segments equally.
+- **Fix**: For each segment, sample 6 representative b-values and compute their ValidM m-range widths (max_m - min_m). Segments with wide m-ranges (many Type 1 leaves) get proportionally more weight.
+- Also increased chunk count from 32× to 256× threads for finer granularity.
+- Result: max chunk time 6.43s → 0.39s, D total 9.52s → 6.45s (-32%).
+- Wall time unchanged since AC (10.1s) is now the sole bottleneck.
+
+**Result (Max i64, 3-run median)**:
+| Component | Before | After | Change |
+|-----------|--------|-------|--------|
+| D | 9.52s | 6.45s | -32.2% |
+| AC | 10.06s | 10.16s | noise |
+| Wall | 11.02s | 11.13s | noise (AC-limited) |
+
+---
+
+### Current Benchmark (Opt 39)
 
 | Scale | V7 | primecount | Ratio |
 |-------|-----|------------|-------|
-| 1e12 | 0.006s | 0.014s | **0.4×** ✓ |
-| 1e13 | 0.013s | 0.015s | **0.9×** ✓ |
-| 1e14 | 0.026s | 0.023s | 1.1× |
-| 1e15 | 0.065s | 0.059s | 1.1× |
-| 1e16 | 0.222s | 0.178s | 1.2× |
-| 1e17 | 0.790s | 0.598s | 1.3× |
-| 1e18 | 2.97s | 2.27s | 1.3× |
-| Max i64 | 11.33s | 8.49s | 1.33× |
+| 1e12 | 0.005s | 0.014s | **0.4×** ✓ |
+| 1e13 | 0.010s | 0.015s | **0.7×** ✓ |
+| 1e14 | 0.019s | 0.023s | **0.8×** ✓ |
+| 1e15 | 0.060s | 0.059s | 1.0× |
+| 1e16 | 0.206s | 0.178s | 1.2× |
+| 1e17 | 1.019s | 0.598s | 1.7× |
+| 1e18 | 2.95s | 2.27s | 1.3× |
+| Max i64 | 11.13s | 8.49s | 1.31× |
 
 Component breakdown at Max i64 (3-run median):
-| Component | Time | Change from Opt 36 |
+| Component | Time | Change from Opt 38 |
 |-----------|------|--------------------|
-| Setup | 0.93s | — |
-| B | 7.82s | -0.29s (-3%) |
-| AC | 10.12s | -0.28s (noise) |
-| D | 10.34s | -0.27s (-2.5%) |
-| Wall | 11.33s | -0.25s (-2.2%) |
+| Setup | 0.92s | — |
+| B | 8.12s | +0.06s (noise) |
+| AC | 10.16s | +0.10s (noise) |
+| D | 6.45s | -3.07s (-32.2%) |
+| Wall | 11.13s | +0.11s (noise, AC-limited) |
 
 ### Gap Analysis
 
-- Current: 11.33s, primecount: 8.49s → 1.33× gap
-- Critical path: setup (0.93s) + max(AC=10.12, D=10.34) = 11.27s
-- To match primecount: need max(AC, D) ≤ 7.5s (26-27% reduction)
-- AC: memory-latency bound (31.2B pi_fast lookups, BigPiTable 285MB)
-- D: compute-bound (popcnt operations, hardware throughput limit)
-- B/AC/D all share rayon pool — B finishes ~2.5s before AC/D, threads auto-redistribute
+- Current: 11.13s, primecount: 8.49s → 1.31× gap
+- Critical path: setup (0.92s) + AC (10.16s) = 11.08s ≈ wall time
+- D (6.45s) is now 3.71s FASTER than AC — no longer on critical path
+- **AC is the sole bottleneck**: must reduce from 10.16s to ~7.5s (-26%) to match primecount
+- AC is compute-bound (fast_div throughput on multiply ports), not memory-bound
+- B (8.12s) also significant but runs concurrently; only matters if AC gets faster
