@@ -1835,6 +1835,66 @@ Merged bits[] and prefix[] arrays into interleaved data[]: data[2w]=bits, data[2
 
 Result: AC: 28.4s → 27.4s at Max i64 (~3.5% improvement).
 
+---
+
+## Session 7: Opts 27-35
+
+### Summary
+Progressed from Opt 26 (wall ~18s) to Opt 35 (wall 12.13s). Key wins:
+- Opt 27: 3× rayon thread oversubscription (massive D improvement via work-stealing)
+- Opt 28-29: Alpha parameter re-tuning for oversubscription (ay=13, az=1.5)
+- Opt 30: D segment size 2^20 (optimal for L1 cache)
+- Opt 31: AC segment size 130K pairs (optimal for L2 cache)
+- Opt 31b: Overlapped setup tasks (BigPiTable + generate_tables concurrent)
+- Opt 32: Split BigPiTable back to separate arrays (380MB → 285MB, better spatial locality)
+- Opt 33: AC pi-table lookup for l-range bounds + remove cmp::min clamp
+- Opt 34: D sparse index for valid_m_list (VM_STRIDE=64)
+- Opt 35: Branchless pi_fast for AC inner loop
+
+D profiling revealed counting costs 46% of D time (200.4B popcnt operations). Block sums, lazy rebuild, and Fenwick tree all analyzed — maintenance cost ≈ savings for our 33KB sieve.
+
+### Failed Experiments (Session 7)
+- Block sums (neutral), sentinel prev_pos (neutral), AC segment tuning (130K optimal)
+- D segment tuning (seg_cap=20 optimal)
+- SoA valid_m (6-byte entries, neutral)
+
+Final: 12.13s wall, 1.43× primecount (was 1.75× at session start)
+
+---
+
+## Session 8: Opt 36 + Exhaustive Search
+
+### Opt 36: Compact generate_tables
+Profiled BigPiTable::new — discovered it was NOT the setup bottleneck (only 0.12s). The REAL bottleneck was generate_tables at 1.42s, caused by 189MB of arrays (is_prime 27MB + mu 27MB + lpf 108MB + y_smooth 27MB) thrashing the cache.
+
+Changes:
+- lpf Vec<i32> → Vec<u16>: saves 54MB (composites have lpf ≤ 5196, fits in u16)
+- Eliminated is_prime array: uses lpf==0 as unfactored sentinel, saves 27MB
+- Total: 189MB → 108MB (43% reduction)
+
+Result: Setup 1.45s → 0.93s (-36%), Wall 12.13s → 11.58s (-4.5%)
+
+### Exhaustive Failed Experiments (Session 8)
+Tried 7 optimization approaches, all reverted:
+
+1. **Lazy counter for D** (32% regression): cross_off touches all blocks for small primes
+2. **Batched prefetch for AC** (5% regression): L2 already adequate
+3. **Interleaved BigPiTable** (3% regression): worse spatial locality
+4. **4-way unrolled popcnt** (4% regression): compiler already optimal
+5. **Packed mu+y_smooth** (neutral): 27MB saving doesn't help
+6. **Overlapped B/AC with generate_tables** (neutral): generate_tables CPU-starved
+7. **Individual D segments** (2.2× regression): extreme work imbalance without chunking
+
+### Thread pool tuning
+Tested 1×–6× oversubscription. 3× (72 threads) confirmed optimal. D benefits most (19.9s at 1× → 10.6s at 3×), AC relatively stable.
+
+### Analysis
+- Current: 11.58s, primecount: 8.49s → 1.36× gap
+- Critical path: setup 0.93s + max(AC=10.40, D=10.61)
+- AC: 31.2B pi_fast lookups at ~32 cycles each (memory-latency bound)
+- D: 200.4B popcnt operations at hardware throughput limit
+- Remaining gap likely requires algorithmic changes (e.g., primecount's BIT-based hard leaves with larger segments)
+
 ### Alpha Parameter Sweep
 
 Tested alpha_y = 6, 7, 8, 15, 20 at Max i64. ALL within noise (~2s variation). Current alpha_y=9.8 at Max i64 is near-optimal given our AC/B/D balance.

@@ -754,3 +754,120 @@ Component breakdown at Max i64 (5-run median):
 | AC | 10.77s |
 | D | 10.80s |
 | Wall | 12.33s |
+
+---
+
+## Optimization 35: Branchless pi_fast for AC Inner Loop
+
+**Date**: Session 7
+
+**Changes**:
+- Removed bounds check (`n < 3`) from pi_fast() hot path
+- Made pi_fast() `unsafe` with `get_unchecked` for both bits and prefix arrays
+- Callers ensure n ≥ 3 before calling — safe wrapper `pi()` retained for general use
+- Eliminates branch misprediction overhead in AC's 31.2B-call inner loop
+
+**Results at Max i64** (3-run median):
+- AC: 10.77s → 10.36s (-3.8%)
+- Wall: 12.33s → 12.13s (-1.6%)
+- B, D unchanged
+
+---
+
+## Optimization 36: Compact generate_tables (u16 lpf + eliminate is_prime)
+
+**Date**: Session 8
+
+**Changes**:
+- Changed `lpf` from `Vec<i32>` (108MB) to `Vec<u16>` (54MB)
+  - All composite numbers ≤ z have lpf ≤ sqrt(z) ≈ 5196, fits in u16
+  - Primes stored with lpf = p_u16 (clamped to u16::MAX for large primes)
+- Eliminated separate `is_prime` array (27MB) by using lpf==0 as "unfactored" sentinel
+  - Outer loop: `if lpf[p] != 0 { continue; }` replaces `if !is_prime[p] { continue; }`
+- Total memory reduction: 189MB → 108MB (43% less)
+- Better cache behavior during table generation (fewer cache lines touched)
+
+**Results at Max i64** (3-run median):
+- Setup: 1.45s → 0.93s (-36%)
+- Wall: 12.13s → 11.58s (-4.5%)
+- B, AC, D component times unchanged
+
+---
+
+### Failed Experiments (Session 8)
+
+**Lazy Counter for D Counting (REVERTED — 32% regression)**:
+- Added counter/dirty arrays to BitSieve for O(1) block-level count()
+- Built counter in init_sieve, marked dirty blocks in cross_off_sieve, rebuilt lazily in count()
+- Result: 15.88s vs 12.01s baseline
+- Root cause: For small primes (step ~184), cross_off touches ALL blocks → all dirty → rebuild everything + tracking overhead
+
+**Batched Prefetch for AC Inner Loop (REVERTED — 5% regression)**:
+- Computed 32 xpq values in batch, issued prefetches, then did pi_fast lookups
+- Result: AC 10.90s vs 10.36s baseline
+- Root cause: Working set already fits in L2; prefetch overhead dominates L2→L1 savings
+
+**Interleaved BigPiTable (REVERTED — 3% regression)**:
+- Created PiEntry struct (bits u64 + prefix u32 + pad u32 = 16 bytes, align(16))
+- Single cache line access per pi_fast() instead of two
+- Result: AC 10.70s vs 10.36s
+- Root cause: 33% larger table worsens spatial locality (4 entries/cacheline vs 8+16 with separate arrays)
+
+**Explicit 4-way Unrolled popcnt (REVERTED — 4% regression)**:
+- 4 independent accumulators in count() and count_delta() to break dependency chains
+- Result: D 10.89s vs 10.65s
+- Root cause: Compiler already generates optimal code; explicit unrolling adds register pressure
+
+**Packed mu+y_smooth into single i8 (REVERTED — neutral/slight regression)**:
+- Encoded y_smooth into mu magnitude: |mu|==1 means y-smooth, |mu|==2 means not y-smooth
+- Eliminated y_smooth Vec<bool> (27MB), reducing from 108MB to 81MB
+- Result: Wall 11.70s vs 11.58s baseline — no improvement
+- Root cause: The 27MB savings doesn't manifest as performance improvement
+
+**Overlapped B/AC Start with generate_tables (REVERTED — neutral)**:
+- Used channel-based approach: start B/AC immediately when BigPiTable ready (~0.12s)
+- generate_tables runs on background thread, D waits for completion
+- Result: Wall 11.64s vs 11.58s baseline
+- Root cause: generate_tables gets CPU-starved by B/AC consuming all rayon threads (takes 2.31s vs 0.93s standalone)
+
+**Individual D Segments as Rayon Tasks (REVERTED — 2.2× regression)**:
+- Removed work-balanced chunking, used each segment as individual par_iter task
+- Result: 25.88s vs 11.58s baseline
+- Root cause: Extreme work imbalance — first segments have max_b≈8000 (heavy), last segments have max_b≈0 (trivial). Without work-balanced grouping, heavy segments become serial bottlenecks.
+
+**Thread Pool Size Tuning**:
+- Tested THREAD_MULT = 1, 2, 3, 4, 6 (×24 cores = 24, 48, 72, 96, 144 threads)
+- Results: 20.88s, 17.33s, 11.58s, 12.96s, 13.67s — 3× confirmed optimal
+- D benefits most from oversubscription (19.94s→10.61s from 1×→3×), AC stable (~10.4s)
+
+---
+
+### Current Benchmark (Opt 36)
+
+| Scale | V7 | primecount | Ratio |
+|-------|-----|------------|-------|
+| 1e12 | 0.006s | 0.014s | **0.4×** ✓ |
+| 1e13 | 0.013s | 0.015s | **0.9×** ✓ |
+| 1e14 | 0.026s | 0.023s | 1.1× |
+| 1e15 | 0.065s | 0.059s | 1.1× |
+| 1e16 | 0.222s | 0.178s | 1.2× |
+| 1e17 | 0.790s | 0.598s | 1.3× |
+| 1e18 | 2.97s | 2.27s | 1.3× |
+| Max i64 | 11.58s | 8.49s | 1.36× |
+
+Component breakdown at Max i64 (3-run median):
+| Component | Time | Change from Opt 34 |
+|-----------|------|--------------------|
+| Setup | 0.93s | -0.54s (-37%) |
+| B | 8.11s | -0.24s (-3%) |
+| AC | 10.40s | -0.37s (-3%) |
+| D | 10.61s | -0.19s (-2%) |
+| Wall | 11.58s | -0.75s (-6%) |
+
+### Gap Analysis
+
+- Current: 11.58s, primecount: 8.49s → 1.36× gap
+- Critical path: setup (0.93s) + max(AC=10.40, D=10.61) = 11.54s
+- To match primecount: need max(AC, D) ≤ 7.5s (28-29% reduction)
+- AC: memory-latency bound (31.2B pi_fast lookups, ~32 cycles each, BigPiTable 285MB)
+- D: compute-bound (200.4B popcnt operations, hardware throughput limit)
