@@ -948,13 +948,28 @@ impl BitSieve {
     fn count(&self, pos: usize) -> i64 {
         let full = pos / 64;
         let bit = pos % 64;
-        let mut cnt = 0u64;
-        for i in 0..full {
-            cnt += unsafe { *self.bits.get_unchecked(i) }.count_ones() as u64;
+        let nwords = (self.len + 63) / 64;
+
+        // Pick shorter direction: forward from start or backward from end
+        if full < nwords / 2 {
+            // Forward scan
+            let mut cnt = 0u64;
+            for i in 0..full {
+                cnt += unsafe { *self.bits.get_unchecked(i) }.count_ones() as u64;
+            }
+            let mask = (2u64 << bit) - 1;
+            cnt += (unsafe { *self.bits.get_unchecked(full) } & mask).count_ones() as u64;
+            cnt as i64
+        } else {
+            // Backward scan: total - count_of_bits_after_pos
+            let mut suffix = 0u64;
+            let after_mask = if bit < 63 { u64::MAX << (bit + 1) } else { 0 };
+            suffix += (unsafe { *self.bits.get_unchecked(full) } & after_mask).count_ones() as u64;
+            for i in (full + 1)..nwords {
+                suffix += unsafe { *self.bits.get_unchecked(i) }.count_ones() as u64;
+            }
+            self.total - suffix as i64
         }
-        let mask = (2u64 << bit) - 1;
-        cnt += (unsafe { *self.bits.get_unchecked(full) } & mask).count_ones() as u64;
-        cnt as i64
     }
 
     #[inline]
