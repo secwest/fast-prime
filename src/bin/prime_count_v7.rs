@@ -255,16 +255,17 @@ fn get_x_star(x: u64, y: u64) -> u64 {
 
 // ── BigPiTable: O(1) pi lookups for values up to sqrt(x) ────────────────────
 // Odd-only sieve with word-granularity prefix sums.
-// Memory: ~limit/4 bytes.
+// Separate bits and u32 prefix arrays for 25% less memory (285MB vs 380MB).
 
 struct BigPiTable {
-    data: Vec<u64>,     // interleaved: data[2w] = bits (is_prime), data[2w+1] = prefix sum
+    bits: Vec<u64>,     // prime sieve bits
+    prefix: Vec<u32>,   // prefix[w] = popcount(bits[0..w-1]), fits in u32 since pi(3B) < 2^32
 }
 
 impl BigPiTable {
     fn new(limit: usize) -> Self {
         if limit < 3 {
-            return BigPiTable { data: vec![] };
+            return BigPiTable { bits: vec![], prefix: vec![] };
         }
 
         let odd_count = (limit - 1) / 2 + 1;
@@ -345,22 +346,21 @@ impl BigPiTable {
             local
         }).collect();
 
-        // Assemble bits, build prefix sums, and interleave into data array
-        let mut bits = Vec::with_capacity(nwords);
+        // Assemble bits and build prefix sums in separate arrays
+        let mut all_bits = Vec::with_capacity(nwords);
         for seg in &seg_results {
-            bits.extend_from_slice(seg);
+            all_bits.extend_from_slice(seg);
         }
-        bits.truncate(nwords);
+        all_bits.truncate(nwords);
 
-        let mut data = vec![0u64; 2 * nwords];
-        let mut running = 0u64;
+        let mut prefix = vec![0u32; nwords];
+        let mut running = 0u32;
         for i in 0..nwords {
-            data[2 * i] = bits[i];         // bits word
-            data[2 * i + 1] = running;     // prefix sum (primes in words 0..i-1)
-            running += bits[i].count_ones() as u64;
+            prefix[i] = running;
+            running += all_bits[i].count_ones();
         }
 
-        BigPiTable { data }
+        BigPiTable { bits: all_bits, prefix }
     }
 
     fn build_presieve_masks(p: usize) -> Vec<u64> {
@@ -383,26 +383,25 @@ impl BigPiTable {
         let odd_idx = (n - 1) / 2;
         let word = odd_idx / 64;
         let bit = odd_idx % 64;
-        let base = word * 2;
-        // Both bits and prefix are adjacent in the same cache line
-        count += unsafe { *self.data.get_unchecked(base + 1) };
+        count += unsafe { *self.prefix.get_unchecked(word) } as u64;
         let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
-        count += (unsafe { *self.data.get_unchecked(base) } & mask).count_ones() as u64;
+        count += (unsafe { *self.bits.get_unchecked(word) } & mask).count_ones() as u64;
         count
     }
 
     #[inline(always)]
     fn bits_word(&self, w: usize) -> u64 {
-        unsafe { *self.data.get_unchecked(w * 2) }
+        unsafe { *self.bits.get_unchecked(w) }
     }
 
     #[inline(always)]
     #[cfg(target_arch = "x86_64")]
     fn prefetch(&self, n: usize) {
         if n >= 3 {
-            let base = (n - 1) / 2 / 64 * 2;
+            let w = (n - 1) / 2 / 64;
             unsafe {
-                _mm_prefetch(self.data.as_ptr().add(base) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(self.bits.as_ptr().add(w) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(self.prefix.as_ptr().add(w) as *const i8, _MM_HINT_T0);
             }
         }
     }
@@ -741,7 +740,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         // Segmented AC: process BigPiTable in L1-cache-sized segments.
         // Smaller segments = fewer L3/DRAM misses for pi() lookups.
         let seg_pairs: usize = 130_000; // interleaved pairs per segment ≈ 24MB)
-        let total_pairs = big_pi.data.len() / 2;
+        let total_pairs = big_pi.bits.len();
         let num_segs = (total_pairs + seg_pairs - 1) / seg_pairs;
 
         // Each pair covers 128 numbers (64 odd numbers per word * 2 numbers per odd)
