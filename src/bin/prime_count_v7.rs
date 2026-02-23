@@ -205,7 +205,7 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
         (36.8,  7.0, 1.5),   // x ~ 1e16
         (39.1,  8.0, 1.5),   // x ~ 1e17
         (41.4, 12.0, 1.5),   // x ~ 1e18
-        (43.6, 13.0, 1.5),   // x ~ Max i64
+        (43.6, 15.0, 1.2),   // x ~ Max i64
     ];
 
     let (alpha_y, alpha_z) = if logx <= TABLE[0].0 {
@@ -738,14 +738,12 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let c2_a_sum: i64 = if b_lookups.is_empty() { 0 } else {
         let primes_len = primes.len();
 
-        // Segmented AC: process BigPiTable in L1-cache-sized segments.
-        // Smaller segments = fewer L3/DRAM misses for pi() lookups.
+        // Segmented AC: process BigPiTable in L2-cache-sized segments.
         let seg_pairs: usize = 130_000;
         let total_pairs = big_pi.bits.len();
         let num_segs = (total_pairs + seg_pairs - 1) / seg_pairs;
 
         // Each pair covers 128 numbers (64 odd numbers per word * 2 numbers per odd)
-        // Segment s covers numbers [s*seg_pairs*128, (s+1)*seg_pairs*128)
         let numbers_per_seg = seg_pairs * 128;
 
         let mut total: i64 = 0;
@@ -754,12 +752,9 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             let n_hi = std::cmp::min((seg + 1) * numbers_per_seg - 1, sqrt_x);
 
             let seg_sum: i64 = b_lookups.par_iter().map(|info| {
-                // Find l range where n_lo <= xp/primes[l] <= n_hi
-                // Using pi table for O(1) lookup instead of partition_point
                 let l_lo = if seg == num_segs - 1 {
-                    info.l_cur // highest segment includes clamped values
+                    info.l_cur
                 } else {
-                    // First l where primes[l] > xp/(n_hi+1), i.e. xp/primes[l] < n_hi+1
                     let thresh = std::cmp::min(
                         (info.xp / (n_hi as u64 + 1)) as usize, pi_limit);
                     let l_candidate = pi[thresh] as usize + 1;
@@ -769,7 +764,6 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 let l_hi = if n_lo <= 1 {
                     info.l_max
                 } else {
-                    // Last l where primes[l] <= xp/n_lo
                     let thresh_raw = info.xp / n_lo as u64;
                     if thresh_raw == 0 { return 0; }
                     let thresh = std::cmp::min(thresh_raw as usize, pi_limit);
@@ -1690,22 +1684,3 @@ fn main() {
         );
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
