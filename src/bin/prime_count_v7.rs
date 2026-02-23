@@ -737,7 +737,8 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         let primes_len = primes.len();
 
         // Segmented AC: process BigPiTable in L2-cache-sized segments.
-        let seg_pairs: usize = 130_000;
+        let seg_pairs: usize = std::env::var("AC_SEG").ok()
+            .and_then(|s| s.parse().ok()).unwrap_or(130_000);
         let total_pairs = big_pi.bits.len();
         let num_segs = (total_pairs + seg_pairs - 1) / seg_pairs;
 
@@ -1691,9 +1692,48 @@ fn count_primes(x: u64) -> u64 {
         let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
         if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
         let t = Instant::now();
-        let b_val = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
+        // B on global pool in SEQ_MODE to give it all 72 threads
+        let b_val = compute_b(x, y, pi_y, &big_pi);
         if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
         (ac, d, b_val)
+    } else if std::env::var("PHASE_DB_AC").is_ok() {
+        // Phase 1: D + B concurrent (no AC competing for BigPiTable bandwidth)
+        let (d, b_val) = std::thread::scope(|s| {
+            let b_handle = s.spawn(|| {
+                let t = Instant::now();
+                let r = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
+                if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
+                r
+            });
+            let t = Instant::now();
+            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
+            if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
+            (d, b_handle.join().unwrap())
+        });
+        // Phase 2: AC alone (full bandwidth for BigPiTable lookups)
+        let t = Instant::now();
+        let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
+        if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
+        (ac, d, b_val)
+    } else if std::env::var("PHASE_D_ACB").is_ok() {
+        // Phase 1: D alone (full resources)
+        let t = Instant::now();
+        let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
+        if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
+        // Phase 2: AC + B concurrent
+        std::thread::scope(|s| {
+            let b_handle = s.spawn(|| {
+                let t = Instant::now();
+                let r = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
+                if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
+                r
+            });
+            let t = Instant::now();
+            let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
+            if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
+            let b_val = b_handle.join().unwrap();
+            (ac, d, b_val)
+        })
     } else {
         std::thread::scope(|s| {
             let b_handle = s.spawn(|| {
