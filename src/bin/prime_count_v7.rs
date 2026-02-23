@@ -101,31 +101,29 @@ fn iroot4(n: u64) -> u64 {
 
 // ── Precomputation tables ────────────────────────────────────────────────────
 
-fn generate_tables(limit: usize, y: usize) -> (Vec<i8>, Vec<i32>, Vec<bool>) {
+fn generate_tables(limit: usize, y: usize) -> (Vec<i8>, Vec<u16>, Vec<bool>) {
     let mut mu = vec![1i8; limit + 1];
-    let mut lpf = vec![i32::MAX; limit + 1];
+    // u16 lpf: composites ≤ sqrt(limit) ≈ 5196 fit in u16; primes use u16::MAX
+    // lpf==0 means "not yet factored" (prime candidate), eliminating is_prime array
+    let mut lpf = vec![0u16; limit + 1];
     let mut y_smooth = vec![true; limit + 1];
     mu[0] = 0;
-    lpf[0] = 0;
     y_smooth[0] = false;
 
-    let mut is_prime = vec![true; limit + 1];
-    if limit >= 1 { is_prime[0] = false; is_prime[1] = false; }
-
     for p in 2..=limit {
-        if !is_prime[p] { continue; }
-        if lpf[p] == i32::MAX { lpf[p] = p as i32; }
-        mu[p] = -mu[p]; // prime p: mu(p) = -1
+        if lpf[p] != 0 { continue; } // composite, skip
+        // p is prime
+        let p_u16 = std::cmp::min(p, u16::MAX as usize) as u16;
+        lpf[p] = p_u16;
+        mu[p] = -mu[p]; // mu(prime) = -1
         for m in (2 * p..=limit).step_by(p) {
-            is_prime[m] = false;
-            if lpf[m] == i32::MAX { lpf[m] = p as i32; }
+            if lpf[m] == 0 { lpf[m] = p_u16; }
             mu[m] = -mu[m];
         }
         let p2 = p * p;
         if p2 <= limit {
             for m in (p2..=limit).step_by(p2) { mu[m] = 0; }
         }
-        // Mark numbers with prime factors > y as not y-smooth
         if p > y {
             for m in (p..=limit).step_by(p) {
                 y_smooth[m] = false;
@@ -1139,7 +1137,7 @@ struct ValidM {
 
 fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
              primes: &[u32], pi: &[u32],
-             mu: &[i8], lpf: &[i32], y_smooth: &[bool]) -> i64 {
+             mu: &[i8], lpf: &[u16], y_smooth: &[bool]) -> i64 {
     if z == 0 { return 0; }
 
     let xz = (x / z as u64) as usize;
@@ -1159,12 +1157,12 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     }).collect();
 
     // Precompute ValidM list for Type 1 leaves
-    let min_lpf_threshold = if c + 1 < primes.len() { primes[c + 1] as i32 } else { i32::MAX };
+    let min_lpf_threshold = if c + 1 < primes.len() { primes[c + 1] as u16 } else { u16::MAX };
     let valid_m_list: Vec<ValidM> = if pi_sqrtz > c {
         (1..=z).filter(|&m| m < mu.len() && mu[m] != 0 && lpf[m] > min_lpf_threshold && y_smooth[m])
             .map(|m| ValidM {
                 m: m as u32,
-                lpf: std::cmp::min(lpf[m] as u32, u16::MAX as u32) as u16,
+                lpf: lpf[m],
                 mu_val: mu[m],
                 _pad: 0,
                 recip_m: ((1u128 << 64) / m as u128) as u64,
@@ -1404,7 +1402,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
 fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: usize,
                     primes: &[u32], pi: &[u32],
-                    _mu: &[i8], _lpf: &[i32], _y_smooth: &[bool],
+                    _mu: &[i8], _lpf: &[u16], _y_smooth: &[bool],
                     pi_sqrtz: usize, pi_x_star: usize,
                     segment_size: usize, template: &PreSieveTemplate,
                     prime_recip: &[u64], valid_m_list: &[ValidM]) -> i64 {
