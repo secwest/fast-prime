@@ -2872,3 +2872,79 @@ Added diagnostic counters to D's Type 1 ValidM scanning loop:
 3. Separate thread pools can't improve L2 partitioning because OS scheduler interleaves threads regardless
 4. The current alpha parameters are well-tuned — small variations don't significantly change wall time
 5. The 4.35× AC concurrent penalty is fundamentally from BigPiTable (285MB) >> L3 (36MB) being accessed randomly while D floods DRAM with ValidM scans
+
+---
+
+## Session 16: D Data Structure & Scheduling Experiments
+
+### Attempt: FactorTable with recip (Wheel-30 indexed, FAILED)
+**Goal**: Replace ValidM (6.1M × 16B = 97.6MB) with wheel-30 factor table
+- factor: Vec<i16> = 10M × 2B = 20MB (lpf × sign(mu))
+- recip: Vec<u64> = 10M × 8B = 80MB (Barrett reciprocal)
+- Total: 100MB — essentially same as ValidM!
+- **Bug found**: `lpf_arr[m] as i16` overflows for primes > 32767. Fixed with `std::cmp::min(lpf_arr[m], i16::MAX as u16) as i16`
+- **D sequential**: 7.75s (was 5.35s, +45% WORSE) — iterating 10M entries (including 3.9M zeros) vs 6.1M valid-only
+- **AC concurrent**: 10.90s (was 9.74s, +12% worse)
+- **Wall**: 11.89s (was 10.85s)
+- **Root cause**: Total footprint (100MB) ≈ old ValidM (97.6MB), plus 67% more iterations over invalid entries
+- **Verdict**: REVERTED
+
+### Attempt: FactorTable without recip (native division, FAILED)
+**Goal**: Drop recip array, use native u64/u64 division. Factor-only scan = 20MB
+- **D sequential**: native DIV r64 ≈ 80+ cycles vs Barrett ≈ 12 cycles
+- **D concurrent**: 10.78s (was 7.14s, +51% worse!)
+- **Wall**: 11.79s
+- **Root cause**: Native division too slow (40M iterations × 80 extra cycles = significant), and 10M iterations >> 6.1M
+- **Verdict**: REVERTED
+
+### Attempt: SoA ValidM (separate info + m_vals arrays, WASH)
+**Goal**: Split ValidM into: info: Vec<i16> (12.2MB, hot scan) + m_vals: Vec<u32> (24.4MB, cold) = 36.6MB total
+- Keeps only valid entries (6.1M), no wasted iterations
+- Uses native division (no recip)
+- **D sequential**: 5.66s (was 5.35s, +6% from native division overhead)
+- **AC concurrent**: 9.76s (was 9.74s, unchanged!)
+- **Wall**: 10.76s (vs 10.85s, within noise)
+- **Key insight**: Even 36.6MB fills 100% of L3 (36MB), so a single D scan still evicts ALL BigPiTable data. The reduction from 97.6MB to 36.6MB means fewer L3 fills but a SINGLE fill is sufficient for total eviction
+- **Verdict**: REVERTED (not worth the native division overhead)
+
+### Attempt: NTA Prefetch on D's ValidM scan (FAILED)
+**Goal**: Use `_mm_prefetch(..., _MM_HINT_NTA)` to keep D's data in L1 only, minimizing L3 pollution
+- Prefetch 32 entries ahead with NTA hint
+- **AC concurrent**: 9.97s (was 9.76s — WORSE)
+- **Wall**: 11.01s (was 10.76s)
+- **Root cause**: Hardware prefetcher overrides NTA hint for sequential access patterns. The NTA prefetch adds instruction overhead without changing L3 replacement behavior
+- **Verdict**: REVERTED
+
+### Attempt: Unified rayon pool (B on global pool, FAILED)
+**Goal**: Remove separate b_pool, run B+AC+D all on global 72-thread pool
+- **D concurrent**: 8.32s (was 7.28s — B tasks steal CPU from D)
+- **B concurrent**: 8.30s (was 8.72s — 5% better with more threads)
+- **Wall**: 10.97s (worse)
+- **Root cause**: B's CPU-intensive primesieve tasks starve D's memory-bound tasks
+- **Verdict**: REVERTED
+
+### Attempt: PHASE_D_ACB3 (D first, AC on small pool + B on global, KEPT)
+- D alone: 5.42s, then AC(72-thread pool) + B(global pool) concurrent
+- AC with 72 threads: 4.96s (vs 2.23s — too many threads, 144 total = 6× oversub)
+- AC with 24 threads: 7.26s (insufficient parallelism)
+- AC with 8 threads: 11.48s (too few)
+- **Key learning**: AC's 2.23s sequential time requires 72+ threads because it's internally parallel (par_iter over b_lookups). Separate pools always contend on cores.
+- Added as experimental mode (env var PHASE_D_ACB3, AC_THREADS)
+
+### Alpha parameter sweep (re-confirmed optimal)
+- alpha_y=20: AC 9.23s (5% better), D 9.42s (32% worse), wall 10.87s (same)
+- alpha_y=10: AC 11.26s (much worse), wall 12.01s
+- alpha_z=0.8: AC 10.06s, D 7.80s, wall 10.93s (same)
+- **Verdict**: alpha_y=15, alpha_z=1.2 confirmed near-optimal
+
+### Current Performance (Opt 45 + experiments)
+- **Concurrent**: ~10.85s (setup=0.97s, AC=9.72s, D=7.14s, B=8.69s) — UNCHANGED
+- **Sequential**: ~11.78s (setup=0.97s, AC=2.23s, D=5.35s, B=3.19s) — UNCHANGED
+- **Gap to primecount**: 1.28× (target: 8.49s)
+
+### Deep Analysis: Why Nothing Works
+1. **D's L3 pollution is unavoidable**: Even the smallest possible D scan (6.1M m-values × 4B = 24.4MB) exceeds L3 (36MB) when combined with any other data. A single pass fills L3 and evicts ALL of BigPiTable
+2. **AC MUST have 72+ threads**: AC's parallel pi_fast lookups are embarrassingly parallel but require many threads to achieve low latency through DRAM load overlap
+3. **B needs many threads AND dedicated CPU**: B's primesieve is CPU-bound and any CPU contention slows it proportionally
+4. **Phased scheduling loses to concurrency**: D_seq(5.35) + max(AC, B) always > max(AC_contended, D, B) because D's sequential time is too large to amortize
+5. **The i16 overflow bug**: casting u16 → i16 wraps for values > 32767, corrupting both lpf and mu sign. Must clamp in u16 domain before casting

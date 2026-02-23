@@ -1114,3 +1114,25 @@ Moved ValidM table construction from `compute_d()` to the setup phase:
 - **Split rayon pools**: D 19-20s — OS scheduler starvation with 60-96 total threads
 - **Alpha tuning**: alpha_y=15, alpha_z=1.2 confirmed optimal (±0.2s across 5 combinations)
 - **Hugepages**: No effect (likely needs admin privileges on Windows)
+
+### Failed Experiments (Session 16)
+All experiments attempted to reduce D's L3 pollution impact on AC concurrent performance.
+
+- **FactorTable with recip (wheel-30 indexed)**: Replaced ValidM with factor:Vec<i16> + recip:Vec<u64> (100MB total ≈ same as ValidM 97.6MB). Iterated 10M entries vs 6.1M valid entries. D +45%, wall 11.89s. REVERTED.
+  - Bug found: i16 overflow for primes > 32767, fixed with u16-domain clamping
+- **FactorTable without recip (native division)**: Factor-only scan = 20MB but native DIV r64 ≈ 80+ cycles vs Barrett ≈ 12 cycles. D +51%, wall 11.79s. REVERTED.
+- **SoA ValidM (split info+m_vals)**: info:Vec<i16> (12.2MB) + m_vals:Vec<u32> (24.4MB) = 36.6MB. Same valid-entry count. D +6% from native division. Wall 10.76s (noise). Even 36.6MB fills L3. REVERTED.
+- **NTA prefetch on D scan**: `_mm_prefetch(..., _MM_HINT_NTA)` 32 entries ahead. Hardware prefetcher overrides NTA hint for sequential patterns. Wall 11.01s (+2%). REVERTED.
+- **Unified rayon pool (B on global)**: B tasks steal CPU from D. D +14%, B -5%, wall 10.97s. REVERTED.
+- **PHASE_D_ACB3 (phased scheduling)**: Run D first, then AC+B concurrent. AC needs 72+ threads but then contends with B. Wall 11.18s at best. Added as experimental env-var mode.
+- **Alpha sweep**: alpha_y=20 (D 9.42s, +32%), alpha_y=10 (AC 11.26s, +16%), alpha_z=0.8 (wall 10.93s). Confirmed alpha_y=15, alpha_z=1.2 optimal.
+
+### Fundamental Constraint Analysis (Session 16 Conclusions)
+After 20+ experiments across 6 sessions, the core bottleneck is well understood:
+1. **D must scan ≥24MB of data** (6.1M m-values × 4B minimum). Any scan >4MB (1/8 of 36MB L3) causes BigPiTable eviction
+2. **BigPiTable = 285MB >> L3 = 36MB**: Random pi_fast lookups CANNOT stay in cache when ANY other large scan is running
+3. **AC concurrent penalty (4.35×) is architectural**: DRAM latency-bound, not bandwidth-bound (2.4% BW utilization)
+4. **B requires dedicated CPU**: primesieve is compute-intensive, any shared pool causes regression
+5. **No scheduling arrangement can break the tradeoff**: D_seq(5.35s) is too large for phased scheduling to win
+
+The remaining path to beating primecount (8.49s) likely requires algorithmic changes rather than micro-optimizations.

@@ -1747,13 +1747,35 @@ fn count_primes(x: u64) -> u64 {
             (d, b_handle.join().unwrap())
         });
         (ac, d, b_val)
-    } else if std::env::var("PHASE_D_ACB").is_ok() || std::env::var("PHASE_D_ACB2").is_ok() {
+    } else if std::env::var("PHASE_D_ACB").is_ok() || std::env::var("PHASE_D_ACB2").is_ok() || std::env::var("PHASE_D_ACB3").is_ok() {
         // Phase 1: D alone (full resources)
         let t = Instant::now();
         let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
         if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
         // Phase 2: AC + B concurrent
-        if std::env::var("PHASE_D_ACB2").is_ok() {
+        if std::env::var("PHASE_D_ACB3").is_ok() {
+            // AC on small dedicated pool (memory-bound, 8 threads sufficient)
+            // B on global pool (CPU-bound, needs many threads)
+            let ac_threads: usize = std::env::var("AC_THREADS").ok()
+                .and_then(|s| s.parse().ok()).unwrap_or(8);
+            let ac_pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(ac_threads)
+                .build()
+                .unwrap();
+            std::thread::scope(|s| {
+                let b_handle = s.spawn(|| {
+                    let t = Instant::now();
+                    let r = compute_b(x, y, pi_y, &big_pi);
+                    if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
+                    r
+                });
+                let t = Instant::now();
+                let ac = ac_pool.install(|| compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip));
+                if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
+                let b_val = b_handle.join().unwrap();
+                (ac, d, b_val)
+            })
+        } else if std::env::var("PHASE_D_ACB2").is_ok() {
             // Both AC and B on global pool (cache-friendly: both access BigPiTable)
             std::thread::scope(|s| {
                 let b_handle = s.spawn(|| {
