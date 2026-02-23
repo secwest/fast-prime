@@ -401,6 +401,7 @@ impl BigPiTable {
 
     #[inline(always)]
     #[cfg(target_arch = "x86_64")]
+    #[allow(dead_code)]
     fn prefetch(&self, n: usize) {
         if n >= 3 {
             let w = (n - 1) / 2 / 64;
@@ -1220,25 +1221,14 @@ struct ValidM {
     recip_m: u64, // precomputed (1 << 64) / m for fast division
 }
 
-fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
-             primes: &[u32], pi: &[u32],
-             mu: &[i8], lpf: &[u16], y_smooth: &[bool],
-             prime_recip: &[u64]) -> i64 {
-    if z == 0 { return 0; }
+const VM_STRIDE: usize = 64;
 
-    let xz = (x / z as u64) as usize;
-    let sqrt_z = isqrt(z as u64) as usize;
+fn build_valid_m(z: usize, k: usize, primes: &[u32], pi: &[u32],
+                 mu: &[i8], lpf: &[u16], y_smooth: &[bool]) -> (Vec<ValidM>, Vec<u32>) {
     let pi_limit = pi.len() - 1;
+    let sqrt_z = isqrt(z as u64) as usize;
     let pi_sqrtz = pi[std::cmp::min(sqrt_z, pi_limit)] as usize;
-    let pi_x_star = pi[std::cmp::min(x_star, pi_limit)] as usize;
-    let nprimes = primes.len();
     let c = k;
-
-    if c >= pi_x_star { return 0; }
-
-    let template = PreSieveTemplate::new(primes, std::cmp::min(c, nprimes - 1));
-
-    // Precompute ValidM list for Type 1 leaves
     let min_lpf_threshold = if c + 1 < primes.len() { primes[c + 1] as u16 } else { u16::MAX };
     let valid_m_list: Vec<ValidM> = if pi_sqrtz > c {
         (1..=z).filter(|&m| m < mu.len() && mu[m] != 0 && lpf[m] > min_lpf_threshold && y_smooth[m])
@@ -1251,8 +1241,6 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             }).collect()
     } else { vec![] };
 
-    // Build sparse index for O(1) initial lookup into valid_m_list
-    const VM_STRIDE: usize = 64;
     let vm_index: Vec<u32> = if !valid_m_list.is_empty() {
         let max_m = valid_m_list.last().unwrap().m as usize;
         let index_len = max_m / VM_STRIDE + 2;
@@ -1268,6 +1256,27 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         idx
     } else { vec![] };
 
+    (valid_m_list, vm_index)
+}
+
+fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
+             primes: &[u32], pi: &[u32],
+             valid_m_list: &[ValidM], vm_index: &[u32],
+             prime_recip: &[u64]) -> i64 {
+    if z == 0 { return 0; }
+
+    let xz = (x / z as u64) as usize;
+    let sqrt_z = isqrt(z as u64) as usize;
+    let pi_limit = pi.len() - 1;
+    let pi_sqrtz = pi[std::cmp::min(sqrt_z, pi_limit)] as usize;
+    let pi_x_star = pi[std::cmp::min(x_star, pi_limit)] as usize;
+    let nprimes = primes.len();
+    let c = k;
+
+    if c >= pi_x_star { return 0; }
+
+    let template = PreSieveTemplate::new(primes, std::cmp::min(c, nprimes - 1));
+
     let target_segs = rayon::current_num_threads() * 32;
     let seg_cap = std::env::var("D_SEG_CAP").ok()
         .and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);
@@ -1282,9 +1291,9 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
     if num_segments <= 2 {
         return compute_d_serial(x, y, z, k, x_star, xz, primes, pi,
-                                mu, lpf, y_smooth, pi_sqrtz, pi_x_star,
+                                pi_sqrtz, pi_x_star,
                                 segment_size, &template, &prime_recip,
-                                &valid_m_list);
+                                valid_m_list);
     }
 
     // Work-balanced chunk assignment based on estimated Type 1 VM iterations per segment
@@ -1506,7 +1515,6 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
 fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: usize,
                     primes: &[u32], pi: &[u32],
-                    _mu: &[i8], _lpf: &[u16], _y_smooth: &[bool],
                     pi_sqrtz: usize, pi_x_star: usize,
                     segment_size: usize, template: &PreSieveTemplate,
                     prime_recip: &[u64], valid_m_list: &[ValidM]) -> i64 {
@@ -1651,7 +1659,7 @@ fn count_primes(x: u64) -> u64 {
     // Thread 1: BigPiTable::new (parallel, uses rayon)
     // Thread 2: generate_tables (sequential)
     // Main thread: pi_sieve, primes, phi_cache, generate_pi (sequential)
-    let (big_pi, mu, lpf, y_smooth, primes, pi_y, k, phi_cache, pi) = std::thread::scope(|s| {
+    let (big_pi, primes, pi_y, k, phi_cache, pi, valid_m_list, vm_index) = std::thread::scope(|s| {
         let bpi_handle = s.spawn(|| BigPiTable::new(sqrt_x));
         let tables_handle = s.spawn(|| generate_tables(z, y));
 
@@ -1665,7 +1673,12 @@ fn count_primes(x: u64) -> u64 {
 
         let big_pi = bpi_handle.join().unwrap();
         let (mu, lpf, y_smooth) = tables_handle.join().unwrap();
-        (big_pi, mu, lpf, y_smooth, primes, pi_y, k, phi_cache, pi)
+
+        // Build ValidM in setup and drop mu/lpf/y_smooth (151MB freed before concurrent phase)
+        let (valid_m_list, vm_index) = build_valid_m(z, k, &primes, &pi, &mu, &lpf, &y_smooth);
+        drop(mu); drop(lpf); drop(y_smooth);
+
+        (big_pi, primes, pi_y, k, phi_cache, pi, valid_m_list, vm_index)
     });
     if show_timing { eprintln!("  setup tables: {:.2}s", t_setup.elapsed().as_secs_f64()); }
 
@@ -1689,7 +1702,7 @@ fn count_primes(x: u64) -> u64 {
         let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
         if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
         let t = Instant::now();
-        let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
+        let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
         if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
         let t = Instant::now();
         // B on global pool in SEQ_MODE to give it all 72 threads
@@ -1706,7 +1719,7 @@ fn count_primes(x: u64) -> u64 {
                 r
             });
             let t = Instant::now();
-            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
+            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
             if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
             (d, b_handle.join().unwrap())
         });
@@ -1729,7 +1742,7 @@ fn count_primes(x: u64) -> u64 {
                 r
             });
             let t = Instant::now();
-            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
+            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
             if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
             (d, b_handle.join().unwrap())
         });
@@ -1737,7 +1750,7 @@ fn count_primes(x: u64) -> u64 {
     } else if std::env::var("PHASE_D_ACB").is_ok() || std::env::var("PHASE_D_ACB2").is_ok() {
         // Phase 1: D alone (full resources)
         let t = Instant::now();
-        let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
+        let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
         if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
         // Phase 2: AC + B concurrent
         if std::env::var("PHASE_D_ACB2").is_ok() {
@@ -1786,7 +1799,7 @@ fn count_primes(x: u64) -> u64 {
                 r
             });
             let t = Instant::now();
-            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
+            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
             if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
             let ac = ac_handle.join().unwrap();
             let b_val = b_handle.join().unwrap();

@@ -1080,3 +1080,37 @@ At Max i64: 10.67s vs primecount 8.49s = 1.26× gap.
 Exclusive sum = 0.85 + 2.25 + 5.44 + 3.34 = 11.88s (vs 8.49s = 1.40× gap).
 Concurrent wins by 1.21s overlap but components suffer 2-4× contention.
 All data-structure micro-optimizations have been exhausted — further gains require algorithmic restructuring.
+
+---
+
+## Opt 45: ValidM Construction in Setup, Dead Table Elimination
+
+### What
+Moved ValidM table construction from `compute_d()` to the setup phase:
+- Extracted `build_valid_m()` function (~35 lines)
+- ValidM + vm_index built during `count_primes()` setup, BEFORE concurrent phase
+- `mu`, `lpf`, `y_smooth` tables (151MB total) explicitly dropped after ValidM construction
+- Reduces peak memory during concurrent phase by 151MB
+
+### Why
+- mu/lpf/y_smooth were only used to build ValidM, then sat in memory during concurrent phase
+- Dropping 151MB reduces RSS and could reduce TLB pressure
+- Cleaner separation of setup vs compute phases
+
+### Trade-off
+- Setup slightly slower (+0.12s): ValidM construction moves from D-phase to setup
+- D slightly faster (-0.11s): no ValidM construction overhead
+- Net: performance neutral, but cleaner code and lower memory footprint
+
+### Result
+- Concurrent: 10.85s (setup=1.07s, AC=9.74s, D=7.12s, B=8.51s)
+- Sequential: 11.93s (setup=0.97s, AC=2.32s, D=5.35s, B=3.25s)
+- **Impact: Code cleanliness improvement, no performance change**
+
+### Failed Experiments (Session 15)
+- **BigPiTable block prefix BLOCK_SHIFT=1**: AC 13.33s (36% regression) — extra popcount per lookup
+- **AC look-ahead prefetch**: AC 10.89s (12% worse) — bandwidth saturation
+- **Interleaved BigPiTable**: 380MB, AC_seq 2.52s (13% worse) — larger footprint offsets cache line reduction
+- **Split rayon pools**: D 19-20s — OS scheduler starvation with 60-96 total threads
+- **Alpha tuning**: alpha_y=15, alpha_z=1.2 confirmed optimal (±0.2s across 5 combinations)
+- **Hugepages**: No effect (likely needs admin privileges on Windows)

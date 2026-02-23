@@ -2801,3 +2801,74 @@ Added diagnostic counters to D's Type 1 ValidM scanning loop:
 3. D's bottleneck is the massive number of iterations (4.8B VM + 845M Type 2 + 134M crossoff), NOT per-iteration efficiency
 4. To significantly reduce D, would need algorithmic change (on-the-fly m generation like primecount, avoiding the precomputed ValidM entirely)
 5. AC contention (4× blowup concurrent vs exclusive) is caused by L3/memory bandwidth saturation, not thread pool contention
+
+---
+
+## Session 15 (Recovery from crash — JavaScript error)
+
+### Starting Point
+- Commit: `279b194` (Opt 44)
+- Concurrent: ~10.68s (setup=0.92s, AC=9.72s, D=7.14s, B=8.69s)
+- Sequential: ~11.78s (setup=0.85s, AC=2.23s, D=5.46s, B=3.19s)
+- primecount target: 8.49s
+
+### Experiments Conducted
+
+#### 1. BigPiTable block prefix BLOCK_SHIFT=1 (2 words/block)
+- **Result**: AC concurrent 13.33s (was 9.72s) — massive regression
+- Even 0.5 avg extra popcounts per lookup devastates AC's tight loop
+- **Verdict**: REVERTED. Block prefix is fundamentally incompatible with AC's access pattern.
+
+#### 2. AC look-ahead prefetch (compute next batch xpq, issue prefetch)
+- Added prefetch 4 entries ahead in AC narrow+wide inner loops
+- **Result**: AC concurrent 10.89s (was 9.72s) — 12% WORSE
+- Root cause: extra fast_div computation (4 per iteration) + prefetch cache line fills compete for already-saturated DRAM bandwidth
+- **Verdict**: REVERTED. Under bandwidth saturation, ANY extra memory traffic hurts.
+
+#### 3. Interleaved BigPiTable (bits+prefix in single Vec<u64>)
+- Layout: data[2*w] = bits[w], data[2*w+1] = prefix[w] as u64
+- Goal: 1 cache line per pi_fast instead of 2 (bits + prefix always adjacent)
+- **Result**: wall=10.98s (was 10.68s), AC=9.99s (was 9.72s), AC_seq=2.52s (was 2.23s)
+- 33% more memory (380MB vs 285MB) offsets cache line reduction
+- Sequential 13% slower due to stride-2 access pattern reducing spatial locality
+- **Verdict**: REVERTED. Larger data set negates the cache line advantage.
+
+#### 4. Split rayon pools (AC, D, B each with dedicated pool)
+- Goal: prevent L2 cache pollution by keeping AC threads on BigPiTable, D threads on ValidM
+- Tested: AC=48T, D=24T, B=24T (total 96) → D=20.72s (starved by 72 competing threads)
+- Tested: AC=24T, D=24T, B=12T (total 60) → D=19.43s (still starved)
+- Root cause: OS scheduler distributes threads without workload awareness; separate pools create more threads but each gets less CPU time
+- **Verdict**: ABANDONED. Separate pools fundamentally fail due to thread oversubscription.
+
+#### 5. Alpha parameter tuning
+- alpha_y=20, alpha_z=1.2: wall=10.96s (D worse due to more ValidM entries)
+- alpha_y=12, alpha_z=1.2: wall=11.22s (AC worse, more easy leaves)
+- alpha_y=15, alpha_z=1.0: wall=10.65s (nearly same as default)
+- alpha_y=18, alpha_z=1.0: wall=10.75s (B improved but D worse)
+- alpha_y=15, alpha_z=1.5: wall=10.87s (setup slower)
+- **Verdict**: Current alpha_y=15, alpha_z=1.2 remains optimal. Small variations don't help.
+
+#### 6. Hugepages via mimalloc env vars
+- MIMALLOC_LARGE_OS_PAGES=1, MIMALLOC_RESERVE_HUGE_OS_PAGES=4
+- **Result**: 10.72s (within noise of baseline 10.68s)
+- Likely privilege not available on this Windows install
+- **Verdict**: No effect.
+
+#### 7. Move ValidM construction to setup, drop dead tables (COMMITTED)
+- Extracted `build_valid_m()` function from `compute_d()`
+- ValidM + vm_index built during setup phase
+- mu/lpf/y_smooth (151MB) explicitly dropped before concurrent phase
+- **Result**: Performance neutral (setup +0.12s, D -0.11s, concurrent unchanged)
+- **Benefit**: Cleaner code, 151MB less memory during concurrent phase
+
+### Current Performance (Opt 45)
+- **Concurrent**: ~10.85s (setup=1.07s, AC=9.74s, D=7.12s, B=8.51s)
+- **Sequential**: ~11.93s (setup=0.97s, AC=2.32s, D=5.35s, B=3.25s)
+- **Gap to primecount**: 1.28× (target: 8.49s)
+
+### Key Learnings
+1. DRAM bandwidth is the binding constraint — adding ANY extra memory traffic (prefetch, larger data) hurts under contention
+2. Interleaving reduces cache lines per lookup but the larger footprint increases miss rate proportionally
+3. Separate thread pools can't improve L2 partitioning because OS scheduler interleaves threads regardless
+4. The current alpha parameters are well-tuned — small variations don't significantly change wall time
+5. The 4.35× AC concurrent penalty is fundamentally from BigPiTable (285MB) >> L3 (36MB) being accessed randomly while D floods DRAM with ValidM scans
