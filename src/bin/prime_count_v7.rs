@@ -738,9 +738,9 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let c2_a_sum: i64 = if b_lookups.is_empty() { 0 } else {
         let primes_len = primes.len();
 
-        // Segmented AC: process BigPiTable in L3-cache-sized segments.
-        // All pi() lookups within a segment hit L3, reducing DRAM traffic.
-        let seg_pairs: usize = 1_500_000; // interleaved pairs per segment ≈ 24MB
+        // Segmented AC: process BigPiTable in L1-cache-sized segments.
+        // Smaller segments = fewer L3/DRAM misses for pi() lookups.
+        let seg_pairs: usize = 130_000; // interleaved pairs per segment ≈ 24MB)
         let total_pairs = big_pi.data.len() / 2;
         let num_segs = (total_pairs + seg_pairs - 1) / seg_pairs;
 
@@ -1606,3 +1606,22 @@ fn main() {
         );
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
