@@ -2206,6 +2206,49 @@ Before primesieve, tried adding per-block popcount tracking to BitSieve.
 
 ### Results (Opt 21)
 - B: 15.93s → 13.82s (-13.2%)
+
+---
+
+## Session 17-18: Deep Analysis Phase
+
+### L1-Resident SegmentedPiTable (36KB segments) — FAILED
+- Designed 36KB segments (fits L1) with segment-outer, b_lookup-inner iteration
+- Built, verified correctness, benchmarked
+- AC sequential: 2.23s → 12.00s (5.4× WORSE)
+- Root cause: O(segments × b_lookups) = 7890 × 154K = 1.22B bound checks
+- Each bound check ~50-100ns = 60-120s total overhead
+- Also tried AC_SEG=100000 (25.75s) and AC_SEG=500 (13.66s) — all worse
+- REVERTED to baseline (commit 2123ca2)
+
+### AC Iteration Count Discovery
+- Instrumented compute_ac with diagnostic output
+- **35.85 BILLION total iterations** (not 140M as previously assumed!)
+- 154,754 b_lookups: C2=4,744, A=150,010
+- Narrow: 101,135 b_lookups (9.17B iters) — single-segment, fast
+- Wide: 53,619 b_lookups (26.68B iters) — multi-segment, 183 segments
+- Per-iteration: 7.5 CPU cycles (same sequential and concurrent)
+- AC concurrent penalty = purely CPU scheduling (23% share vs 100% exclusive)
+
+### Parameter Sweep Results (all confirmed optimal)
+- alpha_y sweep 10→25: ay=15 optimal (10.87 core·s total work)
+- alpha_z sweep 1.0→2.0: az=1.2 optimal
+- D_SEG_CAP sweep 18→21: default 20 (1MB) optimal
+- POOL_MULT sweep 2→4: default 3 optimal (10.84s)
+- Scheduling variants: none beat default
+
+### Primecount Sieve.cpp Study
+Studied Kim Walisch's cross_off/cross_off_count implementation in detail.
+Key finding: byte-level sieve with constant bit positions (via 64-case Duff's device)
+eliminates variable shifts that dominate our per-crossing cost.
+Their counter array replaces our linear popcount scanning.
+Small-prime inner loop crosses all 8 residues in one loop body.
+This is the primary optimization target for D (68% of D time is cross_off).
+
+### Performance Equation Validated
+Wall time ≈ total_CPU_work / cores
+Current: 263.3 core·s. Target: 203.8 core·s (primecount × 24).
+Gap: 59.5 core·s (22.6% reduction needed).
+Must reduce total algorithmic work — scheduling is already optimal.
 - D: 20.81s → 20.19s (slight improvement, noise)
 - Total: 22.33s → 21.70s (-2.8%)
 - All 15 test cases pass

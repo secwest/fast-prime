@@ -413,191 +413,6 @@ impl BigPiTable {
     }
 }
 
-// ── SegmentedPiTable: O(x^{1/4}) per-segment pi lookup table ─────────────────
-// Replaces BigPiTable for AC lookups. Each segment covers ~492K numbers, table
-// fits in L1 cache (~24KB). Uses wheel-30 bit packing: 8 bits per 30 numbers,
-// each u64 covers 240 numbers. Sieved per-segment using small primes.
-
-const SEG_PI_MASK: [u64; 240] = {
-    let residues: [usize; 8] = [1, 7, 11, 13, 17, 19, 23, 29];
-    let mut table = [0u64; 240];
-    let mut r = 0usize;
-    while r < 240 {
-        let byte_idx = r / 30;
-        let r_within = r % 30;
-        let mut mask: u64 = if byte_idx > 0 {
-            (1u64 << (byte_idx * 8)) - 1
-        } else { 0 };
-        let mut j = 0usize;
-        while j < 8 {
-            if residues[j] <= r_within {
-                mask |= 1u64 << (byte_idx * 8 + j);
-            }
-            j += 1;
-        }
-        table[r] = mask;
-        r += 1;
-    }
-    table
-};
-
-// Segment size: 2048 entries × 240 numbers/entry = 491,520 numbers
-// Table memory: 2048 × (8+4) = 24KB (fits L1)
-const SEG_PI_ENTRIES: usize = 2048;
-const SEG_PI_SIZE: usize = SEG_PI_ENTRIES * 240; // 491,520
-
-struct SegmentedPiTable {
-    bits: Vec<u64>,
-    counts: Vec<u32>,
-    low: u64,
-}
-
-impl SegmentedPiTable {
-    fn new() -> Self {
-        SegmentedPiTable {
-            bits: Vec::with_capacity(SEG_PI_ENTRIES),
-            counts: Vec::with_capacity(SEG_PI_ENTRIES),
-            low: 0,
-        }
-    }
-
-    fn init(&mut self, low: u64, high: u64, pi_low: u32, sieve_primes: &[u32]) {
-        debug_assert!(low % 240 == 0);
-        self.low = low;
-        let size = (high - low) as usize;
-        let num_entries = (size + 239) / 240;
-
-        // Sieve [low, high) using wheel-30 encoding
-        // Each u64 = 8 bytes = 240 numbers, same as our entry format
-        self.bits.clear();
-        self.bits.resize(num_entries, u64::MAX);
-
-        // Clear excess bits in last word
-        let total_groups = (size + 29) / 30; // groups of 30
-        let total_bits = total_groups * 8;
-        let total_entry_bits = num_entries * 64;
-        if total_entry_bits > total_bits {
-            let excess = total_entry_bits - total_bits;
-            self.bits[num_entries - 1] &= u64::MAX >> excess;
-        }
-
-        // Handle low=0: mark 1 as not prime (bit 0 = residue 1 at group 0)
-        if low == 0 {
-            self.bits[0] &= !1u64;
-        }
-
-        // Cross off composites of each small prime, starting from p²
-        for &sp in sieve_primes {
-            let p = sp as u64;
-            if p < 7 { continue; } // 2,3,5 implicit in wheel-30
-            if p * p >= high { break; }
-
-            let p_usize = p as usize;
-            for r_idx in 0..8usize {
-                let r = WHEEL30_RESIDUES[r_idx] as u64;
-                let comp_res_30 = ((p % 30) * r) % 30;
-                let bit_in_byte = MOD30_TO_IDX[comp_res_30 as usize];
-                if bit_in_byte == 255 { continue; }
-                let bit_in_byte = bit_in_byte as usize;
-
-                // Find first q ≡ r (mod 30) with p*q >= max(low, p²)
-                let min_pq = std::cmp::max(low, p * p);
-                let min_q = (min_pq + p - 1) / p;
-                let base30 = (min_q / 30) * 30;
-                let first_q = if base30 + r >= min_q { base30 + r } else { base30 + 30 + r };
-
-                let first_comp = p * first_q;
-                if first_comp >= high { continue; }
-
-                // Byte position of first composite in segment
-                let byte0 = ((first_comp - low) / 30) as usize;
-                // Each step: q advances by 30 → composite advances by p*30 = p_usize bytes
-                let mut byte = byte0;
-                let num_bytes = total_groups;
-                while byte < num_bytes {
-                    let word_idx = byte / 8;
-                    let bit_pos = (byte % 8) * 8 + bit_in_byte;
-                    unsafe {
-                        *self.bits.get_unchecked_mut(word_idx) &= !(1u64 << bit_pos);
-                    }
-                    byte += p_usize;
-                }
-            }
-        }
-
-        // Build prefix counts
-        self.counts.clear();
-        self.counts.reserve(num_entries);
-        let mut running = pi_low;
-        for i in 0..num_entries {
-            self.counts.push(running);
-            running += self.bits[i].count_ones();
-        }
-    }
-
-    /// Fast init by reading prime bits directly from BigPiTable (no sieve needed).
-    /// BigPiTable stores odd-only bits; we extract and repack into wheel-30 format.
-    fn init_from_bigpi(&mut self, low: u64, high: u64, big_pi: &BigPiTable) {
-        debug_assert!(low % 240 == 0);
-        self.low = low;
-        let size = (high - low) as usize;
-        let num_entries = (size + 239) / 240;
-
-        self.bits.clear();
-        self.bits.resize(num_entries, 0u64);
-
-        let bigpi_bits = big_pi.bits.as_ptr();
-        let bigpi_len = big_pi.bits.len();
-
-        for entry_idx in 0..num_entries {
-            let block_start = low + (entry_idx as u64 * 240);
-            let mut word = 0u64;
-
-            for byte_idx in 0u32..8 {
-                let group_start = block_start + byte_idx as u64 * 30;
-                for bit_idx in 0u32..8 {
-                    let n = group_start + WHEEL30_RESIDUES[bit_idx as usize] as u64;
-                    if n >= high as u64 || n < 2 { continue; }
-                    let odd_idx = ((n - 1) >> 1) as usize;
-                    let w = odd_idx >> 6;
-                    let b = odd_idx & 63;
-                    if w < bigpi_len {
-                        if unsafe { (*bigpi_bits.add(w) >> b) & 1 } != 0 {
-                            word |= 1u64 << (byte_idx * 8 + bit_idx);
-                        }
-                    }
-                }
-            }
-            self.bits[entry_idx] = word;
-        }
-
-        // pi_low = number of primes below low
-        let pi_low = if low == 0 { 3u32 } // primes 2, 3, 5 not in wheel-30
-            else { big_pi.pi((low - 1) as usize) as u32 };
-
-        self.counts.clear();
-        self.counts.reserve(num_entries);
-        let mut running = pi_low;
-        for i in 0..num_entries {
-            self.counts.push(running);
-            running += self.bits[i].count_ones();
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn pi(&self, x: u64) -> u32 {
-        // Primes 2, 3, 5 are not in wheel-30 sieve; handle small values
-        if x < 7 {
-            return if x < 2 { 0 } else if x < 3 { 1 } else if x < 5 { 2 } else { 3 };
-        }
-        let offset = (x - self.low) as usize;
-        let entry_idx = offset / 240;
-        let mask = *SEG_PI_MASK.get_unchecked(offset % 240);
-        *self.counts.get_unchecked(entry_idx)
-            + (*self.bits.get_unchecked(entry_idx) & mask).count_ones()
-    }
-}
-
 // ── Sigma: 7 correction formulas ─────────────────────────────────────────────
 
 fn compute_sigma(x: u64, y: usize, x_star: usize,
@@ -922,74 +737,147 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let c2_a_sum: i64 = if b_lookups.is_empty() { 0 } else {
         let primes_len = primes.len();
 
-        // ── SegmentedPiTable approach: segment-outer, b_lookup-inner ─────
-        // Build a small SegmentedPiTable per segment from BigPiTable bits.
-        // Init is fast (sequential BigPiTable reads, no sieve needed).
-        // Pi lookups hit L1 cache (~4ns) instead of DRAM (~60ns).
-        let seg_size = std::env::var("AC_SEG_SIZE").ok()
-            .and_then(|s| s.parse().ok()).unwrap_or(SEG_PI_SIZE);
-        let seg_size = ((seg_size + 239) / 240) * 240;
-        let num_segs = (sqrt_x + seg_size) / seg_size;
+        // Segmented AC: process BigPiTable in L2-cache-sized segments.
+        let seg_pairs: usize = std::env::var("AC_SEG").ok()
+            .and_then(|s| s.parse().ok()).unwrap_or(130_000);
+        let total_pairs = big_pi.bits.len();
+        let num_segs = (total_pairs + seg_pairs - 1) / seg_pairs;
 
-        // Process segments in parallel. Each segment builds its own small
-        // SegmentedPiTable from BigPiTable bits, then processes matching b_lookups.
-        (0..num_segs).into_par_iter().map(|seg| {
-            let low = (seg * seg_size) as u64;
-            let high = std::cmp::min(((seg + 1) * seg_size) as u64, sqrt_x as u64 + 1);
-            if low >= high { return 0i64; }
+        // Each pair covers 128 numbers (64 odd numbers per word * 2 numbers per odd)
+        let numbers_per_seg = seg_pairs * 128;
 
-            // Build SegmentedPiTable by reading BigPiTable bits (no sieve)
-            let mut seg_pi = SegmentedPiTable::new();
-            seg_pi.init_from_bigpi(low, high, big_pi);
+        // Partition b_lookups into narrow (xpq range fits in ~1 segment, process unsegmented)
+        // and wide (needs segmented processing to keep BigPiTable in L2).
+        // Narrow b_lookups skip the segment loop overhead entirely.
+        let mut narrow_indices: Vec<u32> = Vec::new();
+        let mut wide_indices: Vec<u32> = Vec::new();
+        for (i, info) in b_lookups.iter().enumerate() {
+            let xpq_min = info.xp / primes[info.l_max] as u64;
+            let xpq_max = info.xp / primes[info.l_cur] as u64;
+            if (xpq_max - xpq_min) < numbers_per_seg as u64 {
+                narrow_indices.push(i as u32);
+            } else {
+                wide_indices.push(i as u32);
+            }
+        }
 
-            let mut local_sum = 0i64;
+        // Process narrow b_lookups unsegmented (their BigPiTable access is naturally localized)
+        let narrow_sum: i64 = narrow_indices.par_iter().map(|&bi| {
+            let info = &b_lookups[bi as usize];
+            let eff_lo = info.l_cur;
+            let eff_hi = std::cmp::min(info.l_max, primes_len - 1);
+            if eff_lo > eff_hi { return 0; }
 
-            for info in b_lookups.iter() {
-                // Compute l bounds: xpq = xp/primes[l] must be in [low, high)
-                let l_hi = if low == 0 {
-                    info.l_max
+            let mut local = 0i64;
+            let mut l = eff_lo;
+
+            while l + 3 <= eff_hi {
+                let xpq0 = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
+                let xpq1 = fast_div(info.xp, primes[l+1] as u64, recip[l+1]) as usize;
+                let xpq2 = fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize;
+                let xpq3 = fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize;
+
+                unsafe {
+                    if info.is_c2 {
+                        local += (big_pi.pi_fast(xpq0) as i64 - info.b as i64 + 2)
+                               + (big_pi.pi_fast(xpq1) as i64 - info.b as i64 + 2)
+                               + (big_pi.pi_fast(xpq2) as i64 - info.b as i64 + 2)
+                               + (big_pi.pi_fast(xpq3) as i64 - info.b as i64 + 2);
+                    } else {
+                        let p0 = big_pi.pi_fast(xpq0) as i64;
+                        let p1 = big_pi.pi_fast(xpq1) as i64;
+                        let p2 = big_pi.pi_fast(xpq2) as i64;
+                        let p3 = big_pi.pi_fast(xpq3) as i64;
+                        if l + 3 <= info.y_boundary_l {
+                            local += p0 + p1 + p2 + p3;
+                        } else if l > info.y_boundary_l {
+                            local += 2 * (p0 + p1 + p2 + p3);
+                        } else {
+                            for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
+                                local += if ll <= info.y_boundary_l { pv } else { 2 * pv };
+                            }
+                        }
+                    }
+                }
+                l += 4;
+            }
+
+            while l <= eff_hi {
+                let xpq = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
+                let pi_val = unsafe { big_pi.pi_fast(xpq) } as i64;
+                if info.is_c2 {
+                    local += pi_val - info.b as i64 + 2;
+                } else if l <= info.y_boundary_l {
+                    local += pi_val;
                 } else {
-                    let thresh = std::cmp::min((info.xp / low) as usize, pi_limit);
-                    std::cmp::min(pi[thresh] as usize, info.l_max)
-                };
+                    local += 2 * pi_val;
+                }
+                l += 1;
+            }
 
-                let l_lo = if high as u64 > info.xp {
+            local
+        }).sum();
+
+        // Process wide b_lookups with segmented approach
+        let mut wide_sum: i64 = 0;
+        if !wide_indices.is_empty() {
+            for seg in (0..num_segs).rev() {
+                let n_lo = if seg == 0 { 0usize } else { seg * numbers_per_seg };
+                let n_hi = std::cmp::min((seg + 1) * numbers_per_seg - 1, sqrt_x);
+
+                let seg_sum: i64 = wide_indices.par_iter().map(|&bi| {
+                    let info = &b_lookups[bi as usize];
+
+                let l_lo = if seg == num_segs - 1 {
                     info.l_cur
                 } else {
-                    let thresh = std::cmp::min((info.xp / high as u64) as usize, pi_limit);
-                    std::cmp::max(pi[thresh] as usize + 1, info.l_cur)
+                    let thresh = std::cmp::min(
+                        (info.xp / (n_hi as u64 + 1)) as usize, pi_limit);
+                    let l_candidate = pi[thresh] as usize + 1;
+                    std::cmp::max(l_candidate, info.l_cur)
+                };
+
+                let l_hi = if n_lo <= 1 {
+                    info.l_max
+                } else {
+                    let thresh_raw = info.xp / n_lo as u64;
+                    if thresh_raw == 0 { return 0; }
+                    let thresh = std::cmp::min(thresh_raw as usize, pi_limit);
+                    let l_candidate = pi[thresh] as usize;
+                    std::cmp::min(l_candidate, info.l_max)
                 };
 
                 let eff_lo = std::cmp::max(l_lo, info.l_cur);
                 let eff_hi = std::cmp::min(l_hi, std::cmp::min(info.l_max, primes_len - 1));
-                if eff_lo > eff_hi { continue; }
+                if eff_lo > eff_hi || eff_lo >= primes_len { return 0; }
 
+                let mut local = 0i64;
                 let mut l = eff_lo;
 
                 while l + 3 <= eff_hi {
-                    let xpq0 = fast_div(info.xp, primes[l] as u64, recip[l]);
-                    let xpq1 = fast_div(info.xp, primes[l+1] as u64, recip[l+1]);
-                    let xpq2 = fast_div(info.xp, primes[l+2] as u64, recip[l+2]);
-                    let xpq3 = fast_div(info.xp, primes[l+3] as u64, recip[l+3]);
+                    let xpq0 = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
+                    let xpq1 = fast_div(info.xp, primes[l+1] as u64, recip[l+1]) as usize;
+                    let xpq2 = fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize;
+                    let xpq3 = fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize;
 
                     unsafe {
                         if info.is_c2 {
-                            local_sum += (seg_pi.pi(xpq0) as i64 - info.b as i64 + 2)
-                                       + (seg_pi.pi(xpq1) as i64 - info.b as i64 + 2)
-                                       + (seg_pi.pi(xpq2) as i64 - info.b as i64 + 2)
-                                       + (seg_pi.pi(xpq3) as i64 - info.b as i64 + 2);
+                            local += (big_pi.pi_fast(xpq0) as i64 - info.b as i64 + 2)
+                                   + (big_pi.pi_fast(xpq1) as i64 - info.b as i64 + 2)
+                                   + (big_pi.pi_fast(xpq2) as i64 - info.b as i64 + 2)
+                                   + (big_pi.pi_fast(xpq3) as i64 - info.b as i64 + 2);
                         } else {
-                            let p0 = seg_pi.pi(xpq0) as i64;
-                            let p1 = seg_pi.pi(xpq1) as i64;
-                            let p2 = seg_pi.pi(xpq2) as i64;
-                            let p3 = seg_pi.pi(xpq3) as i64;
+                            let p0 = big_pi.pi_fast(xpq0) as i64;
+                            let p1 = big_pi.pi_fast(xpq1) as i64;
+                            let p2 = big_pi.pi_fast(xpq2) as i64;
+                            let p3 = big_pi.pi_fast(xpq3) as i64;
                             if l + 3 <= info.y_boundary_l {
-                                local_sum += p0 + p1 + p2 + p3;
+                                local += p0 + p1 + p2 + p3;
                             } else if l > info.y_boundary_l {
-                                local_sum += 2 * (p0 + p1 + p2 + p3);
+                                local += 2 * (p0 + p1 + p2 + p3);
                             } else {
                                 for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
-                                    local_sum += if ll <= info.y_boundary_l { pv } else { 2 * pv };
+                                    local += if ll <= info.y_boundary_l { pv } else { 2 * pv };
                                 }
                             }
                         }
@@ -998,21 +886,26 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 }
 
                 while l <= eff_hi {
-                    let xpq = fast_div(info.xp, primes[l] as u64, recip[l]);
-                    let pi_val = unsafe { seg_pi.pi(xpq) } as i64;
+                    let xpq = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
+                    let pi_val = unsafe { big_pi.pi_fast(xpq) } as i64;
                     if info.is_c2 {
-                        local_sum += pi_val - info.b as i64 + 2;
+                        local += pi_val - info.b as i64 + 2;
                     } else if l <= info.y_boundary_l {
-                        local_sum += pi_val;
+                        local += pi_val;
                     } else {
-                        local_sum += 2 * pi_val;
+                        local += 2 * pi_val;
                     }
                     l += 1;
                 }
-            }
 
-            local_sum
-        }).sum()
+                local
+                }).sum();
+
+                wide_sum += seg_sum;
+            }
+        }
+
+        narrow_sum + wide_sum
     };
 
     c1 + c2_a_sum

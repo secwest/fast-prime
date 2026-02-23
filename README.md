@@ -68,7 +68,7 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 | 1e18 | 3.02s | 2.27s | 1.3× | — |
 | Max i64 | 10.85s | 8.49s | 1.28× | — |
 
-V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI streaming merge, with alpha parameters tuned through 45 rounds of optimization. primecount is the fastest published prime counting code. V7 is **faster at 1e12-1e15**, with the gap narrowed to **1.28× at Max i64**. AC concurrent L3 contention (9.7s vs 2.3s sequential) is the sole bottleneck.
+V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI streaming merge, with alpha parameters tuned through 45 rounds of optimization. primecount is the fastest published prime counting code. V7 is **faster at 1e12-1e15**, with the gap narrowed to **1.28× at Max i64**. Deep analysis (sessions 17-18) confirmed the remaining gap is due to total algorithmic work (263 vs 204 core·seconds), not scheduling. Primary optimization target: D's cross_off_sieve (68% of D time, 49.7% of total work) — primecount's byte-level sieve approach is ~2× more efficient per crossing.
 
 ### Best (V7) vs V1 Speedup
 

@@ -1136,3 +1136,57 @@ After 20+ experiments across 6 sessions, the core bottleneck is well understood:
 5. **No scheduling arrangement can break the tradeoff**: D_seq(5.35s) is too large for phased scheduling to win
 
 The remaining path to beating primecount (8.49s) likely requires algorithmic changes rather than micro-optimizations.
+
+---
+
+## Session 17-18: Deep Analysis & Failed Experiments
+
+### L1-Resident SegmentedPiTable (36KB segments) — FAILED
+
+**Idea**: Use tiny 36KB segments for SegmentedPiTable to keep pi() data in L1 cache. Process b_lookups segment-by-segment, re-initializing SegmentedPiTable for each segment.
+
+**Result**: AC sequential 2.23s → 12.00s (5.4× WORSE). Varying AC_SEG: 100000→25.75s, 500→13.66s.
+
+**Root cause**: Iterating ALL 154,754 b_lookups for each of 7,890 segments creates O(segments × b_lookups) bound-check overhead: 7,890 × 154,754 = 1.22B bound checks at ~50-100ns each = 60-120s overhead. The segment-outer loop inverts the access pattern from cache-friendly to catastrophic.
+
+**Verdict**: REVERTED. SegmentedPiTable approaches fundamentally cannot work with outer-segment iteration.
+
+### AC Deep Analysis — Key Discoveries
+
+Added diagnostic instrumentation to compute_ac:
+- **154,754 b_lookups** (C2=4,744, A=150,010)
+- **35.85 BILLION total iterations** — much larger than previously estimated
+- Narrow: 101,135 b_lookups (9.17B iters), Wide: 53,619 b_lookups (26.68B iters), 183 segments
+- Per-iteration cost: 7.5 CPU cycles (fast_div + BigPiTable access + accumulate)
+- **Per-iteration cost IDENTICAL in sequential vs concurrent** — confirms no cache penalty
+- AC concurrent penalty (2.23→9.75s, 4.35×) is PURELY CPU scheduling: AC gets ~23% of CPU time when sharing cores with D
+
+### Parameter Sweeps — All Optimal
+
+- **Alpha sweep**: alpha_y=10..25 (az=1.2 fixed): ay=15 optimal (min total_work 10.87 core·s)
+- **Alpha_z sweep**: az=1.0..2.0 (ay=15 fixed): az=1.2 optimal
+- **D_SEG_CAP sweep**: 18 (256K)→5.99s, 19 (512K)→5.99s, 20 (1M, default)→5.45s, 21 (2M)→7.17s — default optimal
+- **POOL_MULT sweep**: 2→11.31s, 3 (default)→10.84s, 4→10.81s — default near-optimal
+- **Scheduling**: PHASE_AC_DB, PHASE_D_ACB2, PHASE_DB_AC, ALL_GLOBAL tested — none beat default 10.75s
+
+### Fundamental Performance Equation (discovered)
+
+Wall time ≈ (D_seq + AC_seq + B_seq) / cores ≈ max(setup + max(AC_concurrent, D_concurrent, B_concurrent))
+
+- Current sequential sum: 5.45 + 2.26 + 3.23 = 10.94s → ~10.84s concurrent wall
+- Total CPU work: 263.3 core·seconds. primecount target: 203.8 core·seconds (8.49s × 24)
+- **Gap: 59.5 core·seconds (22.6% total work reduction needed)**
+- To beat primecount, must reduce TOTAL ALGORITHMIC WORK, not improve scheduling
+
+### Primecount's Sieve Approach (studied Sieve.cpp)
+
+Key differences from our cross_off_sieve:
+1. **Byte-level cross-off**: operates on sieve[byte] &= ~(1 << constant_bit), not 64-bit word ops with variable shifts
+2. **Duff's device (64 wheel states)**: switch/case with constant bit positions per case → no variable shifts
+3. **Small-prime unrolled loop**: all 8 residue crossings in one tight loop body with hardcoded byte offsets
+4. **Counter array**: O(1) delta counting via counter[pos >> log2_dist], updated per crossing
+5. **Wheel state persistence**: stored per prime across segments (we recompute first crossing each segment)
+6. **Our cost**: 9 ops/crossing (2 variable shifts, extract, add, shift, NOT, AND, store + delta tracking)
+7. **Their cost**: ~5 ops/crossing (load byte, extract with constant shift, clear with constant mask, update counter, store)
+
+**Expected impact of adopting byte-level approach**: ~30-50% speedup on D's cross_off (~68% of D time), saving ~1.5s → wall time from 10.85s to ~9.3s.
