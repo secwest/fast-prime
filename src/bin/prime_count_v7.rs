@@ -1166,6 +1166,23 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             }).collect()
     } else { vec![] };
 
+    // Build sparse index for O(1) initial lookup into valid_m_list
+    const VM_STRIDE: usize = 64;
+    let vm_index: Vec<u32> = if !valid_m_list.is_empty() {
+        let max_m = valid_m_list.last().unwrap().m as usize;
+        let index_len = max_m / VM_STRIDE + 2;
+        let mut idx = vec![valid_m_list.len() as u32; index_len];
+        let mut vi = 0usize;
+        for bucket in 0..index_len {
+            let bucket_start = bucket * VM_STRIDE;
+            while vi < valid_m_list.len() && (valid_m_list[vi].m as usize) < bucket_start {
+                vi += 1;
+            }
+            idx[bucket] = vi as u32;
+        }
+        idx
+    } else { vec![] };
+
     let target_segs = rayon::current_num_threads() * 32;
     let seg_cap = std::env::var("D_SEG_CAP").ok()
         .and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);
@@ -1262,8 +1279,27 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 if prime as usize >= max_m { break; }
 
                 if min_m < max_m {
-                    let vm_start = valid_m_list.partition_point(|v| (v.m as usize) <= min_m);
-                    let vm_end = valid_m_list.partition_point(|v| (v.m as usize) <= max_m);
+                    // Use sparse index for fast initial lookup, then short binary search
+                    let vm_start = {
+                        let bucket = std::cmp::min(min_m / VM_STRIDE, vm_index.len() - 1);
+                        let hint = vm_index[bucket] as usize;
+                        let search_end = if bucket + 2 < vm_index.len() {
+                            vm_index[bucket + 2] as usize
+                        } else { valid_m_list.len() };
+                        let search_end = std::cmp::min(search_end, valid_m_list.len());
+                        let slice = &valid_m_list[hint..search_end];
+                        hint + slice.partition_point(|v| (v.m as usize) <= min_m)
+                    };
+                    let vm_end = {
+                        let bucket = std::cmp::min(max_m / VM_STRIDE, vm_index.len() - 1);
+                        let hint = vm_index[bucket] as usize;
+                        let search_end = if bucket + 2 < vm_index.len() {
+                            vm_index[bucket + 2] as usize
+                        } else { valid_m_list.len() };
+                        let search_end = std::cmp::min(search_end, valid_m_list.len());
+                        let slice = &valid_m_list[hint..search_end];
+                        hint + slice.partition_point(|v| (v.m as usize) <= max_m)
+                    };
 
                     let mut prev_pos: Option<usize> = None;
                     let mut running_count: i64 = 0;
