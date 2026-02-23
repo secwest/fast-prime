@@ -49,13 +49,13 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 │ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.31895s  │    0.65938s  │279,238,341,033,925│
 │ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    1.07000s  │2,623,557,157,654,233│
 │ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │    3.29000s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │   12.62000s  │216,289,611,853,439,384│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │   12.33000s  │216,289,611,853,439,384│
 └───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴───────────────────┘
 ```
 
 ### V7 vs Kim Walisch's primecount v8.2 (Gourdon, state of the art)
 
-| Scale | V7 (Opt 32) | primecount | Ratio | primesieve |
+| Scale | V7 (Opt 34) | primecount | Ratio | primesieve |
 |---|---|---|---|---|
 | 1e10 | 0.004s | — | — | 0.058s |
 | 1e11 | 0.004s | — | — | 0.596s |
@@ -66,9 +66,9 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 | 1e16 | 0.261s | 0.178s | 1.5× | — |
 | 1e17 | 0.932s | 0.598s | 1.6× | — |
 | 1e18 | 3.38s | 2.27s | 1.5× | — |
-| Max i64 | 12.62s | 8.49s | 1.49× | — |
+| Max i64 | 12.33s | 8.49s | 1.45× | — |
 
-V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI streaming merge, with alpha parameters tuned through 32 rounds of optimization. primecount is the fastest published prime counting code. V7 Opt 32 is **faster at 1e12-1e13**, with the gap at **1.49× at Max i64**.
+V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI streaming merge, with alpha parameters tuned through 34 rounds of optimization. primecount is the fastest published prime counting code. V7 Opt 34 is **faster at 1e12-1e13**, with the gap at **1.45× at Max i64**.
 
 ### Best (V7) vs V1 Speedup
 

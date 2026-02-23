@@ -681,3 +681,76 @@ Component breakdown at Max i64 (5-run median):
 | AC | 11.15s |
 | D | 11.11s |
 | Wall | 12.62s |
+
+---
+
+## Optimization 33: AC Pi-Table Lookup + Remove cmp::min Clamp
+
+**Date**: Session 7
+
+**Changes**:
+- Replaced O(log n) `partition_point` binary search in AC segment loop with O(1) pi[] table lookups
+- `l_lo = pi[thresh] + 1` and `l_hi = pi[thresh_hi]` for direct l-range bounds
+- pi[] table extends to max(z, max_a_prime) = 40.9M — sufficient for all thresholds
+- Removed `std::cmp::min(xpq, sqrt_x)` clamp in C2 and A lookups
+- **Mathematical proof**: xpq = x/(p·q) ≤ x/y² ≤ x^{1/3} < sqrt_x always holds
+
+**Results at Max i64**: AC: 11.15s → 10.91s (-2.2%), Wall: 12.62s → 12.42s (-1.6%)
+
+---
+
+## Optimization 34: D Sparse Index for valid_m_list
+
+**Date**: Session 7
+
+**Changes**:
+- Built sparse index over valid_m_list with VM_STRIDE=64
+- `vm_index[m/64]` = first valid_m position with m ≥ bucket×64
+- Index size: 2.6MB (639K entries × 4 bytes) — fits comfortably in L3
+- Replaces O(log 4.9M) = 22-comparison binary search over 78MB valid_m_list
+- Narrowed search to O(log ~16) = 4 comparisons over ~16 entries
+- 78MB valid_m_list causes cache-unfriendly random DRAM access at ~60ns/comparison
+
+**Results at Max i64**: D: 11.11s → 10.80s, Wall: 12.42s → 12.33s
+
+---
+
+### Failed Attempts (Session 7)
+
+**D Counting Cost Analysis (Profiling)**:
+- Hardcoded count()/count_delta() to return 0: D without counting = 6.0s, with = 11.1s
+- Counting costs 5.1s (46% of D time)
+- 66.8M count() calls × 1405 words + 2481.8M count_delta() calls × 42.9 words = 200.4B total words
+- Theoretical minimum 1.67s at 1 cycle/word; actual 3.06 cycles/word effective
+
+**Block Sums in BitSieve (NEUTRAL — REVERTED)**: BLOCK_K=64 block sums. count() from 1405→54 ops (26× faster), BUT cross_off updates add ~1.5s overhead (read-modify-write serialization for small primes). Net result: D 11.04s ≈ 11.11s baseline. Block sums, lazy rebuild, and Fenwick tree all analyzed — maintenance cost ≈ savings.
+
+**D Segment Size Tuning**: Tested seg_cap {18,19,20,21}. seg_cap=20 confirmed optimal.
+
+**Sentinel prev_pos (NEUTRAL — REVERTED)**: Replaced Option<usize> with usize::MAX sentinel. No measurable improvement — compiler already optimizes Option efficiently.
+
+**Assembly Analysis**: Confirmed scalar POPCNTQ loops (no AVX-512 on Arrow Lake desktop). GFNI+AVX2 only used for BigPiTable construction. ~1 cycle/word throughput.
+
+---
+
+### Current Benchmark (Opt 34)
+
+| Scale | V7 | primecount | Ratio |
+|-------|-----|------------|-------|
+| 1e12 | 0.006s | 0.014s | **0.4×** ✓ |
+| 1e13 | 0.014s | 0.015s | **0.9×** ✓ |
+| 1e14 | 0.029s | 0.023s | 1.3× |
+| 1e15 | 0.079s | 0.059s | 1.3× |
+| 1e16 | 0.261s | 0.178s | 1.5× |
+| 1e17 | 0.932s | 0.598s | 1.6× |
+| 1e18 | 3.38s | 2.27s | 1.5× |
+| Max i64 | 12.33s | 8.49s | 1.45× |
+
+Component breakdown at Max i64 (5-run median):
+| Component | Time |
+|-----------|------|
+| Setup | 1.47s |
+| B | 8.35s |
+| AC | 10.77s |
+| D | 10.80s |
+| Wall | 12.33s |

@@ -2351,3 +2351,107 @@ Instrumented AC to count total work: 31.2B BigPiTable lookups at Max i64. Table 
 | 1e17 | 0.949s | 0.598s | 1.6× |
 | 1e18 | 3.49s | 2.27s | 1.5× |
 | Max i64 | 13.8s | 8.49s | 1.63× |
+
+---
+
+## Session 6: D Profiling Deep Dive + Optimizations 29-32
+
+*(Documented in prior commit 61c147b — see OPTIMIZATIONS_V7.md for full details)*
+
+---
+
+## Session 7: D Counting Analysis + Optimizations 33-34
+
+### D Counting Cost Measurement
+
+Hardcoded count()/count_delta() to return 0 to measure counting overhead in isolation.
+
+**Key finding**: D without counting = 6.0s, D with counting = 11.1s → counting costs **5.1s** (46% of D time).
+
+Note: env::var() in hot loops causes massive slowdown — must use compile-time constants or hardcoded values for profiling flags.
+
+### D Operation Count Instrumentation
+
+Added per-sieve counters (non-atomic, each thread owns its sieve) to measure actual work:
+
+| Operation | Calls | Avg words/call | Total words |
+|-----------|-------|-----------------|-------------|
+| count() | 66.8M | 1,405 | 93.8B |
+| count_delta() | 2,481.8M | 42.9 | 106.6B |
+| **Total** | 2,548.6M | — | 200.4B |
+
+Theoretical minimum at 1 cycle/word: 1.67s. Actual 5.1s → 3.06 cycles/word effective (includes per-call overhead, match branches, Option management).
+
+### Block Sum Approach for D (ATTEMPTED, NEUTRAL — REVERTED)
+
+Implemented BLOCK_K=64 block sums in BitSieve: block_sums[i] = popcount of 64-word block.
+- count() uses block sums for prefix, scans only partial block
+- count_delta() uses block sums for large deltas spanning multiple blocks
+- cross_off_sieve updates block_sums during bit clearing (branchless decrement)
+
+**Result**: Performance NEUTRAL (D: 11.04s vs 11.11s baseline).
+**Root cause**: cross_off update overhead (~1.5s) cancels count() savings (~2.3s) exactly.
+
+Lazy rebuild and Fenwick tree over blocks also analyzed — both too expensive.
+
+**Fundamental insight**: Any O(1) counting structure must be maintained during cross_off, and maintenance cost ≈ savings.
+
+### D Segment Size Exploration
+
+Tested D_SEG_CAP={18,19,20,21} (256K to 2M segment sizes). seg_cap=20 (1M numbers, 33KB sieve) confirmed optimal. Smaller segments WORSE (more overhead), larger segments similar.
+
+### Assembly Analysis of count() Loop
+
+Confirmed compiler uses SCALAR POPCNTQ in tight loops for BitSieve count/count_delta. GFNI+AVX2 vectorized popcount used for BigPiTable construction only.
+
+**Critical discovery**: AVX-512 is NOT available on Intel Core Ultra 9 285K Arrow Lake desktop. Only GFNI is enabled via target-cpu=native. Arrow Lake is a desktop part — AVX-512 was reintroduced only in server (Sapphire/Emerald/Granite Rapids).
+
+Scalar popcntq loop: ~6 instructions (xor, popcntq, addq, incq, cmpq, jne), ~1 cycle/word throughput. Compiler-inserted XOR breaks POPCNT false dependency.
+
+### Opt 33: AC Pi-Table Lookup + Remove cmp::min Clamp
+
+**Change**: Replaced O(log n) partition_point binary search in AC segment loop with O(1) pi[] table lookups for l-range bounds. Removed proven-unnecessary `std::cmp::min(xpq, sqrt_x)` clamping.
+
+**Mathematical proof**: xpq = x/(p·q) ≤ x/y² ≤ x^{1/3} < sqrt_x for both C2 and A lookups.
+
+**Result**: AC: 11.15s → 10.91s (-2.2%), Wall: 12.62s → 12.42s (-1.6%).
+
+### Opt 34: D Sparse Index for valid_m_list
+
+**Change**: Built sparse index (VM_STRIDE=64) over valid_m_list for O(1) initial position lookup. Replaces O(log 4.9M) = 22-comparison binary search over 78MB valid_m_list with O(log ~16) = 4-comparison search over ~16 entries.
+
+Index: vm_index[m/64] = first valid_m position with m ≥ bucket×64. Size: 2.6MB (fits in L3).
+
+**Result**: D: 11.11s → 10.80s, Wall: 12.42s → 12.33s.
+
+### Sentinel for D prev_pos (ATTEMPTED, NEUTRAL — REVERTED)
+
+Replaced Option<usize> with usize::MAX sentinel to eliminate discriminant overhead. No measurable improvement — compiler already handles Option efficiently.
+
+### Current State (Opt 34, commit 054d5af)
+
+| Scale | V7 | primecount | Ratio |
+|-------|-----|------------|-------|
+| 1e12 | 0.006s | 0.014s | **0.4×** ✓ |
+| 1e13 | 0.014s | 0.015s | **0.9×** ✓ |
+| 1e14 | 0.029s | 0.023s | 1.3× |
+| 1e15 | 0.079s | 0.059s | 1.3× |
+| 1e16 | 0.261s | 0.178s | 1.5× |
+| 1e17 | 0.932s | 0.598s | 1.6× |
+| 1e18 | 3.38s | 2.27s | 1.5× |
+| Max i64 | 12.33s | 8.49s | 1.45× |
+
+Component breakdown at Max i64 (5-run median):
+| Component | Time |
+|-----------|------|
+| Setup | 1.47s |
+| B | 8.35s |
+| AC | 10.77s |
+| D | 10.80s |
+| Wall | 12.33s |
+
+### Gap Analysis
+
+Need max(AC, D) ≤ ~7.0s to match primecount. Both AC and D need ~35% reduction.
+
+The remaining gap is likely algorithmic: primecount uses Deleglise-Rivat with optimized binary indexed tree for D counting. Our bitvector scan approach fundamentally can't match O(log n) structures for this workload. The block-sum experiment confirmed this — any O(1) counting structure costs as much to maintain as it saves.
