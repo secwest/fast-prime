@@ -733,24 +733,80 @@ Component breakdown at Max i64 (5-run median):
 
 ---
 
-### Current Benchmark (Opt 34)
+### Current Benchmark (Opt 44)
 
 | Scale | V7 | primecount | Ratio |
 |-------|-----|------------|-------|
 | 1e12 | 0.006s | 0.014s | **0.4×** ✓ |
-| 1e13 | 0.014s | 0.015s | **0.9×** ✓ |
-| 1e14 | 0.029s | 0.023s | 1.3× |
-| 1e15 | 0.079s | 0.059s | 1.3× |
-| 1e16 | 0.261s | 0.178s | 1.5× |
-| 1e17 | 0.932s | 0.598s | 1.6× |
-| 1e18 | 3.38s | 2.27s | 1.5× |
-| Max i64 | 12.33s | 8.49s | 1.45× |
+| 1e13 | 0.010s | 0.015s | **0.7×** ✓ |
+| 1e14 | 0.020s | 0.023s | **0.9×** ✓ |
+| 1e15 | 0.058s | 0.059s | **1.0×** ✓ |
+| 1e16 | 0.201s | 0.178s | 1.1× |
+| 1e17 | 1.07s | 0.598s | 1.8× |
+| 1e18 | 3.02s | 2.27s | 1.3× |
+| Max i64 | 10.67s | 8.49s | 1.26× |
 
-Component breakdown at Max i64 (5-run median):
+Component breakdown at Max i64 (concurrent):
 | Component | Time |
 |-----------|------|
-| Setup | 1.47s |
-| B | 8.35s |
+| Setup | 0.89s |
+| AC | 9.76s |
+| D | 7.21s |
+| B | 8.72s |
+| **Wall** | **10.67s** |
+
+Sequential breakdown (SEQ_MODE):
+| Component | Time |
+|-----------|------|
+| Setup | 0.86s |
+| AC | 2.27s |
+| D | 5.49s |
+| B | 3.18s |
+| **Sum** | **11.80s** |
+
+---
+
+## Optimization 43: PHASE_AC_DB Scheduling Option
+
+**Date**: Session 13 | **Commit**: `75e9c51`
+
+**Changes**:
+- Added `PHASE_AC_DB` env var: runs AC exclusive first (full L3 for BigPiTable), then D+B concurrent.
+- AC exclusive: 2.24s (was 9.70s concurrent — 4.3× improvement from zero L3 contention).
+- D+B concurrent: D=6.73s, B=7.92s — both slower than default due to serial phasing.
+- Total: 11.12s — worse than default 10.67s because phases lose overlap.
+- Committed as option, not default.
+
+**Also added**: `PHASE_D_ACB2` (D first, then AC+B on global pool), `POOL_MULT` env var for tuning global pool multiplier.
+
+---
+
+## Optimization 44: POOL_MULT Configurable Pool Size
+
+**Date**: Session 14
+
+**Changes**:
+- Added `POOL_MULT` env var to configure rayon global pool multiplier (default 3×).
+- Tested POOL_MULT ∈ {1, 2, 3, 4, 5}: 3× confirmed optimal for this hardware.
+- Key finding: individual components achieve near-maximum parallelism at 24 threads. 3× oversubscription provides only ~5-10% sequential improvement but enables better work-stealing when components run concurrently.
+
+---
+
+### Failed Attempts (Sessions 13-14)
+
+**Counter-based BitSieve** (2 variants): Counter maintenance during 134.2M cross_off calls outweighs O(blocks) count() savings. REVERTED.
+
+**Compact ValidM 8B** (no recip): Native u64/u64 division cost exactly offsets 48.8MB memory savings. D sequential unchanged at 5.44s. REVERTED.
+
+**FactorTableD 2B** (wheel-30 encoded lpf+mu): 20MB vs 97.6MB ValidM. D +0.31s regression from native division. BigPiTable (284MB) still dominates L3 contention. REVERTED.
+
+**D_SEG_CAP=19** (512KB segments): +0.57s D regression from more segments. 20 confirmed optimal.
+
+**Separate D Pool** (dedicated 24-thread rayon pool for D): 120 total threads on 24 cores → D gets 20% of CPU → D=21.07s, wall=22.00s. REVERTED.
+
+**SoA ValidM + prefetch** (8B scan + 8B recip with software prefetch): D +2.2% regression from extra indexing. AC unchanged — BigPiTable dominates L3 regardless. REVERTED.
+
+**Phased scheduling variants**: PHASE_D_ACB (11.15s), PHASE_D_ACB2 (10.96s), PHASE_DB_AC (10.97s) — all worse than default concurrent (10.67s). Serial phases always add more time than L3 contention savings.
 | AC | 10.77s |
 | D | 10.80s |
 | Wall | 12.33s |

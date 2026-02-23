@@ -55,20 +55,20 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 
 ### V7 vs Kim Walisch's primecount v8.2 (Gourdon, state of the art)
 
-| Scale | V7 (Opt 40) | primecount | Ratio | primesieve |
+| Scale | V7 (Opt 44) | primecount | Ratio | primesieve |
 |---|---|---|---|---|
-| 1e10 | 0.004s | — | — | 0.058s |
-| 1e11 | 0.004s | — | — | 0.596s |
-| 1e12 | 0.005s | 0.014s | **0.4×** ✓ | 6.85s |
+| 1e10 | 0.005s | — | — | 0.058s |
+| 1e11 | 0.005s | — | — | 0.596s |
+| 1e12 | 0.006s | 0.014s | **0.4×** ✓ | 6.85s |
 | 1e13 | 0.010s | 0.015s | **0.7×** ✓ | 83s |
-| 1e14 | 0.019s | 0.023s | **0.8×** ✓ | — |
+| 1e14 | 0.020s | 0.023s | **0.9×** ✓ | — |
 | 1e15 | 0.058s | 0.059s | **1.0×** ✓ | — |
-| 1e16 | 0.206s | 0.178s | 1.2× | — |
-| 1e17 | 1.019s | 0.598s | 1.7× | — |
-| 1e18 | 2.95s | 2.27s | 1.3× | — |
-| Max i64 | 10.68s | 8.49s | 1.26× | — |
+| 1e16 | 0.201s | 0.178s | 1.1× | — |
+| 1e17 | 1.07s | 0.598s | 1.8× | — |
+| 1e18 | 3.02s | 2.27s | 1.3× | — |
+| Max i64 | 10.67s | 8.49s | 1.26× | — |
 
-V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI streaming merge, with alpha parameters tuned through 40 rounds of optimization. primecount is the fastest published prime counting code. V7 Opt 40 is **faster at 1e12-1e15**, with the gap narrowed to **1.26× at Max i64** (down from 1.31× at Opt 39). AC is now the sole bottleneck.
+V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI streaming merge, with alpha parameters tuned through 44 rounds of optimization. primecount is the fastest published prime counting code. V7 is **faster at 1e12-1e15**, with the gap narrowed to **1.26× at Max i64**. AC concurrent L3 contention (9.7s vs 2.3s sequential) is the sole bottleneck.
 
 ### Best (V7) vs V1 Speedup
 

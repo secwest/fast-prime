@@ -1734,26 +1734,44 @@ fn count_primes(x: u64) -> u64 {
             (d, b_handle.join().unwrap())
         });
         (ac, d, b_val)
-    } else if std::env::var("PHASE_D_ACB").is_ok() {
+    } else if std::env::var("PHASE_D_ACB").is_ok() || std::env::var("PHASE_D_ACB2").is_ok() {
         // Phase 1: D alone (full resources)
         let t = Instant::now();
         let d = compute_d(x, y, z, k, x_star, &primes, &pi, &mu, &lpf, &y_smooth, &recip);
         if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
         // Phase 2: AC + B concurrent
-        std::thread::scope(|s| {
-            let b_handle = s.spawn(|| {
+        if std::env::var("PHASE_D_ACB2").is_ok() {
+            // Both AC and B on global pool (cache-friendly: both access BigPiTable)
+            std::thread::scope(|s| {
+                let b_handle = s.spawn(|| {
+                    let t = Instant::now();
+                    let r = compute_b(x, y, pi_y, &big_pi);
+                    if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
+                    r
+                });
                 let t = Instant::now();
-                let r = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
-                if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
-                r
-            });
-            let t = Instant::now();
-            let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
-            if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
-            let b_val = b_handle.join().unwrap();
-            (ac, d, b_val)
-        })
+                let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
+                if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
+                let b_val = b_handle.join().unwrap();
+                (ac, d, b_val)
+            })
+        } else {
+            std::thread::scope(|s| {
+                let b_handle = s.spawn(|| {
+                    let t = Instant::now();
+                    let r = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
+                    if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
+                    r
+                });
+                let t = Instant::now();
+                let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
+                if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
+                let b_val = b_handle.join().unwrap();
+                (ac, d, b_val)
+            })
+        }
     } else {
+        // Default: AC+D on global pool, B on dedicated pool
         std::thread::scope(|s| {
             let b_handle = s.spawn(|| {
                 let t = Instant::now();
@@ -1782,8 +1800,10 @@ fn count_primes(x: u64) -> u64 {
 fn main() {
     // Oversubscribe rayon thread pool for better work-stealing across B/AC/D
     let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(24);
+    let pool_mult: usize = std::env::var("POOL_MULT").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(3);
     rayon::ThreadPoolBuilder::new()
-        .num_threads(num_cpus * 3)
+        .num_threads(num_cpus * pool_mult)
         .build_global()
         .ok();
 

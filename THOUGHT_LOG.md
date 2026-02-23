@@ -2006,6 +2006,123 @@ Fine-tuned alpha_y table entry for logx ≥ 43.6 from 13.5 to 13.0. Marginal imp
 - **alpha_y=5**: B dominates at 29.6s (all components ~29.6s due to thread saturation)
 - **alpha_y=3**: B = 46.8s (sieve range too large)
 - **Key insight**: Optimal alpha_y balances max(B, AC, D). With our B sieve speed, alpha_y≈13 minimizes max(B,D). Alpha_y=8.75 balances all three but doesn't reduce the max.
+
+---
+
+## Session 13: Counter-Based Sieve, Compact ValidM, FactorTableD, Scheduling Experiments
+
+**Starting point**: Opt 42, commit `1a6db22`, 10.67s concurrent, 11.78s sequential.
+
+### Counter-based BitSieve (FAILED — 2 variants)
+
+**Idea**: Add per-block popcount counters to BitSieve for O(blocks) count() instead of O(nwords).
+
+**Variant 1**: Counter + prefix array. Rebuild prefix sums after every cross_off_sieve.
+- Result: 12.38s sequential (was 11.78s) — REGRESSION from O(nblocks) rebuild_prefix cost per cross_off.
+
+**Variant 2**: Counter without prefix (direct linear sum in count()).
+- Result: 12.67s concurrent — counter maintenance overhead during cross_off accumulates.
+
+**Root cause**: In D, cross_off happens 134.2M times. Even cheap per-block counter maintenance × 134.2M = significant overhead. primecount's approach integrates cross_off + counting atomically (cross_off_count), which we can't easily replicate.
+
+**Verdict**: REVERTED. Counter approach abandoned.
+
+### Compact ValidM 8B (WASH)
+
+**Idea**: Remove recip_m (8B) from ValidM struct (16B → 8B), use native u64/u64 division.
+- D sequential: 5.41s (was 5.44s), total 11.75s — essentially unchanged.
+- Concurrent: 10.63s (was 10.67s) — no improvement.
+- Native division cost (~25 extra cycles/pass) exactly offsets the 48.8MB memory savings.
+
+**Verdict**: REVERTED. No net benefit.
+
+### FactorTableD 2B Compressed (FAILED)
+
+**Idea**: Replace ValidM (6.1M × 16B = 97.6MB) with wheel-30 indexed factor table (10.1M × 2B = 20.2MB). Encode lpf+mu in u16: 0=skip, lpf-1 if mu=+1 (even), lpf if mu=-1 (odd).
+- D sequential: 5.75s (was 5.44s) → +0.31s from native u64/u64 division.
+- D concurrent: 7.44s (was 7.04s), AC concurrent: 9.93s (was 9.70s) — WORSE overall.
+- The native division cost (1.88B × 25 extra cycles = 0.31s) outweighs the memory savings.
+- BigPiTable (285MB) dominates L3 contention regardless of D's memory footprint.
+
+**Verdict**: REVERTED.
+
+### Opt 43: PHASE_AC_DB Scheduling (COMMITTED)
+
+**Idea**: New scheduling option — AC exclusive first (full L3 for BigPiTable), then D+B concurrent.
+- AC exclusive: 2.24s (was 9.70s concurrent — 4.3× improvement!)
+- D+B concurrent: D=6.73s, B=7.92s.
+- Total: 11.12s — worse than default 10.67s because phases lose overlap.
+- Committed as env var option (PHASE_AC_DB), not default. Commit `75e9c51`.
+
+### D Segment Size Experiment (FAILED)
+
+**Idea**: Reduce D_SEG_CAP from 20 (1MB) to 19 (512KB).
+- D: 6.01s (was 5.44s) — WORSE from increased segment overhead (more segments to process).
+
+**Verdict**: D_SEG_CAP=20 confirmed optimal.
+
+---
+
+## Session 14: SoA ValidM, Separate D Pool, Pool Multiplier Tuning
+
+**Starting point**: Opt 43, commit `75e9c51`, 10.67s concurrent.
+
+### POOL_MULT Env Var (COMMITTED)
+
+**Added**: Configurable rayon global pool multiplier via POOL_MULT env var (default 3×).
+- POOL_MULT=1 (24 threads): 13.11s — WORSE (AC+D share too few threads).
+- POOL_MULT=2 (48 threads): 11.43s — WORSE (insufficient work-stealing).
+- POOL_MULT=3 (72 threads): 10.76s — baseline, optimal.
+- POOL_MULT=4 (96 threads): 10.82s — slightly worse.
+- POOL_MULT=5 (120 threads): 10.80s — similar to 4×.
+- Key finding: individual components don't benefit from oversubscription (D: 5.46s at 24T vs 5.49s at 72T), but concurrent scheduling needs 3× for work-stealing.
+
+### Phased Scheduling Experiments
+
+**PHASE_D_ACB**: D first, then AC+B concurrent.
+- D=5.43s exclusive, then AC=2.31s, B=4.79s concurrent. Wall=11.15s.
+- B penalty: 4.79s vs 3.18s sequential — AC and B compete for CPU on shared pool.
+
+**PHASE_D_ACB2**: Same but both AC and B on global pool.
+- D=5.40s, AC=2.31s, B=4.64s. Wall=10.96s. Marginally better.
+
+**PHASE_DB_AC**: D+B concurrent, then AC alone.
+- D=6.66s, B=7.78s concurrent, then AC=2.25s. Wall=10.97s.
+- B with D contention: 7.78s vs 3.18s alone — heavy memory bandwidth contention.
+
+**Key insight**: All phased approaches lose to default concurrent (10.67s) because the serialized phases add more time than L3 contention saves. D alone takes 5.4s; no concurrent combination can make the remaining components finish in < 5.3s (required to beat 10.67s).
+
+### Separate D Pool (FAILED)
+
+**Idea**: Give D its own 24-thread rayon pool so D and AC threads don't interchange (preserving L2 cache affinity per component).
+- Result: D=21.07s (massive regression!) — D's 24 threads only get 20% of CPU time due to 120 total threads (24 D + 72 global + 24 B) on 24 cores.
+- Wall=22.00s. Completely unworkable.
+
+**Verdict**: REVERTED. Separate pools create excessive oversubscription.
+
+### SoA ValidM with Software Prefetch (WASH)
+
+**Idea**: Split ValidM (16B AoS) into scan array (8B: m+lpf+mu) and recip array (8B). Scan array has 2× entries per cache line. Prefetch recip 4 entries ahead to hide DRAM latency.
+- D sequential: 5.61s (was 5.49s) → +2.2% regression from extra indexing overhead.
+- AC concurrent: 9.80s (was 9.76s) → unchanged.
+- Wall: 10.70s (was 10.76s) → within noise.
+- The 30% scan bandwidth reduction doesn't translate to AC improvement because BigPiTable (284MB) dominates L3 contention regardless of D's memory footprint.
+
+**Verdict**: REVERTED. SoA approach doesn't help because BigPiTable >> L3 regardless.
+
+### Fundamental Analysis
+
+The bottleneck is clear: AC concurrent = 9.7s (4.3× penalty over sequential 2.27s). This comes from L3 contention between AC's BigPiTable (284MB) and D's ValidM (97.6MB) when sharing the global rayon pool. However:
+
+1. **Reducing D's memory footprint doesn't help AC** because BigPiTable alone (284MB) >> L3 (36MB).
+2. **Phased scheduling loses to concurrency** because D alone (5.4s) > savings from eliminating AC contention.
+3. **Pool isolation doesn't work** because of total oversubscription on physical cores.
+4. **Pool multiplier optimization shows** 3× is optimal for work-stealing balance.
+
+The only paths forward are:
+- Reduce individual component sequential times (algorithmic improvements)
+- Make BigPiTable much smaller (currently bits=190MB + prefix=95MB)
+- Different algorithm decomposition that reduces total work
 - **alpha_z=1.0**: D=24.2s (more segments), az=2.0: D=20.3s but setup=2.04s. az=1.5 optimal.
 
 ### B Sieve Optimization Attempts (ALL FAILED)
