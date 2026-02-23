@@ -1506,20 +1506,26 @@ fn count_primes(x: u64) -> u64 {
     let show_timing = std::env::var("SHOW_TIMING").is_ok();
 
     let t_setup = Instant::now();
-    let pi_sieve = Sieve::new(pi_table_limit);
-    let mut primes: Vec<u32> = vec![0];
-    primes.extend(pi_sieve.primes_from(2).take_while(|&p| p <= y).map(|p| p as u32));
-    let pi_y = primes.len() - 1;
-    let k = std::cmp::min(7, pi_y);
-    let phi_cache = PhiTinyCache::new(k);
-    let pi = generate_pi(pi_table_limit, &pi_sieve);
 
-    // Overlap generate_tables with BigPiTable construction
-    let (big_pi, mu, lpf, y_smooth) = std::thread::scope(|s| {
+    // Run ALL setup tasks concurrently:
+    // Thread 1: BigPiTable::new (parallel, uses rayon)
+    // Thread 2: generate_tables (sequential)
+    // Main thread: pi_sieve, primes, phi_cache, generate_pi (sequential)
+    let (big_pi, mu, lpf, y_smooth, primes, pi_y, k, phi_cache, pi) = std::thread::scope(|s| {
         let bpi_handle = s.spawn(|| BigPiTable::new(sqrt_x));
-        let (mu, lpf, y_smooth) = generate_tables(z, y);
+        let tables_handle = s.spawn(|| generate_tables(z, y));
+
+        let pi_sieve = Sieve::new(pi_table_limit);
+        let mut primes: Vec<u32> = vec![0];
+        primes.extend(pi_sieve.primes_from(2).take_while(|&p| p <= y).map(|p| p as u32));
+        let pi_y = primes.len() - 1;
+        let k = std::cmp::min(7, pi_y);
+        let phi_cache = PhiTinyCache::new(k);
+        let pi = generate_pi(pi_table_limit, &pi_sieve);
+
         let big_pi = bpi_handle.join().unwrap();
-        (big_pi, mu, lpf, y_smooth)
+        let (mu, lpf, y_smooth) = tables_handle.join().unwrap();
+        (big_pi, mu, lpf, y_smooth, primes, pi_y, k, phi_cache, pi)
     });
     if show_timing { eprintln!("  setup tables: {:.2}s", t_setup.elapsed().as_secs_f64()); }
 
