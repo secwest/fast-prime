@@ -375,18 +375,21 @@ impl BigPiTable {
         masks
     }
 
+    #[inline(always)]
+    unsafe fn pi_fast(&self, n: usize) -> u64 {
+        let odd_idx = (n - 1) >> 1;
+        let word = odd_idx >> 6;
+        let bit = odd_idx & 63;
+        let prefix = *self.prefix.get_unchecked(word) as u64;
+        let mask = u64::MAX >> (63 - bit);
+        1 + prefix + (*self.bits.get_unchecked(word) & mask).count_ones() as u64
+    }
+
     #[inline]
     fn pi(&self, n: usize) -> u64 {
         if n < 2 { return 0; }
-        let mut count = 1u64; // prime 2
-        if n < 3 { return count; }
-        let odd_idx = (n - 1) / 2;
-        let word = odd_idx / 64;
-        let bit = odd_idx % 64;
-        count += unsafe { *self.prefix.get_unchecked(word) } as u64;
-        let mask = if bit == 63 { !0u64 } else { (1u64 << (bit + 1)) - 1 };
-        count += (unsafe { *self.bits.get_unchecked(word) } & mask).count_ones() as u64;
-        count
+        if n < 3 { return 1; }
+        unsafe { self.pi_fast(n) }
     }
 
     #[inline(always)]
@@ -739,7 +742,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
         // Segmented AC: process BigPiTable in L1-cache-sized segments.
         // Smaller segments = fewer L3/DRAM misses for pi() lookups.
-        let seg_pairs: usize = 130_000; // interleaved pairs per segment ≈ 24MB)
+        let seg_pairs: usize = 130_000;
         let total_pairs = big_pi.bits.len();
         let num_segs = (total_pairs + seg_pairs - 1) / seg_pairs;
 
@@ -789,23 +792,25 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                     let xpq2 = fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize;
                     let xpq3 = fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize;
 
-                    if info.is_c2 {
-                        local += (big_pi.pi(xpq0) as i64 - info.b as i64 + 2)
-                               + (big_pi.pi(xpq1) as i64 - info.b as i64 + 2)
-                               + (big_pi.pi(xpq2) as i64 - info.b as i64 + 2)
-                               + (big_pi.pi(xpq3) as i64 - info.b as i64 + 2);
-                    } else {
-                        let p0 = big_pi.pi(xpq0) as i64;
-                        let p1 = big_pi.pi(xpq1) as i64;
-                        let p2 = big_pi.pi(xpq2) as i64;
-                        let p3 = big_pi.pi(xpq3) as i64;
-                        if l + 3 <= info.y_boundary_l {
-                            local += p0 + p1 + p2 + p3;
-                        } else if l > info.y_boundary_l {
-                            local += 2 * (p0 + p1 + p2 + p3);
+                    unsafe {
+                        if info.is_c2 {
+                            local += (big_pi.pi_fast(xpq0) as i64 - info.b as i64 + 2)
+                                   + (big_pi.pi_fast(xpq1) as i64 - info.b as i64 + 2)
+                                   + (big_pi.pi_fast(xpq2) as i64 - info.b as i64 + 2)
+                                   + (big_pi.pi_fast(xpq3) as i64 - info.b as i64 + 2);
                         } else {
-                            for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
-                                local += if ll <= info.y_boundary_l { pv } else { 2 * pv };
+                            let p0 = big_pi.pi_fast(xpq0) as i64;
+                            let p1 = big_pi.pi_fast(xpq1) as i64;
+                            let p2 = big_pi.pi_fast(xpq2) as i64;
+                            let p3 = big_pi.pi_fast(xpq3) as i64;
+                            if l + 3 <= info.y_boundary_l {
+                                local += p0 + p1 + p2 + p3;
+                            } else if l > info.y_boundary_l {
+                                local += 2 * (p0 + p1 + p2 + p3);
+                            } else {
+                                for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
+                                    local += if ll <= info.y_boundary_l { pv } else { 2 * pv };
+                                }
                             }
                         }
                     }
@@ -814,7 +819,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
                 while l <= eff_hi {
                     let xpq = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
-                    let pi_val = big_pi.pi(xpq) as i64;
+                    let pi_val = unsafe { big_pi.pi_fast(xpq) } as i64;
                     if info.is_c2 {
                         local += pi_val - info.b as i64 + 2;
                     } else if l <= info.y_boundary_l {
