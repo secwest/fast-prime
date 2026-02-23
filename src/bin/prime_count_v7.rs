@@ -1584,11 +1584,16 @@ fn count_primes(x: u64) -> u64 {
     let sigma = compute_sigma(x, y, x_star, &primes, &pi, &big_pi);
     let phi0 = compute_phi0(x, y, z, k, &primes, &phi_cache);
 
-    // Run B, AC, D all concurrently — they share the rayon pool
+    // Run B, AC, D all concurrently
+    // B gets its own smaller thread pool to avoid starving AC/D
+    let b_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(24))
+        .build()
+        .unwrap();
     let (ac, d, b_val) = std::thread::scope(|s| {
         let b_handle = s.spawn(|| {
             let t = Instant::now();
-            let r = compute_b(x, y, pi_y, &big_pi);
+            let r = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
             if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
             r
         });
