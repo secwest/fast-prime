@@ -944,7 +944,7 @@ Component breakdown at Max i64 (3-run median):
 | D | 6.45s | -3.07s (-32.2%) |
 | Wall | 11.13s | +0.11s (noise, AC-limited) |
 
-### Gap Analysis
+### Gap Analysis (Opt 39)
 
 - Current: 11.13s, primecount: 8.49s → 1.31× gap
 - Critical path: setup (0.92s) + AC (10.16s) = 11.08s ≈ wall time
@@ -952,3 +952,40 @@ Component breakdown at Max i64 (3-run median):
 - **AC is the sole bottleneck**: must reduce from 10.16s to ~7.5s (-26%) to match primecount
 - AC is compute-bound (fast_div throughput on multiply ports), not memory-bound
 - B (8.12s) also significant but runs concurrently; only matters if AC gets faster
+
+---
+
+## Opt 40: Alpha Re-tuning (ay=15, az=1.2)
+
+**Commit**: b82b6a1
+
+With the new D work balancing from Opt 39 changing the D/AC balance, alpha parameters needed re-evaluation.
+
+### Method
+
+1. **ay sweep** (az=1.5 fixed): Tested ay=14,15,16,17,18,20,22
+   - ay=15 best: AC 10.16→9.86s, wall 11.13→11.00s
+   - ay=18+ causes setup/D/B regression exceeding AC gains
+   
+2. **az sweep** (ay=15 fixed): Tested az=1.0,1.1,1.2,1.3,1.5,1.8,2.0
+   - az=1.2 best: setup 1.09→0.87s (-20%), wall 11.00→10.68s (-2.9%)
+   - Lower az reduces z → smaller BigPiTable → faster setup
+   - az=1.0 slightly worse (10.99s), az=1.3+ regresses
+
+### Results (3-run median at Max i64)
+
+| Component | Opt 39 | Opt 40 | Change |
+|-----------|--------|--------|--------|
+| Setup | 0.92s | 0.87s | -5.4% |
+| B | 8.12s | 9.22s | +13.5% (larger y) |
+| AC | 10.16s | 9.77s | -3.8% |
+| D | 6.45s | 6.75s | +4.7% (larger y) |
+| Wall | 11.13s | 10.68s | **-4.0%** |
+
+**Key insight**: Lower az reduces z, which shrinks setup tables and BigPiTable. The critical path is setup+AC, so faster setup directly reduces wall time even though B and D get slightly more work.
+
+### Gap Analysis (Opt 40)
+
+- Current: 10.68s, primecount: 8.49s → **1.26× gap** (was 1.31×)
+- Critical path: setup (0.87s) + AC (9.77s) = 10.64s ≈ wall time
+- **AC remains the sole bottleneck**: need AC ≤ ~7.6s (-22%) to match primecount

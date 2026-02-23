@@ -2592,3 +2592,38 @@ B finishes ~2.5s before AC/D; threads auto-redistribute via rayon work-stealing.
 **Critical path**: setup (0.92s) + AC (10.16s) = 11.08s ≈ wall time. AC is the SOLE bottleneck.
 **D is 3.71s faster than AC** — no longer on critical path.
 **To match primecount (8.49s)**: need AC ≤ ~7.5s (26% reduction). AC is compute-bound (fast_div multiply-port throughput).
+
+---
+
+## Session 11: Alpha Re-tuning & AC Optimization
+
+### Opt 40: Alpha Re-tuning (ay=15, az=1.2)
+
+With D work balancing from Opt 39, the alpha parameters needed re-evaluation since the D/AC cost balance shifted.
+
+**ay sweep** (ay=14-22 at az=1.5): ay=15 gave best wall time (11.00s vs 11.08 at ay=14).
+
+**az sweep** (az=1.0-2.0 at ay=15):
+| az | Wall |
+|----|------|
+| 1.0 | 10.99s |
+| 1.1 | 10.83s |
+| **1.2** | **10.68s** |
+| 1.3 | 10.98s |
+| 1.5 | 11.00s |
+| 1.8 | 11.26s |
+| 2.0 | 11.74s |
+
+**Winner**: az=1.2 — lower z reduces BigPiTable size and setup time. Setup 0.92→0.87s, AC 10.16→9.77s, wall 11.13→10.68s.
+
+### Current State (Opt 40)
+
+| Component | Time |
+|-----------|------|
+| Setup | 0.87s |
+| B | 9.22s |
+| AC | 9.77s |
+| D | 6.75s |
+| Wall | 10.68s |
+
+**Gap to primecount**: 1.26× (was 1.31×). Critical path: setup (0.87s) + AC (9.77s) = 10.64s.
