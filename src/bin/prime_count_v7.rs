@@ -938,10 +938,8 @@ const COPRIME_COUNT_30: [u8; 31] = [
     4, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 8, 8,
 ];
 
-// Wheel cross-off tables (kept for reference / future use with byte-level stepping)
-#[allow(dead_code)]
+// Wheel cross-off tables for byte-level sieve stepping
 const WHEEL_GAPS: [usize; 8] = [6, 4, 2, 4, 2, 4, 6, 2];
-#[allow(dead_code)]
 const WHEEL_BITS: [[u8; 8]; 8] = [
     [0, 1, 2, 3, 4, 5, 6, 7], // p ≡ 1
     [1, 5, 4, 0, 7, 3, 2, 6], // p ≡ 7
@@ -954,7 +952,6 @@ const WHEEL_BITS: [[u8; 8]; 8] = [
 ];
 
 // WHEEL_CORR[r_idx][step]: byte advance correction (added to p/30 * gap[step])
-#[allow(dead_code)]
 const WHEEL_CORR: [[usize; 8]; 8] = [
     [0, 0, 0, 0, 0, 0, 0, 1], // p ≡ 1
     [1, 1, 1, 0, 1, 1, 1, 1], // p ≡ 7
@@ -1154,57 +1151,102 @@ impl PreSieveTemplate {
 fn cross_off_sieve(sieve: &mut BitSieve, prime: usize, low: usize, high: usize,
                    _wheel_seg_len: usize) {
     let p = prime;
-    let wheel_seg_bits = sieve.len;
-    let bits = sieve.bits.as_mut_ptr();
+    let r_idx = MOD30_TO_IDX[p % 30] as usize;
+    let k = p / 30;
+    let sieve_bytes = (sieve.len + 7) / 8;
+    let bytes = sieve.bits.as_mut_ptr() as *mut u8;
+
+    // Per-step byte advances and bit masks for the 8 wheel positions
+    let adv = [
+        k * WHEEL_GAPS[0] + WHEEL_CORR[r_idx][0],
+        k * WHEEL_GAPS[1] + WHEEL_CORR[r_idx][1],
+        k * WHEEL_GAPS[2] + WHEEL_CORR[r_idx][2],
+        k * WHEEL_GAPS[3] + WHEEL_CORR[r_idx][3],
+        k * WHEEL_GAPS[4] + WHEEL_CORR[r_idx][4],
+        k * WHEEL_GAPS[5] + WHEEL_CORR[r_idx][5],
+        k * WHEEL_GAPS[6] + WHEEL_CORR[r_idx][6],
+        k * WHEEL_GAPS[7] + WHEEL_CORR[r_idx][7],
+    ];
+    let msk = [
+        1u8 << WHEEL_BITS[r_idx][0],
+        1u8 << WHEEL_BITS[r_idx][1],
+        1u8 << WHEEL_BITS[r_idx][2],
+        1u8 << WHEEL_BITS[r_idx][3],
+        1u8 << WHEEL_BITS[r_idx][4],
+        1u8 << WHEEL_BITS[r_idx][5],
+        1u8 << WHEEL_BITS[r_idx][6],
+        1u8 << WHEEL_BITS[r_idx][7],
+    ];
+
+    // Find first coprime-to-30 q with p*q > low
+    let min_q = std::cmp::max((low + p) / p, 1);
+    let base_q = (min_q / 30) * 30;
+    let (mut m, start_s) = 'find: {
+        for cycle in 0..2usize {
+            let cbase = base_q + cycle * 30;
+            for s in 0..8usize {
+                let q = cbase + WHEEL30_RESIDUES[s];
+                if q >= min_q {
+                    let composite = p * q;
+                    if composite >= high { return; }
+                    break 'find ((composite - low) / 30, s);
+                }
+            }
+        }
+        return;
+    };
+
     let mut delta = 0i64;
-    let step = p * 8; // uniform step in wheel-bit-space for same residue
+    let mut s = start_s;
 
-    for r_idx in 0..8 {
-        let r = WHEEL30_RESIDUES[r_idx];
-        let composite_residue = (p * r) % 30;
-        let bit_in_byte = MOD30_TO_IDX[composite_residue] as usize;
-
-        // First composite p*q in [max(low+1, p), high) where q ≡ r (mod 30)
-        let first_q = {
-            let min_q = std::cmp::max((low + p) / p, 1);
-            let base = (min_q / 30) * 30;
-            if base + r >= min_q { base + r } else { base + 30 + r }
-        };
-        let first_composite = p * first_q;
-        if first_composite >= high { continue; }
-
-        let base_pos = ((first_composite - low) / 30) * 8 + bit_in_byte;
-        let mut pos = base_pos;
-
-        // 4x unrolled word-level cross-off (same pattern as old odd-only code)
-        while pos + step * 3 < wheel_seg_bits {
-            unsafe {
-                let w0 = pos >> 6; let b0 = pos & 63;
-                let old0 = *bits.add(w0); delta += ((old0 >> b0) & 1) as i64;
-                *bits.add(w0) = old0 & !(1u64 << b0);
-                let pos1 = pos + step;
-                let w1 = pos1 >> 6; let b1 = pos1 & 63;
-                let old1 = *bits.add(w1); delta += ((old1 >> b1) & 1) as i64;
-                *bits.add(w1) = old1 & !(1u64 << b1);
-                let pos2 = pos + step * 2;
-                let w2 = pos2 >> 6; let b2 = pos2 & 63;
-                let old2 = *bits.add(w2); delta += ((old2 >> b2) & 1) as i64;
-                *bits.add(w2) = old2 & !(1u64 << b2);
-                let pos3 = pos + step * 3;
-                let w3 = pos3 >> 6; let b3 = pos3 & 63;
-                let old3 = *bits.add(w3); delta += ((old3 >> b3) & 1) as i64;
-                *bits.add(w3) = old3 & !(1u64 << b3);
-            }
-            pos += step * 4;
+    // Peel: align to cycle start (step 0)
+    while s != 0 && m < sieve_bytes {
+        unsafe {
+            let b = *bytes.add(m);
+            delta += ((b & msk[s]) != 0) as i64;
+            *bytes.add(m) = b & !msk[s];
         }
-        while pos < wheel_seg_bits {
+        m += adv[s];
+        s = (s + 1) & 7;
+    }
+
+    // Full unrolled wheel cycles (8 crossings each, single pass through sieve)
+    // Last access in a cycle starting at m is at m + adv[0]+...+adv[6]
+    let partial = adv[0] + adv[1] + adv[2] + adv[3] + adv[4] + adv[5] + adv[6];
+    if sieve_bytes > partial {
+        let limit = sieve_bytes - partial;
+        while m < limit {
             unsafe {
-                let w = pos >> 6; let b = pos & 63;
-                let old = *bits.add(w); delta += ((old >> b) & 1) as i64;
-                *bits.add(w) = old & !(1u64 << b);
+                let b0 = *bytes.add(m); delta += ((b0 & msk[0]) != 0) as i64;
+                *bytes.add(m) = b0 & !msk[0]; m += adv[0];
+                let b1 = *bytes.add(m); delta += ((b1 & msk[1]) != 0) as i64;
+                *bytes.add(m) = b1 & !msk[1]; m += adv[1];
+                let b2 = *bytes.add(m); delta += ((b2 & msk[2]) != 0) as i64;
+                *bytes.add(m) = b2 & !msk[2]; m += adv[2];
+                let b3 = *bytes.add(m); delta += ((b3 & msk[3]) != 0) as i64;
+                *bytes.add(m) = b3 & !msk[3]; m += adv[3];
+                let b4 = *bytes.add(m); delta += ((b4 & msk[4]) != 0) as i64;
+                *bytes.add(m) = b4 & !msk[4]; m += adv[4];
+                let b5 = *bytes.add(m); delta += ((b5 & msk[5]) != 0) as i64;
+                *bytes.add(m) = b5 & !msk[5]; m += adv[5];
+                let b6 = *bytes.add(m); delta += ((b6 & msk[6]) != 0) as i64;
+                *bytes.add(m) = b6 & !msk[6]; m += adv[6];
+                let b7 = *bytes.add(m); delta += ((b7 & msk[7]) != 0) as i64;
+                *bytes.add(m) = b7 & !msk[7]; m += adv[7];
             }
-            pos += step;
         }
+    }
+
+    // Tail: remaining crossings with bounds checks
+    s = 0;
+    while m < sieve_bytes {
+        unsafe {
+            let b = *bytes.add(m);
+            delta += ((b & msk[s]) != 0) as i64;
+            *bytes.add(m) = b & !msk[s];
+        }
+        m += adv[s];
+        s = (s + 1) & 7;
     }
 
     sieve.total -= delta;
