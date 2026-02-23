@@ -2222,3 +2222,45 @@ primecount: ~204s total work / 24 threads = 8.5s
 ---
 
 ## Session 4 Continuation: Pursuing Further Optimizations
+
+---
+
+## Session 5: Optimizations 27-28
+
+### Opt 27: 3× Rayon Thread Oversubscription
+**Change**: Set rayon thread pool to 3× logical CPUs (72 threads on 24-core CPU).
+**Rationale**: Oversubscription improves work-stealing when B, AC, D compete for threads.
+**Performance**: Max i64: 16.37s → 15.5s (~5% improvement).
+**Tested**: 2×, 3×, 4× — 3× was optimal sweet spot.
+
+### Failed attempts before Opt 28:
+- **AC segment size tuning**: Tried 28MB, 32MB, 36MB. No improvement (32MB slightly better but noisy).
+- **D overlap with BigPiTable construction**: D doesn't need BigPiTable, so starts early. +0.3s at best, complicated by Rust borrow checker. Reverted.
+- **Unsegmented AC**: Removed segmentation — same performance. Reverted.
+- **Separate rayon thread pool for D**: 33.49s — massive regression from total thread overload. Reverted.
+- **AC software prefetching**: Prefetched BigPiTable 4-8 iterations ahead. No improvement (hardware prefetcher already handles nearby accesses).
+- **Reduced thread counts**: 8, 12, 16 threads all slower. E-cores contribute useful work.
+
+### Key Discovery: 31.2 BILLION AC pi() lookups
+Instrumented AC to count total work: 31.2B BigPiTable lookups at Max i64. Table is 384MB (only 9.5% fits in 36MB L3). This is fundamentally DRAM-bandwidth-bound. No micro-optimization can fix this — only reducing total work helps.
+
+### Opt 28: Re-tuned Alpha Parameters
+**Change**: Higher ay (13 vs 7) and lower az (1.75 vs 3.0) for large scales.
+**Rationale**: With 3× thread oversubscription, optimal work distribution shifts. Larger y reduces A terms in AC and primes in B range. Smaller z/y ratio reduces D m range.
+**Grid search**: 30-point grid at Max i64, verified with 3-run median at top candidates.
+**Performance**:
+- Max i64: 15.5s → 13.8s (11% improvement, gap vs primecount: 1.93× → 1.63×)
+- 1e18: 4.16s → 3.49s (16% improvement)
+- Component breakdown at Max i64: B=8.33s, AC=11.83s, D=11.83s (was B=10.63, AC=14.15, D=14.34)
+
+### Current State (Opt 28, commit 215c276)
+| Scale | V7 | primecount | Ratio |
+|-------|-----|------------|-------|
+| 1e12 | 0.006s | 0.014s | 0.4× ✓ |
+| 1e13 | 0.014s | 0.015s | 0.9× ✓ |
+| 1e14 | 0.032s | 0.023s | 1.4× |
+| 1e15 | 0.078s | 0.059s | 1.3× |
+| 1e16 | 0.248s | 0.178s | 1.4× |
+| 1e17 | 0.949s | 0.598s | 1.6× |
+| 1e18 | 3.49s | 2.27s | 1.5× |
+| Max i64 | 13.8s | 8.49s | 1.63× |

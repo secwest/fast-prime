@@ -598,3 +598,18 @@ Instrumented D with atomic counters to understand cost distribution:
 | 13.0 | 2.0 | 15.78 | 15.75 | 20.29 | 2.04 | 22.40 |
 
 **Conclusion**: alpha_y=13/az=1.5 remains optimal. Lower alpha_y makes B dominate; higher alpha_z increases setup cost.
+
+---
+
+## Optimization 27: 3× Rayon Thread Oversubscription
+- Set rayon global pool to 3× logical CPUs (72 threads on 24-core)
+- Improves work-stealing when B/AC/D compete for threads
+- Max i64: 16.37s → 15.5s (~5% improvement)
+
+## Optimization 28: Re-tuned Alpha Parameters for Thread Oversubscription
+- Grid search over ay={5-15}, az={1.25-4.0} at Max i64, 1e18, 1e17, 1e16
+- Optimal shifted to: ay=13, az=1.75 (was ay=7, az=3.0)
+- Updated alpha table entries for logx ≥ 36.8
+- Max i64: 15.5s → 13.8s (11% improvement)
+- 1e18: 4.16s → 3.49s (16% improvement)
+- Gap vs primecount: 1.93× → 1.63×
