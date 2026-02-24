@@ -1812,18 +1812,118 @@ fn count_primes(x: u64) -> u64 {
     let pi_table_limit = std::cmp::max(z, max_a_prime);
     let show_timing = std::env::var("SHOW_TIMING").is_ok();
 
-    let t_setup = Instant::now();
+    // Create thread pools early (before setup, needed for early AC/B start)
+    let c1_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(8)
+        .build()
+        .unwrap();
+    let b_threads: usize = std::env::var("B_THREADS").ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(24));
+    let b_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(b_threads)
+        .build()
+        .unwrap();
 
-    // Run ALL setup tasks concurrently:
-    // Thread 1: BigPiTable::new (parallel, uses rayon)
-    // Thread 2: generate_tables (sequential)
-    // Main thread: pi_sieve, primes, phi_cache, generate_pi (sequential)
+    let seq_mode = std::env::var("SEQ_MODE").is_ok();
+    let special_mode = seq_mode
+        || std::env::var("PHASE_DB_AC").is_ok()
+        || std::env::var("PHASE_AC_DB").is_ok()
+        || std::env::var("PHASE_D_ACB").is_ok()
+        || std::env::var("PHASE_D_ACB2").is_ok()
+        || std::env::var("PHASE_D_ACB3").is_ok()
+        || std::env::var("PHASE_B_ACD").is_ok();
+
+    if !special_mode {
+        // Default: Two-scope approach with early AC/B/C1 start.
+        // gen_tables runs on OS thread (decoupled from setup scope).
+        // AC/B/C1 start as soon as BigPiTable + recip are ready (~0.14s),
+        // while gen_tables + build_vm finish on main thread (~0.16s later).
+        let t_setup = Instant::now();
+
+        // gen_tables on detached OS thread (z, y are Copy)
+        let gen_z = z;
+        let gen_y = y;
+        let gen_show = show_timing;
+        let tables_handle = std::thread::spawn(move || {
+            let t = Instant::now();
+            let r = generate_tables(gen_z, gen_y);
+            if gen_show { eprintln!("    gen_tables: {:.3}s", t.elapsed().as_secs_f64()); }
+            r
+        });
+
+        // Scope 1: BigPiTable + main_setup (concurrent)
+        let (big_pi, primes, pi_y, k, phi_cache, pi, recip) = std::thread::scope(|s| {
+            let bpi_handle = s.spawn(|| { let t = Instant::now(); let r = BigPiTable::new(sqrt_x); if show_timing { eprintln!("    BigPiTable: {:.3}s", t.elapsed().as_secs_f64()); } r });
+
+            let t_main = Instant::now();
+            let sieve_bits = fast_bit_sieve(pi_table_limit);
+            let primes = collect_primes_from_bits(&sieve_bits, y);
+            let pi_y = primes.len() - 1;
+            let k = std::cmp::min(7, pi_y);
+            let phi_cache = PhiTinyCache::new(k);
+            let pi = generate_pi_from_bits(pi_table_limit, &sieve_bits);
+            drop(sieve_bits);
+            let recip: Vec<u64> = primes.iter().map(|&p| {
+                if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
+            }).collect();
+            if show_timing { eprintln!("    main_setup: {:.3}s", t_main.elapsed().as_secs_f64()); }
+
+            let big_pi = bpi_handle.join().unwrap();
+
+            (big_pi, primes, pi_y, k, phi_cache, pi, recip)
+        });
+        if show_timing { eprintln!("  AC/B/C1 start: {:.3}s", t_setup.elapsed().as_secs_f64()); }
+
+        // Scope 2: AC/B/C1 start immediately; main thread finishes setup then runs D
+        return std::thread::scope(|s| {
+            let ac_handle = s.spawn(|| {
+                let t = Instant::now();
+                let r = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
+                if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
+                r
+            });
+            let b_handle = s.spawn(|| {
+                let t = Instant::now();
+                let r = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
+                if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
+                r
+            });
+            let c1_handle = s.spawn(|| {
+                c1_pool.install(|| compute_c1(x, y, z, k, &primes, &pi))
+            });
+
+            // Main thread: sigma + phi0 (overlaps with early AC/B)
+            let sigma = compute_sigma(x, y, x_star, &primes, &pi, &big_pi);
+            let phi0 = compute_phi0(x, y, z, k, &primes, &phi_cache);
+
+            // Main thread: finish gen_tables + build_vm (D's prerequisites)
+            let (mu, lpf, y_smooth) = tables_handle.join().unwrap();
+            let t_vm = Instant::now();
+            let (valid_m_list, vm_index) = build_valid_m(z, k, &primes, &pi, &mu, &lpf, &y_smooth);
+            drop(mu); drop(lpf); drop(y_smooth);
+            if show_timing { eprintln!("    build_vm:   {:.3}s (D starts at {:.3}s)", t_vm.elapsed().as_secs_f64(), t_setup.elapsed().as_secs_f64()); }
+
+            // D on main thread (starts ~0.17s after AC)
+            let t = Instant::now();
+            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
+            if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
+
+            let ac = ac_handle.join().unwrap();
+            let b_val = b_handle.join().unwrap();
+            let c1 = c1_handle.join().unwrap();
+
+            (c1 + ac - b_val + d + phi0 + sigma) as u64
+        });
+    }
+
+    // Special modes: traditional setup → concurrent flow
+    let t_setup = Instant::now();
     let (big_pi, primes, pi_y, k, phi_cache, pi, valid_m_list, vm_index) = std::thread::scope(|s| {
         let bpi_handle = s.spawn(|| { let t = Instant::now(); let r = BigPiTable::new(sqrt_x); if show_timing { eprintln!("    BigPiTable: {:.3}s", t.elapsed().as_secs_f64()); } r });
         let tables_handle = s.spawn(|| { let t = Instant::now(); let r = generate_tables(z, y); if show_timing { eprintln!("    gen_tables: {:.3}s", t.elapsed().as_secs_f64()); } r });
 
         let t_main = Instant::now();
-        // Use fast bit sieve for pi generation (avoids primal's per-call overhead)
         let sieve_bits = fast_bit_sieve(pi_table_limit);
         let primes = collect_primes_from_bits(&sieve_bits, y);
         let pi_y = primes.len() - 1;
@@ -1836,7 +1936,6 @@ fn count_primes(x: u64) -> u64 {
         let big_pi = bpi_handle.join().unwrap();
         let (mu, lpf, y_smooth) = tables_handle.join().unwrap();
 
-        // Build ValidM in setup and drop mu/lpf/y_smooth (151MB freed before concurrent phase)
         let t_vm = Instant::now();
         let (valid_m_list, vm_index) = build_valid_m(z, k, &primes, &pi, &mu, &lpf, &y_smooth);
         drop(mu); drop(lpf); drop(y_smooth);
@@ -1846,30 +1945,13 @@ fn count_primes(x: u64) -> u64 {
     });
     if show_timing { eprintln!("  setup tables: {:.2}s", t_setup.elapsed().as_secs_f64()); }
 
-    // Precompute reciprocals once, shared between AC and D (saves 14.8MB)
     let recip: Vec<u64> = primes.iter().map(|&p| {
         if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
     }).collect();
 
-    // Sigma and Phi0 (fast, sequential — 0.04s total, overlapped with pool creation)
     let sigma = compute_sigma(x, y, x_star, &primes, &pi, &big_pi);
     let phi0 = compute_phi0(x, y, z, k, &primes, &phi_cache);
 
-    // C1 pool: dedicated small pool so C1 doesn't compete with D/AC on global pool
-    let c1_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(8)
-        .build()
-        .unwrap();
-
-    // Run B, AC, D — sequential if SEQ_MODE set, concurrent otherwise
-    let seq_mode = std::env::var("SEQ_MODE").is_ok();
-    let b_threads: usize = std::env::var("B_THREADS").ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(24));
-    let b_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(b_threads)
-        .build()
-        .unwrap();
     let (ac, d, b_val, c1) = if seq_mode {
         let c1 = c1_pool.install(|| compute_c1(x, y, z, k, &primes, &pi));
         let t = Instant::now();
@@ -2004,31 +2086,7 @@ fn count_primes(x: u64) -> u64 {
         });
         (ac, d, b_val, c1)
     } else {
-        // Default: All concurrent, C1 overlapped on dedicated pool
-        std::thread::scope(|s| {
-            let c1_handle = s.spawn(|| {
-                c1_pool.install(|| compute_c1(x, y, z, k, &primes, &pi))
-            });
-            let b_handle = s.spawn(|| {
-                let t = Instant::now();
-                let r = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
-                if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
-                r
-            });
-            let ac_handle = s.spawn(|| {
-                let t = Instant::now();
-                let r = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
-                if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
-                r
-            });
-            let t = Instant::now();
-            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
-            if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
-            let ac = ac_handle.join().unwrap();
-            let b_val = b_handle.join().unwrap();
-            let c1 = c1_handle.join().unwrap();
-            (ac, d, b_val, c1)
-        })
+        unreachable!("special_mode check should have caught this")
     };
 
     (c1 + ac - b_val + d + phi0 + sigma) as u64
