@@ -201,6 +201,78 @@ fn generate_pi(limit: usize, sieve: &Sieve) -> Vec<u32> {
     pi
 }
 
+// Fast pi table generation from a raw bit sieve (avoids primal::Sieve per-call overhead).
+// sieve_bits: odd-only sieve where bit i represents number 2*i+3.
+fn generate_pi_from_bits(limit: usize, sieve_bits: &[u64]) -> Vec<u32> {
+    let mut pi = vec![0u32; limit + 1];
+    if limit < 2 { return pi; }
+    let mut count = 1u32; // count 2
+    pi[2] = 1;
+
+    let mut n = 3usize;
+    let mut wi = 0usize;
+    let mut bi = 0u32;
+    while n <= limit {
+        pi[n - 1] = count;
+        count += ((sieve_bits[wi] >> bi) & 1) as u32;
+        pi[n] = count;
+        n += 2;
+        bi += 1;
+        if bi == 64 { bi = 0; wi += 1; }
+    }
+    // If limit is even, the last even entry wasn't filled
+    if limit >= 4 && limit % 2 == 0 {
+        pi[limit] = count;
+    }
+    pi
+}
+
+// Fast odd-only sieve of Eratosthenes returning raw bit array.
+// Bit i represents number 2*i+3. 1 = prime.
+fn fast_bit_sieve(limit: usize) -> Vec<u64> {
+    if limit < 3 { return vec![]; }
+    let nbits = (limit - 3) / 2 + 1;
+    let nwords = (nbits + 63) / 64;
+    let mut bits = vec![u64::MAX; nwords];
+    // Clear trailing bits
+    let trailing = nbits % 64;
+    if trailing != 0 {
+        bits[nwords - 1] &= (1u64 << trailing) - 1;
+    }
+    // Sieve
+    let sqrt_limit = isqrt(limit as u64) as usize;
+    let mut p = 3usize;
+    while p <= sqrt_limit {
+        let pidx = (p - 3) / 2;
+        if bits[pidx / 64] & (1u64 << (pidx % 64)) != 0 {
+            let mut m = p * p;
+            while m <= limit {
+                let midx = (m - 3) / 2;
+                bits[midx / 64] &= !(1u64 << (midx % 64));
+                m += 2 * p;
+            }
+        }
+        p += 2;
+    }
+    bits
+}
+
+// Collect primes up to max_prime from a fast bit sieve.
+fn collect_primes_from_bits(sieve_bits: &[u64], max_prime: usize) -> Vec<u32> {
+    let mut primes = vec![0u32, 2]; // 0-indexed sentinel + 2
+    for w in 0..sieve_bits.len() {
+        let mut word = sieve_bits[w];
+        while word != 0 {
+            let bit = word.trailing_zeros() as usize;
+            let p = 2 * (w * 64 + bit) + 3;
+            if p > max_prime { return primes; }
+            primes.push(p as u32);
+            word &= word - 1; // clear lowest set bit
+        }
+    }
+    primes
+}
+
 // ── PhiTiny ──────────────────────────────────────────────────────────────────
 
 const TINY_PRIMES: [u64; 8] = [0, 2, 3, 5, 7, 11, 13, 17];
@@ -1751,13 +1823,14 @@ fn count_primes(x: u64) -> u64 {
         let tables_handle = s.spawn(|| { let t = Instant::now(); let r = generate_tables(z, y); if show_timing { eprintln!("    gen_tables: {:.3}s", t.elapsed().as_secs_f64()); } r });
 
         let t_main = Instant::now();
-        let pi_sieve = Sieve::new(pi_table_limit);
-        let mut primes: Vec<u32> = vec![0];
-        primes.extend(pi_sieve.primes_from(2).take_while(|&p| p <= y).map(|p| p as u32));
+        // Use fast bit sieve for pi generation (avoids primal's per-call overhead)
+        let sieve_bits = fast_bit_sieve(pi_table_limit);
+        let primes = collect_primes_from_bits(&sieve_bits, y);
         let pi_y = primes.len() - 1;
         let k = std::cmp::min(7, pi_y);
         let phi_cache = PhiTinyCache::new(k);
-        let pi = generate_pi(pi_table_limit, &pi_sieve);
+        let pi = generate_pi_from_bits(pi_table_limit, &sieve_bits);
+        drop(sieve_bits);
         if show_timing { eprintln!("    main_setup: {:.3}s", t_main.elapsed().as_secs_f64()); }
 
         let big_pi = bpi_handle.join().unwrap();
@@ -1773,14 +1846,14 @@ fn count_primes(x: u64) -> u64 {
     });
     if show_timing { eprintln!("  setup tables: {:.2}s", t_setup.elapsed().as_secs_f64()); }
 
-    // Sigma and Phi0 (fast, sequential)
-    let sigma = compute_sigma(x, y, x_star, &primes, &pi, &big_pi);
-    let phi0 = compute_phi0(x, y, z, k, &primes, &phi_cache);
-
     // Precompute reciprocals once, shared between AC and D (saves 14.8MB)
     let recip: Vec<u64> = primes.iter().map(|&p| {
         if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
     }).collect();
+
+    // Sigma and Phi0 (fast, sequential — 0.04s total, overlapped with pool creation)
+    let sigma = compute_sigma(x, y, x_star, &primes, &pi, &big_pi);
+    let phi0 = compute_phi0(x, y, z, k, &primes, &phi_cache);
 
     // C1 pool: dedicated small pool so C1 doesn't compete with D/AC on global pool
     let c1_pool = rayon::ThreadPoolBuilder::new()
