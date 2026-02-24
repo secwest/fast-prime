@@ -1386,7 +1386,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     // how many ValidM entries fall in the m-range for each b value.
     // We estimate by sampling a few representative b values.
     let d_chunk_mult: usize = std::env::var("D_CHUNKS").ok()
-        .and_then(|s| s.parse().ok()).unwrap_or(128);
+        .and_then(|s| s.parse().ok()).unwrap_or(32);
     let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * d_chunk_mult);
     let work_per_seg: Vec<usize> = (0..num_segments).map(|seg_idx| {
         let low = std::cmp::max(seg_idx * segment_size, 1) as u64;
@@ -1777,15 +1777,16 @@ fn count_primes(x: u64) -> u64 {
     let sigma = compute_sigma(x, y, x_star, &primes, &pi, &big_pi);
     let phi0 = compute_phi0(x, y, z, k, &primes, &phi_cache);
 
-    // C1: compute before concurrent phase to avoid D/B cache contention
-    let t_c1 = Instant::now();
-    let c1 = compute_c1(x, y, z, k, &primes, &pi);
-    if show_timing { eprintln!("  C1: {:.3}s", t_c1.elapsed().as_secs_f64()); }
-
     // Precompute reciprocals once, shared between AC and D (saves 14.8MB)
     let recip: Vec<u64> = primes.iter().map(|&p| {
         if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
     }).collect();
+
+    // C1 pool: dedicated small pool so C1 doesn't compete with D/AC on global pool
+    let c1_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(8)
+        .build()
+        .unwrap();
 
     // Run B, AC, D — sequential if SEQ_MODE set, concurrent otherwise
     let seq_mode = std::env::var("SEQ_MODE").is_ok();
@@ -1796,7 +1797,8 @@ fn count_primes(x: u64) -> u64 {
         .num_threads(b_threads)
         .build()
         .unwrap();
-    let (ac, d, b_val) = if seq_mode {
+    let (ac, d, b_val, c1) = if seq_mode {
+        let c1 = c1_pool.install(|| compute_c1(x, y, z, k, &primes, &pi));
         let t = Instant::now();
         let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
         if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
@@ -1807,8 +1809,9 @@ fn count_primes(x: u64) -> u64 {
         // B on global pool in SEQ_MODE to give it all 72 threads
         let b_val = compute_b(x, y, pi_y, &big_pi);
         if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
-        (ac, d, b_val)
+        (ac, d, b_val, c1)
     } else if std::env::var("PHASE_DB_AC").is_ok() {
+        let c1 = c1_pool.install(|| compute_c1(x, y, z, k, &primes, &pi));
         // Phase 1: D + B concurrent (no AC competing for BigPiTable bandwidth)
         let (d, b_val) = std::thread::scope(|s| {
             let b_handle = s.spawn(|| {
@@ -1826,8 +1829,9 @@ fn count_primes(x: u64) -> u64 {
         let t = Instant::now();
         let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
         if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
-        (ac, d, b_val)
+        (ac, d, b_val, c1)
     } else if std::env::var("PHASE_AC_DB").is_ok() {
+        let c1 = c1_pool.install(|| compute_c1(x, y, z, k, &primes, &pi));
         // Phase 1: AC alone (full L3 for BigPiTable)
         let t = Instant::now();
         let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
@@ -1845,8 +1849,9 @@ fn count_primes(x: u64) -> u64 {
             if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
             (d, b_handle.join().unwrap())
         });
-        (ac, d, b_val)
+        (ac, d, b_val, c1)
     } else if std::env::var("PHASE_D_ACB").is_ok() || std::env::var("PHASE_D_ACB2").is_ok() || std::env::var("PHASE_D_ACB3").is_ok() {
+        let c1 = c1_pool.install(|| compute_c1(x, y, z, k, &primes, &pi));
         // Phase 1: D alone (full resources)
         let t = Instant::now();
         let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
@@ -1872,7 +1877,7 @@ fn count_primes(x: u64) -> u64 {
                 let ac = ac_pool.install(|| compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip));
                 if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
                 let b_val = b_handle.join().unwrap();
-                (ac, d, b_val)
+                (ac, d, b_val, c1)
             })
         } else if std::env::var("PHASE_D_ACB2").is_ok() {
             // Both AC and B on global pool (cache-friendly: both access BigPiTable)
@@ -1887,7 +1892,7 @@ fn count_primes(x: u64) -> u64 {
                 let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
                 if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
                 let b_val = b_handle.join().unwrap();
-                (ac, d, b_val)
+                (ac, d, b_val, c1)
             })
         } else {
             std::thread::scope(|s| {
@@ -1901,10 +1906,11 @@ fn count_primes(x: u64) -> u64 {
                 let ac = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
                 if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
                 let b_val = b_handle.join().unwrap();
-                (ac, d, b_val)
+                (ac, d, b_val, c1)
             })
         }
     } else if std::env::var("PHASE_B_ACD").is_ok() {
+        let c1 = c1_pool.install(|| compute_c1(x, y, z, k, &primes, &pi));
         // Phase 1: B alone (fast ~2.8s, full L3 and all cores)
         let t = Instant::now();
         let b_val = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
@@ -1923,10 +1929,13 @@ fn count_primes(x: u64) -> u64 {
             let ac = ac_handle.join().unwrap();
             (ac, d)
         });
-        (ac, d, b_val)
+        (ac, d, b_val, c1)
     } else {
-        // All b-values now processed through unified segmented approach
+        // Default: All concurrent, C1 overlapped on dedicated pool
         std::thread::scope(|s| {
+            let c1_handle = s.spawn(|| {
+                c1_pool.install(|| compute_c1(x, y, z, k, &primes, &pi))
+            });
             let b_handle = s.spawn(|| {
                 let t = Instant::now();
                 let r = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
@@ -1944,7 +1953,8 @@ fn count_primes(x: u64) -> u64 {
             if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
             let ac = ac_handle.join().unwrap();
             let b_val = b_handle.join().unwrap();
-            (ac, d, b_val)
+            let c1 = c1_handle.join().unwrap();
+            (ac, d, b_val, c1)
         })
     };
 
