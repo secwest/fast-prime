@@ -1190,3 +1190,85 @@ Key differences from our cross_off_sieve:
 7. **Their cost**: ~5 ops/crossing (load byte, extract with constant shift, clear with constant mask, update counter, store)
 
 **Expected impact of adopting byte-level approach**: ~30-50% speedup on D's cross_off (~68% of D time), saving ~1.5s → wall time from 10.85s to ~9.3s.
+
+---
+
+## Session 19-22: Byte-Level Sieve, Parallel Setup, Alpha Retune, Fast Pi Table
+
+### Opt 46: Byte-level cross_off_sieve (D: 5.38→4.83s, -10.2%)
+
+Replaced word-level (u64) sieve cross-off with byte-level approach inspired by primecount's `Sieve.cpp`:
+- Eliminates variable bit shifts (constant masks via `WHEEL_BITS` table)
+- Single pass through sieve data (vs 8 separate residue passes)
+- Unrolled 8-step wheel cycle in inner loop
+- Uses `WHEEL_GAPS`/`WHEEL_BITS`/`WHEEL_CORR` tables for byte advances and masks
+- Each crossing: load byte, test mask, clear mask, store (4 ops vs ~9 ops)
+
+**Result**: D sequential 5.38→4.83s (-10.2%), wall concurrent 10.85→10.25s (-5.5%)
+
+### Opt 47: Parallel generate_tables + parallel build_valid_m (Setup: 1.02→0.22s)
+
+Restructured `generate_tables` into 2-phase parallel sieve:
+- Phase 1: Parallel segmented sieve for small primes (rayon, L2-resident segments)
+- Phase 2: Parallel medium/large prime marking (race-free: p1*p2 > z)
+- Parallelized `build_valid_m` using rayon par_iter (128-bit division parallelized)
+
+**Result**: Setup 1.02→0.22s (4.6× faster), wall 10.24→9.42s (-8.0%)
+
+### Opt 48: Alpha retune AY=18.5/AZ=1.3 + PHASE_B_ACD
+
+Alpha retuning from AY=15.0/AZ=1.2 to AY=18.5/AZ=1.3 for max i64, which rebalances AC and D work at the new performance levels. Added `PHASE_B_ACD` scheduling mode (B alone first, then AC+D concurrent).
+
+**Result**: Best 8.79s (was 8.96s), avg 8.83s
+
+### Opt 49: HIGH_PRIORITY_CLASS (saves ~0.1s)
+
+Sets process priority to `HIGH_PRIORITY_CLASS` via Windows API at startup, reducing OS scheduler interference from background processes.
+
+**Result**: ~0.1s consistent improvement across runs
+
+### Opt 50: D_CHUNKS=32 + LLVM unroll=800 + C1 dedicated pool overlap
+
+Three complementary optimizations:
+1. **D_CHUNKS=32** (was 128): Larger D chunks eliminate bimodal D scheduling. D consistently 5.4-5.6s vs previous 5.3s (good) / 7-9s (bad). Reduces max wall by 0.25s.
+2. **LLVM unroll-threshold=800**: More aggressive unrolling in D inner loops. Median -0.05s.
+3. **C1 on dedicated 8-thread pool**: Overlaps C1 (0.07s) with concurrent D/AC/B without competing for global rayon pool threads.
+
+**Result (15 runs)**: min=8.74 med=8.81 max=8.94, D consistently 5.35-5.62 (no bimodal)
+
+### Opt 51: Fast bit sieve for pi table generation (main_setup: 0.143→0.108s)
+
+Replaced `primal::Sieve`-based `generate_pi` with custom `fast_bit_sieve()` + `generate_pi_from_bits()`. The old approach made 50.5M individual `is_prime()` calls through primal's API (0.128s). The new approach:
+- `fast_bit_sieve()`: Simple odd-only Eratosthenes sieve returning raw `Vec<u64>` bit array
+- `collect_primes_from_bits()`: Extract primes via `trailing_zeros()` bit scan
+- `generate_pi_from_bits()`: Sequential scan with word/bit index tracking, no division
+
+**Bug found and fixed**: Initial unrolled 4× version had boundary handling bugs — entries near `limit` were skipped when `n+7 > limit` and the fill-remaining code only covered positions after all sieve words, not the gap within the last word. Fixed with simple sequential loop.
+
+**Result (8 runs)**: min=8.768 med=8.822 max=8.918 (was min=8.83, med=8.89)
+
+### Failed Experiments (Sessions 19-22)
+
+- **POOL_MULT=2 (48 threads)**: Wall 8.98-9.19, AC slower — insufficient parallelism
+- **POOL_MULT=4 (96 threads)**: Wall 8.95-9.42, highly variable — too much contention
+- **D on dedicated pool (D_POOL=48 or 72)**: AC slightly better but D much slower. Net: no improvement
+- **Alpha_Y=20**: Slightly better min but worse median/consistency vs AY=18.5
+- **AC_SEG sweep (40K-500K)**: 130K confirmed optimal; 200K+ progressively worse from cache misses
+- **AC segment batching (SEG_BATCH)**: Reducing 183 sequential par_iter barriers — no improvement. Barriers aren't the bottleneck; CPU/memory contention with D is
+- **sigma+phi0 overlap with concurrent phase**: Only 0.04s savings, too complex for the benefit
+- **PGO (3 attempts across sessions)**: Consistently worse — compiler over-specializes for profiling workload
+
+### Current Performance (Opt 51)
+
+| Component | Sequential | Concurrent |
+|-----------|-----------|-----------|
+| Setup     | 0.24s     | 0.24s     |
+| main_setup| 0.108s    | 0.108s    |
+| BigPiTable| 0.136s    | 0.136s    |
+| build_vm  | 0.070s    | 0.070s    |
+| AC        | 2.12s     | 8.45s     |
+| D         | —         | 5.49s     |
+| B         | —         | 6.86s     |
+| **Wall**  | —         | **8.77s** |
+
+Gap to primecount (8.49s): **0.28s (3.3%)**

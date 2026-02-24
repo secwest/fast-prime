@@ -2991,3 +2991,80 @@ Added diagnostic counters to D's Type 1 ValidM scanning loop:
 3. **B needs many threads AND dedicated CPU**: B's primesieve is CPU-bound and any CPU contention slows it proportionally
 4. **Phased scheduling loses to concurrency**: D_seq(5.35) + max(AC, B) always > max(AC_contended, D, B) because D's sequential time is too large to amortize
 5. **The i16 overflow bug**: casting u16 → i16 wraps for values > 32767, corrupting both lpf and mu sign. Must clamp in u16 domain before casting
+
+## Sessions 17-18: Deep Analysis & Primecount Study
+
+Studied primecount's Sieve.cpp in detail. Key differences found:
+- Byte-level cross-off with constant masks (4 ops/crossing vs our 9)
+- Duff's device for 64 wheel states — no variable shifts
+- Counter array for O(1) delta counting
+- Wheel state persistence across segments
+
+Attempted L1-Resident SegmentedPiTable (36KB segments) — CATASTROPHIC FAILURE. AC 2.23→12.00s (5.4× worse). Root cause: O(segments × b_lookups) = 1.22B bound checks. Segment-outer iteration fundamentally incompatible with b_lookup inner loop.
+
+Discovered AC has 35.85B total iterations (much more than estimated). Per-iteration cost identical in sequential vs concurrent — confirmed AC concurrent penalty is purely CPU scheduling, not cache.
+
+## Session 19: Byte-Level Sieve + Parallel Setup (Opts 46-47)
+
+### Opt 46: Byte-level cross_off_sieve
+Implemented primecount-style byte-level crossing with wheel tables (WHEEL_GAPS, WHEEL_BITS, WHEEL_CORR). Each crossing now: load byte → test mask → clear mask → store (4 ops vs 9 ops with variable shifts). D 5.38→4.83s (-10.2%), wall 10.85→10.25s.
+
+### Opt 47: Parallel setup
+Restructured generate_tables into 2-phase parallel sieve + parallel build_valid_m. Setup 1.02→0.22s (4.6× faster), wall 10.24→9.42s. Huge win — setup was a serial bottleneck.
+
+## Session 20: Alpha Retune + Priority (Opts 48-49)
+
+### Opt 48: Alpha retune AY=18.5/AZ=1.3
+With the new faster D (byte-level sieve), the optimal alpha shifted. Higher AY gives more work to AC (which runs more efficiently with fast_div) and less to D. Combined with PHASE_B_ACD scheduling mode.
+
+### Opt 49: HIGH_PRIORITY_CLASS
+Simple Windows API call at startup. Reduces OS scheduler interference. ~0.1s consistent improvement.
+
+### Performance at this point: best 8.79s, avg 8.83s
+
+## Session 21: AC Unification + C1 Pool + LLVM Tuning (Opt 50)
+
+### Opt 50 (original numbering): C1 pre-computation + unchecked AC access
+Extracted C1 to dedicated 8-thread pool. Added unsafe get_unchecked for primes[] and recip[] in AC inner loops. AC sequential 2.42→2.14s (11.6% faster).
+
+### Opt 51 (original): Unified segmented AC
+Previously 101K narrow b-values used unsegmented scattered BigPiTable access (13× concurrent penalty). Now ALL b-values process through segment-by-segment approach. Narrow b-values pre-assigned to segments via binary search. min 8.72s (was 8.88s).
+
+### Opt 52 (original): D_CHUNKS tuning
+Tested D_CHUNKS from 32 to 256. Found that D_CHUNKS=128 (then later 32) eliminates bimodal D scheduling where D sometimes takes 5.3s and sometimes 7-9s.
+
+## Session 22: Consolidation + Fast Pi Table (Opts 50-51, renumbered)
+
+### Opt 50 (renumbered): D_CHUNKS=32 + LLVM unroll=800 + C1 pool
+Combined three complementary changes. D_CHUNKS=32 gives larger chunks that eliminate bimodal scheduling entirely. LLVM unroll-threshold=800 helps D inner loops. C1 on dedicated 8-thread pool overlaps with concurrent phase.
+15-run benchmark: min=8.74, med=8.81, max=8.94. D consistently 5.35-5.62s (no bimodal!).
+
+### Parameter sweep results (all confirmed existing settings optimal)
+- POOL_MULT: 3 optimal (2=worse, 4=worse)
+- D_POOL dedicated thread pool: no improvement (AC slightly better, D much worse)
+- Alpha_Y: 18.5 optimal (20 better min but worse median)
+- AC_SEG: 130K optimal (200K+ worse from L2 cache misses)
+- AC segment batching: no improvement (barriers aren't the bottleneck)
+- sigma+phi0 overlap: 0.04s not worth complexity
+
+### Opt 51: Fast bit sieve for pi table
+Identified generate_pi as setup bottleneck (0.128s of 0.143s main_setup). 50.5M individual primal::Sieve.is_prime() calls dominated. Replaced with:
+- fast_bit_sieve(): Simple odd-only Eratosthenes returning raw Vec<u64>
+- collect_primes_from_bits(): Bit scan extraction
+- generate_pi_from_bits(): Sequential word/bit tracking
+
+**Bug found**: Initial 4× unrolled version produced wrong results at 1M+ (72015 vs 78498 at 1M). Root cause: when `n+7 > limit`, the unrolled loop broke early, and remaining-bits loop only filled pi[n-1] and pi[n] per odd n, skipping even entries. The "fill remaining" code started at `2*sieve_bits.len()*64+1` (after ALL sieve words), missing the gap within the last word. Fixed with simple sequential loop tracking word/bit indices.
+
+main_setup: 0.143→0.108s. 8-run benchmark: min=8.768, med=8.822, max=8.918.
+
+### Performance evolution across sessions
+| Session | Best (min) | Median | Key change |
+|---------|-----------|--------|------------|
+| 16      | 10.85s    | 10.85s | Baseline (Opt 45) |
+| 19      | 9.42s     | —      | Byte sieve + parallel setup |
+| 20      | 8.79s     | 8.83s  | Alpha retune + priority |
+| 21      | 8.72s     | 8.89s  | Unified AC + C1 pool |
+| 22      | 8.77s     | 8.82s  | Fast pi table (Opt 51) |
+
+### Gap to primecount: 8.77 - 8.49 = 0.28s (3.3%)
+AC at 8.45s concurrent remains the dominant bottleneck. All easy parameter-level optimizations exhausted.
