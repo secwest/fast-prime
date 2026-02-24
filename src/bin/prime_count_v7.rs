@@ -711,6 +711,28 @@ fn fast_div(n: u64, d: u64, recip_d: u64) -> u64 {
     q + (n - q.wrapping_mul(d) >= d) as u64
 }
 
+fn compute_c1(x: u64, y: usize, z: usize, k: usize,
+              primes: &[u32], pi: &[u32]) -> i64 {
+    let pi_limit = pi.len() - 1;
+    let sqrt_z = isqrt(z as u64) as usize;
+    let pi_y = pi[y] as usize;
+    let pi_sqrtz = pi[std::cmp::min(sqrt_z, pi_limit)] as usize;
+    let pi_root3_xz = pi[std::cmp::min(icbrt(x / z as u64) as usize, pi_limit)] as usize;
+    let min_c1_b = std::cmp::max(k, pi_root3_xz) + 1;
+
+    let c1_range: Vec<usize> = (min_c1_b..=pi_sqrtz)
+        .filter(|&b| b < primes.len())
+        .collect();
+    c1_range.par_iter().map(|&b| {
+        let prime = primes[b] as u64;
+        let xp = x / prime;
+        let max_m = std::cmp::min((xp / prime) as usize, z);
+        let min_m_val = std::cmp::max((xp / (prime * prime)) as usize, z / prime as usize);
+        let min_m_val = std::cmp::min(min_m_val, max_m);
+        -c1_recursive(xp, b, b, pi_y, 1, min_m_val, max_m, -1, primes, pi)
+    }).sum()
+}
+
 fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
               primes: &[u32], pi: &[u32], big_pi: &BigPiTable,
               recip: &[u64]) -> i64 {
@@ -718,29 +740,13 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let x13 = icbrt(x) as usize;
     let sqrt_x = isqrt(x) as usize;
     let sqrt_z = isqrt(z as u64) as usize;
-    let pi_y = pi[y] as usize;
     let pi_sqrtz = pi[std::cmp::min(sqrt_z, pi_limit)] as usize;
     let pi_x_star = pi[std::cmp::min(x_star, pi_limit)] as usize;
     let pi_x13 = pi[std::cmp::min(x13, pi_limit)] as usize;
-    let pi_root3_xz = pi[std::cmp::min(icbrt(x / z as u64) as usize, pi_limit)] as usize;
     let pi_root3_xy = pi[std::cmp::min(icbrt(x / y as u64) as usize, pi_limit)] as usize;
 
-    // ── C1: recursive Möbius, sequential (very few iterations) ───────────
-    let mut c1 = 0i64;
-    let min_c1_b = std::cmp::max(k, pi_root3_xz) + 1;
-    for b in min_c1_b..=pi_sqrtz {
-        if b >= primes.len() { break; }
-        let prime = primes[b] as u64;
-        let xp = x / prime;
-        let max_m = std::cmp::min((xp / prime) as usize, z);
-        let min_m_val = std::cmp::max((xp / (prime * prime)) as usize, z / prime as usize);
-        let min_m_val = std::cmp::min(min_m_val, max_m);
-
-        c1 -= c1_recursive(xp, b, b, pi_y, 1, min_m_val, max_m,
-                           -1, primes, pi);
-    }
-
     // ── C2 + A: round-based processing for cache-friendly BigPiTable access ──
+    // (C1 is computed separately before the concurrent phase)
     let min_c2_b = std::cmp::max(k, std::cmp::max(pi_root3_xy, pi_sqrtz)) + 1;
 
     // Build per-b info for C2 and A
@@ -829,12 +835,12 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             let mut l = eff_lo;
 
             while l + 3 <= eff_hi {
-                let xpq0 = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
-                let xpq1 = fast_div(info.xp, primes[l+1] as u64, recip[l+1]) as usize;
-                let xpq2 = fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize;
-                let xpq3 = fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize;
-
                 unsafe {
+                let xpq0 = fast_div(info.xp, *primes.get_unchecked(l) as u64, *recip.get_unchecked(l)) as usize;
+                let xpq1 = fast_div(info.xp, *primes.get_unchecked(l+1) as u64, *recip.get_unchecked(l+1)) as usize;
+                let xpq2 = fast_div(info.xp, *primes.get_unchecked(l+2) as u64, *recip.get_unchecked(l+2)) as usize;
+                let xpq3 = fast_div(info.xp, *primes.get_unchecked(l+3) as u64, *recip.get_unchecked(l+3)) as usize;
+
                     if info.is_c2 {
                         local += (big_pi.pi_fast(xpq0) as i64 - info.b as i64 + 2)
                                + (big_pi.pi_fast(xpq1) as i64 - info.b as i64 + 2)
@@ -860,7 +866,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             }
 
             while l <= eff_hi {
-                let xpq = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
+                let xpq = unsafe { fast_div(info.xp, *primes.get_unchecked(l) as u64, *recip.get_unchecked(l)) } as usize;
                 let pi_val = unsafe { big_pi.pi_fast(xpq) } as i64;
                 if info.is_c2 {
                     local += pi_val - info.b as i64 + 2;
@@ -876,6 +882,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         }).sum();
 
         // Process wide b_lookups with segmented approach
+        // All threads process the same segment simultaneously for cache locality.
         let mut wide_sum: i64 = 0;
         if !wide_indices.is_empty() {
             for seg in (0..num_segs).rev() {
@@ -912,12 +919,12 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 let mut l = eff_lo;
 
                 while l + 3 <= eff_hi {
-                    let xpq0 = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
-                    let xpq1 = fast_div(info.xp, primes[l+1] as u64, recip[l+1]) as usize;
-                    let xpq2 = fast_div(info.xp, primes[l+2] as u64, recip[l+2]) as usize;
-                    let xpq3 = fast_div(info.xp, primes[l+3] as u64, recip[l+3]) as usize;
-
                     unsafe {
+                    let xpq0 = fast_div(info.xp, *primes.get_unchecked(l) as u64, *recip.get_unchecked(l)) as usize;
+                    let xpq1 = fast_div(info.xp, *primes.get_unchecked(l+1) as u64, *recip.get_unchecked(l+1)) as usize;
+                    let xpq2 = fast_div(info.xp, *primes.get_unchecked(l+2) as u64, *recip.get_unchecked(l+2)) as usize;
+                    let xpq3 = fast_div(info.xp, *primes.get_unchecked(l+3) as u64, *recip.get_unchecked(l+3)) as usize;
+
                         if info.is_c2 {
                             local += (big_pi.pi_fast(xpq0) as i64 - info.b as i64 + 2)
                                    + (big_pi.pi_fast(xpq1) as i64 - info.b as i64 + 2)
@@ -943,7 +950,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 }
 
                 while l <= eff_hi {
-                    let xpq = fast_div(info.xp, primes[l] as u64, recip[l]) as usize;
+                    let xpq = unsafe { fast_div(info.xp, *primes.get_unchecked(l) as u64, *recip.get_unchecked(l)) } as usize;
                     let pi_val = unsafe { big_pi.pi_fast(xpq) } as i64;
                     if info.is_c2 {
                         local += pi_val - info.b as i64 + 2;
@@ -965,7 +972,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         narrow_sum + wide_sum
     };
 
-    c1 + c2_a_sum
+    c2_a_sum
 }
 
 // ── Mod-30 wheel sieve constants ─────────────────────────────────────────────
@@ -1793,6 +1800,11 @@ fn count_primes(x: u64) -> u64 {
     let sigma = compute_sigma(x, y, x_star, &primes, &pi, &big_pi);
     let phi0 = compute_phi0(x, y, z, k, &primes, &phi_cache);
 
+    // C1: compute before concurrent phase to avoid D/B cache contention
+    let t_c1 = Instant::now();
+    let c1 = compute_c1(x, y, z, k, &primes, &pi);
+    if show_timing { eprintln!("  C1: {:.3}s", t_c1.elapsed().as_secs_f64()); }
+
     // Precompute reciprocals once, shared between AC and D (saves 14.8MB)
     let recip: Vec<u64> = primes.iter().map(|&p| {
         if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
@@ -1800,8 +1812,11 @@ fn count_primes(x: u64) -> u64 {
 
     // Run B, AC, D — sequential if SEQ_MODE set, concurrent otherwise
     let seq_mode = std::env::var("SEQ_MODE").is_ok();
+    let b_threads: usize = std::env::var("B_THREADS").ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(24));
     let b_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(24))
+        .num_threads(b_threads)
         .build()
         .unwrap();
     let (ac, d, b_val) = if seq_mode {
@@ -1933,8 +1948,6 @@ fn count_primes(x: u64) -> u64 {
         });
         (ac, d, b_val)
     } else {
-        let d_delay: u64 = std::env::var("D_DELAY").ok()
-            .and_then(|s| s.parse().ok()).unwrap_or(0);
         std::thread::scope(|s| {
             let b_handle = s.spawn(|| {
                 let t = Instant::now();
@@ -1948,9 +1961,6 @@ fn count_primes(x: u64) -> u64 {
                 if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
                 r
             });
-            if d_delay > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(d_delay));
-            }
             let t = Instant::now();
             let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
             if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
@@ -1960,7 +1970,7 @@ fn count_primes(x: u64) -> u64 {
         })
     };
 
-    (ac - b_val + d + phi0 + sigma) as u64
+    (c1 + ac - b_val + d + phi0 + sigma) as u64
 }
 
 fn main() {
