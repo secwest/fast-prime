@@ -1258,17 +1258,53 @@ Replaced `primal::Sieve`-based `generate_pi` with custom `fast_bit_sieve()` + `g
 - **sigma+phi0 overlap with concurrent phase**: Only 0.04s savings, too complex for the benefit
 - **PGO (3 attempts across sessions)**: Consistently worse — compiler over-specializes for profiling workload
 
-### Current Performance (Opt 51)
+### Opt 52: Early AC/B/C1 start — overlap with setup tail
 
-| Component | Sequential | Concurrent |
-|-----------|-----------|-----------|
-| Setup     | 0.24s     | 0.24s     |
-| main_setup| 0.108s    | 0.108s    |
-| BigPiTable| 0.136s    | 0.136s    |
-| build_vm  | 0.070s    | 0.070s    |
-| AC        | 2.12s     | 8.45s     |
-| D         | —         | 5.49s     |
-| B         | —         | 6.86s     |
-| **Wall**  | —         | **8.77s** |
+**Technique**: Restructured the default concurrent mode to start AC/B/C1 as soon as BigPiTable + recip are ready (~0.135s), while gen_tables + build_vm finish on the main thread (~0.17s later). Uses two-scope approach with std::thread::spawn for gen_tables.
 
-Gap to primecount (8.49s): **0.28s (3.3%)**
+**Architecture**: 
+- Scope 1: BigPiTable (spawned thread) + main_setup (main thread) run concurrently. Produces big_pi, primes, pi, recip.
+- gen_tables: spawned on independent OS thread (std::thread::spawn), runs concurrently with scope 1.
+- Scope 2: AC/B/C1 start immediately; main thread joins gen_tables, runs build_vm, sigma/phi0, then D.
+
+**Key insight**: AC only needs primes, pi, big_pi, and recip — all ready at t=0.135s. The gen_tables + build_vm needed for D aren't ready until t=0.30s. By splitting into two scopes, AC starts 0.165s earlier.
+
+**Rust lifetime challenge**: Single merged thread::scope fails because variables defined inside the scope closure can't be borrowed by spawned threads (shorter lifetime). Solved by returning values from scope 1 and borrowing them in scope 2.
+
+**Result (8 runs)**: min=8.615 med=8.684 max=8.753 (was min=8.768, med=8.822)
+
+### Failed Experiments (Session 23)
+
+- **BigPiTable in-place sieve (par_chunks_mut)**: Replaced Vec<Vec<u64>> collect + extend with in-place filling via par_chunks_mut. Eliminated 189MB copy. BigPiTable 5ms faster but main_setup sometimes slower due to memory contention. Net: neutral or slightly worse (min=8.675 vs 8.598).
+- **D_CHUNKS=64**: min=8.625 (marginally worse). D_CHUNKS=128: min=8.740 (much worse). D_CHUNKS=32 confirmed optimal.
+- **B_THREADS=20**: min=8.715 (worse). B_THREADS=16: min=8.962 (much worse — B becomes bottleneck).
+- **AC_SEG=80K/100K/160K**: All worse than 130K default. 80K: min=8.671, 100K: min=8.695, 160K: min=8.676.
+- **T0 prefetch with double-buffering in AC inner loop**: Compute next batch's xpq while prefetching current batch's BigPiTable entries. Much worse (min=8.789) — segmented approach already provides L2 locality; prefetch adds instruction overhead.
+- **rayon with_min_len(256)**: Larger per-task chunks hurt load balancing. min=9.168 (catastrophically worse).
+- **D_DELAY (500-2000ms)**: Delaying D start to give AC more solo rayon time. min=8.676-8.746, all worse — B still competes and delayed D extends critical path.
+- **B_DELAY (300-1500ms)**: Delaying B start. min=8.617-8.715, neutral or worse — B pool threads sleep when idle anyway.
+- **Alpha fine-tuning**: AY=19.0/AZ=1.4 has better median consistency (8.675 vs 8.752) but same min. AY=18.5/AZ=1.3 remains optimal for best-case.
+- **PGO (4th attempt)**: Instrumented build (311s per run!). PGO build: min=8.613, med=8.698. Same as baseline — confirmed PGO doesn't help.
+- **opt-level="s"**: Optimize for size. min=9.323 — much worse, inner loops lose unrolling.
+- **LLVM TSP block placement**: `-C llvm-args=--enable-ext-tsp-block-placement=true`. min=8.614, med=8.710 — within noise of baseline.
+- **LLVM loop-versioning-LICM**: min=8.704 — slightly worse.
+- **POOL_MULT=1/2/4 re-test**: PM=1: 9.085, PM=2: 8.732, PM=4: 8.708. POOL_MULT=3 (72 threads) confirmed optimal.
+- **Forward segment order**: Processing AC segments low-to-high instead of high-to-low. min=8.629 — within noise.
+
+### Current Performance (Opt 52)
+
+| Component | Time | Notes |
+|-----------|------|-------|
+| Setup     | 0.138s | BigPiTable ∥ main_setup |
+| main_setup| 0.116s | fast_bit_sieve(30ms) + collect(8ms) + pi(71ms) + recip(6ms) |
+| BigPiTable| 0.135s | Parallel sieve, 285MB, dominates setup |
+| gen_tables| 0.200s | On OS thread, overlaps with AC start |
+| build_vm  | 0.070s | D starts at t≈0.27s |
+| AC loops  | 8.49s  | 53.6K wide + 101K narrow, 183 segs, 35.85B iterations |
+| D         | 5.58s  | 32 chunks, byte-level sieve |
+| B         | 6.88s  | 24-thread pool, primesieve |
+| **Wall**  | **8.65s** | min=8.60, med=8.70 |
+
+Gap to primecount (8.49s): **0.11s (1.3%)**
+
+AC loop time (8.49s) matches primecount's total. The remaining gap is pure setup overhead (0.138s) minus scheduling overlap benefits.

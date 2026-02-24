@@ -3068,3 +3068,78 @@ main_setup: 0.143→0.108s. 8-run benchmark: min=8.768, med=8.822, max=8.918.
 
 ### Gap to primecount: 8.77 - 8.49 = 0.28s (3.3%)
 AC at 8.45s concurrent remains the dominant bottleneck. All easy parameter-level optimizations exhausted.
+
+---
+
+## Session 23: Early AC Start + Exhaustive Micro-optimization
+
+### Key Achievement: Opt 52 (min=8.60s, 1.3% from primecount)
+
+**Breakthrough insight**: AC only needs primes, pi, big_pi, and recip (ready at t=0.135s). gen_tables + build_vm (needed for D only) aren't ready until t=0.30s. By splitting setup into two thread::scopes, AC starts 0.165s earlier.
+
+**Implementation challenge**: Rust's `std::thread::scope` lifetime rules prevent variables defined inside the scope closure from being borrowed by spawned threads. Solved with two-scope approach:
+- Scope 1: BigPiTable + main_setup → returns all AC prerequisites
+- gen_tables: independent OS thread (std::thread::spawn with 'static captures)
+- Scope 2: AC/B/C1 start immediately; main thread joins gen_tables, builds VM, runs D
+
+**Result**: min=8.615, med=8.684 → min=8.60, med=8.70 after clean rebuild.
+
+### Exhaustive optimization sweep (all failed)
+
+Tested 20+ optimization ideas across parameter tuning, algorithmic changes, compiler flags, and scheduling strategies. None improved on Opt 52:
+
+**Parameter tuning (all confirmed baseline optimal)**:
+- D_CHUNKS: 32 confirmed (64: -27ms, 128: -142ms)
+- B_THREADS: 24 confirmed (20: -117ms, 16: -364ms)
+- AC_SEG: 130K confirmed (80K: -73ms, 100K: -97ms, 160K: -78ms)
+- POOL_MULT: 3 confirmed (1: -487ms, 2: -134ms, 4: -110ms)
+- Alpha: AY=18.5/AZ=1.3 confirmed (AY=19.0/AZ=1.4 ties on min, better median but not significant)
+
+**Code-level optimizations**:
+- BigPiTable in-place sieve (par_chunks_mut): Neutral. 5ms faster BigPiTable but 189MB upfront allocation sometimes hurts.
+- T0 prefetch double-buffering in AC inner loop: -191ms! Segmented approach already provides L2 locality. Extra instructions dominate.
+- rayon with_min_len(256): -570ms. Large chunks destroy load balancing.
+- Forward vs reverse segment order: Noise (±30ms).
+
+**Scheduling experiments**:
+- D_DELAY (500-2000ms): All worse. B still competes, delayed D extends path.
+- B_DELAY (300-1500ms): Neutral. B pool threads sleep when idle — no CPU savings.
+- Both B+D_DELAY=500ms: -211ms. Total work is fixed; rearranging doesn't help.
+
+**Compiler optimizations**:
+- PGO (4th attempt): Identical to baseline (min=8.613). Confirmed PGO doesn't help.
+- opt-level="s": -725ms. Inner loops lose unrolling.
+- LLVM TSP block placement: Within noise.
+- LLVM loop-versioning-LICM: -106ms.
+
+### Analysis: Why 1.3% remains
+
+AC loop time (8.49s) matches primecount's entire runtime. The gap is pure overhead:
+- Setup: 0.138s (BigPiTable dominates, already parallel)
+- D/B competition: AC shares 72-thread rayon pool with D for 5.5s
+
+The competition penalty: AC alone takes 2.2s on 24 effective cores. With D competing, AC takes 8.5s — a 3.86× slowdown. This is fundamental to the shared-pool architecture and can't be eliminated without making D the bottleneck.
+
+### Assembly analysis of AC inner loop
+
+Generated assembly (from --emit asm) shows LLVM produces near-optimal code:
+- 4× mulx for Barrett reduction high word
+- 4× imul for correction multiply
+- bzhiq for mask generation (BMI2)
+- popcnt for bit counting
+- Per-iteration: ~9 cycles at 5.7 GHz
+
+Total inner loop work: 35.85B × 9 cycles / 24 cores / 5.7 GHz ≈ 2.36s (matches AC solo time of 2.2s).
+
+### Performance evolution
+| Session | Best (min) | Median | Key change |
+|---------|-----------|--------|------------|
+| 16      | 10.85s    | 10.85s | Baseline (Opt 45) |
+| 19      | 9.42s     | —      | Byte sieve + parallel setup |
+| 20      | 8.79s     | 8.83s  | Alpha retune + priority |
+| 21      | 8.72s     | 8.89s  | Unified AC + C1 pool |
+| 22      | 8.77s     | 8.82s  | Fast pi table (Opt 51) |
+| 23      | 8.60s     | 8.70s  | Early AC start (Opt 52) |
+
+### Gap to primecount: 8.60 - 8.49 = 0.11s (1.3%)
+Remaining gap is setup overhead + D/AC scheduling. Algorithm-level changes (Deleglise-Rivat) or C++/OpenMP port would be needed for further gains.
