@@ -733,6 +733,7 @@ fn compute_c1(x: u64, y: usize, z: usize, k: usize,
     }).sum()
 }
 
+// ac_mode: 0=full (narrow+wide), 1=narrow only, 2=wide only
 fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
               primes: &[u32], pi: &[u32], big_pi: &BigPiTable,
               recip: &[u64]) -> i64 {
@@ -809,110 +810,79 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         // Each pair covers 128 numbers (64 odd numbers per word * 2 numbers per odd)
         let numbers_per_seg = seg_pairs * 128;
 
-        // Partition b_lookups into narrow (xpq range fits in ~1 segment, process unsegmented)
-        // and wide (needs segmented processing to keep BigPiTable in L2).
-        // Narrow b_lookups skip the segment loop overhead entirely.
-        let mut narrow_indices: Vec<u32> = Vec::new();
+        // Partition b_lookups into narrow (xpq range fits in ~1 segment) and wide.
+        // Both use the same segmented processing for cache-friendly BigPiTable access.
+        // Pre-assign narrow b-values to their segment for efficient per-segment filtering.
         let mut wide_indices: Vec<u32> = Vec::new();
+        let mut narrow_seg_assign: Vec<(u32, u32)> = Vec::new(); // (bi, segment)
         for (i, info) in b_lookups.iter().enumerate() {
-            let xpq_min = info.xp / primes[info.l_max] as u64;
+            let xpq_min = info.xp / primes[std::cmp::min(info.l_max, primes_len - 1)] as u64;
             let xpq_max = info.xp / primes[info.l_cur] as u64;
             if (xpq_max - xpq_min) < numbers_per_seg as u64 {
-                narrow_indices.push(i as u32);
+                let seg = std::cmp::min(xpq_min as usize / numbers_per_seg, num_segs - 1);
+                narrow_seg_assign.push((i as u32, seg as u32));
             } else {
                 wide_indices.push(i as u32);
             }
         }
+        // Sort narrow by segment for binary search in segment loop
+        narrow_seg_assign.sort_unstable_by_key(|&(_, seg)| seg);
 
-        // Process narrow b_lookups unsegmented (their BigPiTable access is naturally localized)
-        let narrow_sum: i64 = narrow_indices.par_iter().map(|&bi| {
-            let info = &b_lookups[bi as usize];
-            let eff_lo = info.l_cur;
-            let eff_hi = std::cmp::min(info.l_max, primes_len - 1);
-            if eff_lo > eff_hi { return 0; }
+        let t_ac_loops = std::time::Instant::now();
 
-            let mut local = 0i64;
-            let mut l = eff_lo;
+        // All b-values processed through segmented approach for uniform cache behavior.
+        // Wide b-values: checked against each segment (existing logic).
+        // Narrow b-values: only processed in their assigned segment (O(1) lookup).
+        let mut combined_sum: i64 = 0;
+        for seg in (0..num_segs).rev() {
+            let n_lo = if seg == 0 { 0usize } else { seg * numbers_per_seg };
+            let n_hi = std::cmp::min((seg + 1) * numbers_per_seg - 1, sqrt_x);
 
-            while l + 3 <= eff_hi {
-                unsafe {
-                let xpq0 = fast_div(info.xp, *primes.get_unchecked(l) as u64, *recip.get_unchecked(l)) as usize;
-                let xpq1 = fast_div(info.xp, *primes.get_unchecked(l+1) as u64, *recip.get_unchecked(l+1)) as usize;
-                let xpq2 = fast_div(info.xp, *primes.get_unchecked(l+2) as u64, *recip.get_unchecked(l+2)) as usize;
-                let xpq3 = fast_div(info.xp, *primes.get_unchecked(l+3) as u64, *recip.get_unchecked(l+3)) as usize;
+            // Find narrow b-values assigned to this segment via binary search
+            let narrow_start = narrow_seg_assign.partition_point(|&(_, s)| (s as usize) < seg);
+            let narrow_end = narrow_seg_assign.partition_point(|&(_, s)| (s as usize) <= seg);
+            let narrow_for_seg = &narrow_seg_assign[narrow_start..narrow_end];
 
-                    if info.is_c2 {
-                        local += (big_pi.pi_fast(xpq0) as i64 - info.b as i64 + 2)
-                               + (big_pi.pi_fast(xpq1) as i64 - info.b as i64 + 2)
-                               + (big_pi.pi_fast(xpq2) as i64 - info.b as i64 + 2)
-                               + (big_pi.pi_fast(xpq3) as i64 - info.b as i64 + 2);
+            // Combined iterator: wide b-values + narrow b-values for this segment
+            let n_narrow = narrow_for_seg.len();
+            let n_total = wide_indices.len() + n_narrow;
+            if n_total == 0 { continue; }
+
+            let seg_sum: i64 = (0..n_total).into_par_iter().map(|idx| {
+                let bi = if idx < wide_indices.len() {
+                    unsafe { *wide_indices.get_unchecked(idx) }
+                } else {
+                    narrow_for_seg[idx - wide_indices.len()].0
+                };
+                let info = &b_lookups[bi as usize];
+                let is_narrow = idx >= wide_indices.len();
+
+                // Narrow b-values: all l-values are in this segment, skip divisions
+                let (eff_lo, eff_hi) = if is_narrow {
+                    (info.l_cur, std::cmp::min(info.l_max, primes_len - 1))
+                } else {
+                    let l_lo = if seg == num_segs - 1 {
+                        info.l_cur
                     } else {
-                        let p0 = big_pi.pi_fast(xpq0) as i64;
-                        let p1 = big_pi.pi_fast(xpq1) as i64;
-                        let p2 = big_pi.pi_fast(xpq2) as i64;
-                        let p3 = big_pi.pi_fast(xpq3) as i64;
-                        if l + 3 <= info.y_boundary_l {
-                            local += p0 + p1 + p2 + p3;
-                        } else if l > info.y_boundary_l {
-                            local += 2 * (p0 + p1 + p2 + p3);
-                        } else {
-                            for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
-                                local += if ll <= info.y_boundary_l { pv } else { 2 * pv };
-                            }
-                        }
-                    }
-                }
-                l += 4;
-            }
+                        let thresh = std::cmp::min(
+                            (info.xp / (n_hi as u64 + 1)) as usize, pi_limit);
+                        let l_candidate = pi[thresh] as usize + 1;
+                        std::cmp::max(l_candidate, info.l_cur)
+                    };
 
-            while l <= eff_hi {
-                let xpq = unsafe { fast_div(info.xp, *primes.get_unchecked(l) as u64, *recip.get_unchecked(l)) } as usize;
-                let pi_val = unsafe { big_pi.pi_fast(xpq) } as i64;
-                if info.is_c2 {
-                    local += pi_val - info.b as i64 + 2;
-                } else if l <= info.y_boundary_l {
-                    local += pi_val;
-                } else {
-                    local += 2 * pi_val;
-                }
-                l += 1;
-            }
+                    let l_hi = if n_lo <= 1 {
+                        info.l_max
+                    } else {
+                        let thresh_raw = info.xp / n_lo as u64;
+                        if thresh_raw == 0 { return 0; }
+                        let thresh = std::cmp::min(thresh_raw as usize, pi_limit);
+                        let l_candidate = pi[thresh] as usize;
+                        std::cmp::min(l_candidate, info.l_max)
+                    };
 
-            local
-        }).sum();
-
-        // Process wide b_lookups with segmented approach
-        // All threads process the same segment simultaneously for cache locality.
-        let mut wide_sum: i64 = 0;
-        if !wide_indices.is_empty() {
-            for seg in (0..num_segs).rev() {
-                let n_lo = if seg == 0 { 0usize } else { seg * numbers_per_seg };
-                let n_hi = std::cmp::min((seg + 1) * numbers_per_seg - 1, sqrt_x);
-
-                let seg_sum: i64 = wide_indices.par_iter().map(|&bi| {
-                    let info = &b_lookups[bi as usize];
-
-                let l_lo = if seg == num_segs - 1 {
-                    info.l_cur
-                } else {
-                    let thresh = std::cmp::min(
-                        (info.xp / (n_hi as u64 + 1)) as usize, pi_limit);
-                    let l_candidate = pi[thresh] as usize + 1;
-                    std::cmp::max(l_candidate, info.l_cur)
+                    (std::cmp::max(l_lo, info.l_cur),
+                     std::cmp::min(l_hi, std::cmp::min(info.l_max, primes_len - 1)))
                 };
-
-                let l_hi = if n_lo <= 1 {
-                    info.l_max
-                } else {
-                    let thresh_raw = info.xp / n_lo as u64;
-                    if thresh_raw == 0 { return 0; }
-                    let thresh = std::cmp::min(thresh_raw as usize, pi_limit);
-                    let l_candidate = pi[thresh] as usize;
-                    std::cmp::min(l_candidate, info.l_max)
-                };
-
-                let eff_lo = std::cmp::max(l_lo, info.l_cur);
-                let eff_hi = std::cmp::min(l_hi, std::cmp::min(info.l_max, primes_len - 1));
                 if eff_lo > eff_hi || eff_lo >= primes_len { return 0; }
 
                 let mut local = 0i64;
@@ -965,11 +935,16 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 local
                 }).sum();
 
-                wide_sum += seg_sum;
-            }
+                combined_sum += seg_sum;
+        }
+        let ac_elapsed = t_ac_loops.elapsed().as_secs_f64();
+
+        if std::env::var("SHOW_TIMING").is_ok() {
+            eprintln!("    AC loops: {:.3}s ({} wide + {} narrow b-values, {} segs)",
+                ac_elapsed, wide_indices.len(), narrow_seg_assign.len(), num_segs);
         }
 
-        narrow_sum + wide_sum
+        combined_sum
     };
 
     c2_a_sum
@@ -1948,6 +1923,7 @@ fn count_primes(x: u64) -> u64 {
         });
         (ac, d, b_val)
     } else {
+        // All b-values now processed through unified segmented approach
         std::thread::scope(|s| {
             let b_handle = s.spawn(|| {
                 let t = Instant::now();
