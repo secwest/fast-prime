@@ -1964,6 +1964,18 @@ fn count_primes(x: u64) -> u64 {
 }
 
 fn main() {
+    // Set high process priority for consistent performance
+    #[cfg(target_os = "windows")]
+    unsafe {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+            fn SetPriorityClass(hProcess: *mut std::ffi::c_void, dwPriorityClass: u32) -> i32;
+        }
+        const HIGH_PRIORITY_CLASS: u32 = 0x00000080;
+        SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    }
+
     // Oversubscribe rayon thread pool for better work-stealing across B/AC/D
     let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(24);
     let pool_mult: usize = std::env::var("POOL_MULT").ok()
