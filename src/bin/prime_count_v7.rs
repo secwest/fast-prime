@@ -262,7 +262,7 @@ fn get_alpha_gourdon(x: u64) -> (f64, f64) {
         (36.8,  7.0, 1.5),   // x ~ 1e16
         (39.1,  8.0, 1.5),   // x ~ 1e17
         (41.4, 12.0, 1.5),   // x ~ 1e18
-        (43.6, 15.0, 1.2),   // x ~ Max i64
+        (43.6, 18.5, 1.3),   // x ~ Max i64
     ];
 
     let (alpha_y, alpha_z) = if logx <= TABLE[0].0 {
@@ -1912,9 +1912,27 @@ fn count_primes(x: u64) -> u64 {
                 (ac, d, b_val)
             })
         }
+    } else if std::env::var("PHASE_B_ACD").is_ok() {
+        // Phase 1: B alone (fast ~2.8s, full L3 and all cores)
+        let t = Instant::now();
+        let b_val = b_pool.install(|| compute_b(x, y, pi_y, &big_pi));
+        if show_timing { eprintln!("  B: {:.2}s", t.elapsed().as_secs_f64()); }
+        // Phase 2: AC + D concurrent (no B competing for cores/memory)
+        let (ac, d) = std::thread::scope(|s| {
+            let ac_handle = s.spawn(|| {
+                let t = Instant::now();
+                let r = compute_ac(x, y, z, k, x_star, &primes, &pi, &big_pi, &recip);
+                if show_timing { eprintln!("  AC: {:.2}s", t.elapsed().as_secs_f64()); }
+                r
+            });
+            let t = Instant::now();
+            let d = compute_d(x, y, z, k, x_star, &primes, &pi, &valid_m_list, &vm_index, &recip);
+            if show_timing { eprintln!("  D: {:.2}s", t.elapsed().as_secs_f64()); }
+            let ac = ac_handle.join().unwrap();
+            (ac, d)
+        });
+        (ac, d, b_val)
     } else {
-        // Default: AC+D on global pool, B on dedicated pool
-        // D_DELAY: milliseconds to delay D start, giving AC clean cache time
         let d_delay: u64 = std::env::var("D_DELAY").ok()
             .and_then(|s| s.parse().ok()).unwrap_or(0);
         std::thread::scope(|s| {
