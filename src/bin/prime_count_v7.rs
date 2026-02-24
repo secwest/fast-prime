@@ -1385,7 +1385,9 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     // The key insight: for each segment at position `low`, Type 1 work depends on
     // how many ValidM entries fall in the m-range for each b value.
     // We estimate by sampling a few representative b values.
-    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * 256);
+    let d_chunk_mult: usize = std::env::var("D_CHUNKS").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(128);
+    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * d_chunk_mult);
     let work_per_seg: Vec<usize> = (0..num_segments).map(|seg_idx| {
         let low = std::cmp::max(seg_idx * segment_size, 1) as u64;
         let high = std::cmp::min(low + segment_size as u64, xz as u64 + 1);
