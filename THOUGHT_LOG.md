@@ -3407,10 +3407,13 @@ conditions. V8 wins **9 out of 10 runs**:
 - Both tools show identical thermal ramp behavior (~0.2s degradation over 10 runs)
 - V8 is genuinely faster at Max i64 under equal conditions
 
-### What Would Beat 8.49s?
+### V8 Session 4 Conclusions
+V8 has **beaten primecount** at Max i64 in head-to-head testing. The remaining
+avenues for further improvement are architectural rewrites, not micro-optimizations:
 1. **SegmentedPiTable** (~1000-line rewrite): L1-resident π table = 4 cycles
    per lookup vs current L2/L3 = 12-40 cycles. Potential ~0.5-1.0s improvement.
-2. **Better parallelization**: Segment-first instead of b-first would eliminate
-   the 4× concurrent penalty by keeping each thread's data in its own L2 cache.
-3. **Custom thread scheduling**: Replace rayon with hand-tuned thread pool that
-   pins AC threads to P-cores and D threads to E-cores.
+2. **Segment-first AC**: Threads own segment ranges instead of parallel over
+   b-values, eliminating the 4× concurrent penalty from L3/DRAM bandwidth sharing.
+3. **P/E core pinning**: Replace rayon with hand-tuned thread pool that pins
+   latency-sensitive AC threads to P-cores and throughput-oriented D threads to
+   E-cores.
