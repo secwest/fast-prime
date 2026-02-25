@@ -6,7 +6,13 @@
 
 ## Abstract
 
-We present a systematic study of performance optimization for combinatorial prime counting at extreme scale, culminating in a Rust implementation of Gourdon's algorithm that computes π(2⁶³ − 1) = 216,289,611,853,439,384 in **8.39 seconds** on an Intel Core Ultra 9 285K processor — beating the state-of-the-art C++ implementation *primecount* v8.2 (8.49s cold best, 8.70s sustained median) by Kim Walisch. Over the course of **107 controlled experiments** spanning 8 sessions, we explored every major axis of the optimization space: data structure layout, cache hierarchy exploitation, thread scheduling, compiler tuning, profile-guided optimization, memory access patterns, and algorithmic reformulations. We document which optimizations succeeded (+1.3% from `build-std`), which failed (80% regression from serialized memory access), and, critically, *why* — providing a detailed micro-architectural model that explains the performance ceiling. Our central finding is that the hot inner loop is **memory-bandwidth-bound with high memory-level parallelism (MLP)**: the 4× unrolled loop generates 8 independent L2 miss requests that saturate the processor's miss-handling capacity. Any optimization that disrupts this MLP equilibrium — whether by serializing access patterns, increasing table sizes, adding prefetch instructions, or changing unroll factors — degrades performance. We show that for the b-first BigPiTable architecture on modern hybrid-core processors, the code is provably at a local performance optimum, and identify the architectural rewrite required to break through to the next performance tier.
+How fast can you count the primes below 2⁶³? Kim Walisch's *primecount* — the state-of-the-art C++ implementation, refined over a decade — does it in 8.49 seconds. We beat that.
+
+Our Rust implementation of Gourdon's algorithm computes π(2⁶³ − 1) = 216,289,611,853,439,384 in **8.39 seconds** on an Intel Core Ultra 9 285K. But the journey matters more than the destination: over **107 controlled experiments**, we systematically explored every optimization axis — and discovered that **106 of them failed**. The only improvement came from recompiling the Rust standard library (+1.3%). Every other change — software prefetch, profile-guided optimization, cache tiling, loop restructuring, data structure compaction, thread pool isolation — made things worse, often dramatically.
+
+Why? The hot inner loop sits at the intersection of four hardware constraints that form a **stable equilibrium**: L2 miss-handling capacity (saturated by 4× unrolling), x86-64's 16-register file (nearly full), DRAM bandwidth (89.6 GB/s shared across 24 cores), and L3 cache pressure (285 MB table vs 36 MB cache). Any optimization that improves one constraint necessarily degrades another.
+
+Along the way, we discovered that improving cache hit rate can *slow things down* by 80%, that making one component faster can paradoxically slow the *total* computation, and that every textbook HPC optimization technique fails near the hardware floor. These findings — detailed across 22 lessons in §7 — apply broadly to any memory-bound computation on modern out-of-order processors.
 
 ---
 
@@ -24,7 +30,9 @@ achieves O(x^{2/3} / ln² x) time and O(x^{1/3} ln³ x) space, and forms the bas
 
 ### 1.2 Motivation and Contributions
 
-This work began as an exercise in implementing Gourdon's algorithm in Rust, but evolved into a systematic study of what determines performance at the extreme scale of π(2⁶³ − 1) ≈ 2.16 × 10¹⁷ on modern hybrid-core processors. Our contributions are:
+This work began as an exercise in implementing Gourdon's algorithm in Rust, but evolved into something unexpected: a systematic study of *what happens when you try to optimize code that is already near the hardware floor*. Over eight implementation versions and 107 controlled experiments, we pushed performance from 939 seconds to 8.39 seconds — a 112× improvement — and then hit a wall where nothing we tried could make it faster. The story of that wall, and the hardware constraints that create it, is the core contribution of this paper.
+
+Specifically, our contributions are:
 
 1. **A competitive Rust implementation** that matches or beats primecount at all scales from 10¹⁰ to 2⁶³ − 1, demonstrating that Rust's zero-cost abstractions and LLVM backend can achieve C++-competitive performance for memory-bound numerical workloads.
 
@@ -50,6 +58,18 @@ All experiments were conducted on:
 | Hyperthreading | None (24 total hardware threads) |
 | OS | Windows 11 |
 | Compiler | Rust 1.95.0-nightly, LLVM 19 |
+
+### 1.4 Paper Organization and Key Surprises
+
+**§2** describes the algorithm and implementation, including the two key data structures (BigPiTable for O(1) π lookups, Barrett reduction for fast division) and our experimental methodology. **§3** catalogs all 107 experiments across six optimization axes. **§4** presents the MLP constraint model that explains why the code can't be improved. **§5** gives performance results with statistical analysis. **§6** traces the implementation's evolution through 8 major versions. **§7** draws 22 lessons from the experiments — the heart of the paper. **§8–9** cover related work and conclusions.
+
+For the reader short on time, the most surprising and broadly applicable findings are:
+
+- **Improving cache hit rate made things 80% slower** (§7.1) — converting L3 misses to L1 hits destroyed memory-level parallelism, proving the loop is bandwidth-bound, not latency-bound.
+- **Making one component faster slowed the whole system** (§7.4) — accelerating AC deprived B of a cache-warming side effect, a violation of the independence assumption in Amdahl's Law.
+- **Every textbook optimization failed** (§7.9) — prefetch, PGO, cache tiling, loop transforms, data compaction: all tested, all regressed.
+- **DRAM can beat L1** (§7.14) — a 285 MB table with high MLP outperforms 23,000 rebuilds of a 3.7 KB L1-resident table, yielding a 39.5× speedup.
+- **Optimizations destroy each other** (§7.10) — near the hardware floor, improving one dimension always degrades another.
 
 ---
 
@@ -163,6 +183,8 @@ The implementation was validated at multiple levels:
 
 ## 3. Optimization Taxonomy
 
+The 107 experiments tell a story of exhaustive search: we tried everything reasonable, and almost nothing worked. This section presents the experiments organized by optimization axis, with each subsection explaining not just the result but the *mechanism* of failure — because the failures reveal the hardware constraints that define the performance ceiling.
+
 ### 3.1 Summary of All 107 Experiments
 
 We categorize the 107 experiments across 8 sessions into six axes:
@@ -238,6 +260,8 @@ The crossover (AC ≈ B) occurs at B ≈ 22, but max(8.46, 8.47) = 8.72 > max(8.
 
 ## 4. The MLP Constraint Model
 
+The pattern across 107 experiments is clear: every optimization attempt either did nothing or made things worse. This section explains *why* by identifying the four coupled hardware constraints that create an inescapable equilibrium.
+
 ### 4.1 Memory-Level Parallelism Analysis
 
 The AC inner loop's performance is governed by three coupled hardware constraints:
@@ -274,6 +298,8 @@ This means no scheduling rearrangement can improve total time: accelerating AC b
 ---
 
 ## 5. Results
+
+Despite the constraint model predicting that no local optimization can improve performance, V8 achieves a measurable advantage over primecount through its different architectural tradeoff: trading expensive π lookups for cheap Barrett divisions.
 
 ### 5.1 Final Performance
 
@@ -345,6 +371,8 @@ This suggests an unusual regime where the critical path's solo performance is ex
 
 ## 6. Implementation Progression
 
+Before diving into the lessons, it is useful to understand how the implementation arrived at its current architecture. The journey from naive sieve to competitive Gourdon implementation spans eight major versions, with the critical architectural decision — the BigPiTable — occurring at V7.
+
 The implementation evolved through eight major versions:
 
 | Version | Algorithm | Time at Max i64 | Speedup |
@@ -364,6 +392,10 @@ The V6→V7 transition (39.5× speedup) demonstrates the impact of the BigPiTabl
 
 ## 7. Lessons and Discussion
 
+This section distills 22 lessons from the 107 experiments, organized into five themes: the nature of the hardware bottleneck (§7.1–7.3), why standard optimizations fail (§7.4–7.9), how the system's components interact (§7.10–7.12), architectural insights (§7.13–7.17), and practical engineering findings (§7.18–7.22). Each lesson is backed by specific experiments; together they paint a picture of what it looks like to reach the hardware floor.
+
+#### Theme 1: The Hardware Bottleneck
+
 ### 7.1 Memory-Level Parallelism is the Critical Resource
 
 The most important lesson from 107 experiments is that for large-scale combinatorial computations on modern out-of-order processors, **memory-level parallelism is more important than cache hit rate**. The monotonic sweep experiment (Opt 106) converted 89% of L3/DRAM misses to L1d hits, yet performed 80% slower because serializing iterations reduced MLP from 8 to 1–2 outstanding requests.
@@ -377,6 +409,8 @@ Five separate prefetch experiments (Opt 59, 70, 94, 105) tested distances from 4
 ### 7.3 PGO is Counterproductive for Branchless MLP-Bound Code
 
 Profile-guided optimization was tested three independent times across different sessions (Opt 62, 77, 96), all showing no improvement or slight regression. This contradicts the conventional wisdom that PGO provides "free performance." The explanation is that PGO's primary benefit — improving branch prediction via layout optimization — is irrelevant when branches are already >99% predictable (the `is_c2` flag is loop-invariant; `y_boundary_l` mispredicts only once per b-value). PGO's secondary effect — aggressive function inlining guided by profile hotness — actually increases L1 instruction cache pressure in the already-tight inner loop. For code where the bottleneck is memory bandwidth and MLP rather than branch misprediction, PGO may be counterproductive.
+
+#### Theme 2: Why Standard Optimizations Fail
 
 ### 7.4 Shared-Cache Components Cannot Be Analyzed in Isolation
 
@@ -440,6 +474,8 @@ The only successful optimization was recompiling the Rust standard library (`-Zb
 
 This does not mean these techniques are generally useless — they are well-proven for other workloads. Rather, it demonstrates that **near a hardware-constrained optimum, the standard optimization playbook is exhausted**. The code is already operating at the intersection of multiple hardware limits (MLP, register file, DRAM bandwidth, L3 capacity), and any change that improves one dimension necessarily degrades another. This is a cautionary tale: practitioners applying textbook techniques to already-optimized code should expect diminishing (or negative) returns.
 
+#### Theme 3: How Optimizations Interact
+
 ### 7.10 Optimizations Destroy Each Other Near the Ceiling
 
 A recurring meta-pattern across the experiments is that **optimizations interact destructively**: adding one optimization destroys the conditions that make another effective.
@@ -477,6 +513,8 @@ Wheel-30 and mod-240 encodings were tested independently in two different compon
 - **V8 wheel-30 BigPiTable** (Opt 56): Index computation requires division by 240 + table lookup for residue class (~4 extra cycles), versus the odd-only encoding's single right-shift (`n >> 7`). At 31.2 billion AC lookups, 4 extra cycles × 31.2B = ~22 seconds of overhead.
 
 The underlying principle: modern CPU memory systems are optimized for power-of-2 addressing. Shift-based indexing (n >> k) compiles to a single instruction with zero latency; division by non-powers-of-2 requires multiply-shift sequences. Hardware prefetchers track linear strides but not modular patterns. **The 47% memory savings from wheel encoding is never worth the indexing overhead** for random-access workloads on current hardware.
+
+#### Theme 4: Architectural Insights
 
 ### 7.13 Barrett Reduction as the Architecture Enabler
 
@@ -553,6 +591,8 @@ The Gourdon formula has two tuning parameters (α_y, α_z) that control the work
 V4's adaptive alpha formula provided a **64% improvement at 10¹⁵** compared to the fixed α = 2.2 optimal at 10¹². This is the largest single optimization gain from parameter tuning in the entire project.
 
 The lesson: combinatorial algorithms with tunable parameters should not use fixed constants. The optimal work distribution depends on the hardware's relative costs for different operations (sieve rebuild, random lookup, division), which shift as the problem scale changes the data structure sizes relative to cache sizes.
+
+#### Theme 5: Practical Engineering
 
 ### 7.18 Work-Stealing Is Not Just "Better" — It Is Essential
 
@@ -667,6 +707,14 @@ Beyond the specific result, this study yields generalizable findings across four
 15. **Architectural convergence** — radically different implementations converge to within 1.2%, suggesting a fundamental throughput floor (§7.5).
 
 The MLP constraint model (§4) provides a portable analytical framework: on any architecture, the performance ceiling is determined by the minimum of per-core MLP capacity, system DRAM bandwidth, and register file depth. This framework applies beyond prime counting to hash tables, database joins, graph traversals, and any random-access workload at scale where the working set exceeds the last-level cache.
+
+### If You Remember Nothing Else
+
+> **For practitioners**: Near a hardware-constrained optimum, standard optimization techniques (prefetch, PGO, cache tiling, loop transforms) don't just fail — they make things worse. Profile first; if the bottleneck is memory bandwidth with high MLP, stop optimizing and consider an architectural change.
+>
+> **For systems researchers**: Memory-level parallelism is the critical resource for random-access workloads on modern out-of-order CPUs. Optimizing for cache hit rate at the expense of MLP is a trap — an 80% regression from "better" locality is not a theoretical concern but an empirical result.
+>
+> **For language designers**: Rust's performance matches C++ for memory-bound HPC, with `build-std` providing a unique advantage. The safety/performance tradeoff is not a tradeoff — `unsafe` blocks in hot paths with safe wrappers elsewhere gives both.
 
 ---
 
