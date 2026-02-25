@@ -440,7 +440,153 @@ The only successful optimization was recompiling the Rust standard library (`-Zb
 
 This does not mean these techniques are generally useless — they are well-proven for other workloads. Rather, it demonstrates that **near a hardware-constrained optimum, the standard optimization playbook is exhausted**. The code is already operating at the intersection of multiple hardware limits (MLP, register file, DRAM bandwidth, L3 capacity), and any change that improves one dimension necessarily degrades another. This is a cautionary tale: practitioners applying textbook techniques to already-optimized code should expect diminishing (or negative) returns.
 
-### 7.10 Rust vs C++ for HPC
+### 7.10 Optimizations Destroy Each Other Near the Ceiling
+
+A recurring meta-pattern across the experiments is that **optimizations interact destructively**: adding one optimization destroys the conditions that make another effective.
+
+- **PGO destroys hand-tuned code layout** (Opt 62, 77, 96): The inner loop was manually structured for minimal I-cache footprint with LLVM's `unroll-threshold=800`. PGO's profile-guided inlining and code reordering disrupted this structure, increasing code size and I-cache misses.
+
+- **Prefetch destroys MLP** (Opt 59, 70, 94, 105): Software prefetch instructions consume L2 miss-tracking entries that the 4× unrolled loop's demand loads need. Adding prefetch reduces the number of entries available for the loads that actually produce values.
+
+- **Interleaving destroys spatial locality** (Opt 55, 64, 83, 104): Merging `bits[]` and `prefix[]` arrays halves the number of cache misses per lookup, but doubles the bytes-per-entry, halving the number of bits-words per cache line. Within each b-value's iteration, consecutive xpq values often access nearby bits words, and the dense packing of the separate array provides better sequential prefetch behavior.
+
+- **Branchless restructuring destroys I-cache locality** (Opt 82): Splitting the unified inner loop into six specialized loops (to eliminate branches) increased the code footprint by ~6×, causing I-cache pressure that overwhelmed the branch elimination savings. The original branches were >99% predictable anyway.
+
+- **Thread isolation destroys work-stealing** (Opt 61, 84, 85, 97): Every attempt to give components dedicated thread pools caused catastrophic regression (30–75%). The shared rayon pool's ability to dynamically reassign threads as D's heavy tasks complete is essential — idle D threads automatically help AC via work-stealing.
+
+This "optimization interference" phenomenon is well-known in compiler optimization (phase-ordering problem), but our experiments demonstrate it at the systems level across hardware resources (cache, registers, miss-tracking entries, threads). Near a hardware-constrained optimum, the optimization space is so tightly packed that any beneficial change in one dimension inevitably degrades another.
+
+### 7.11 Branchless Throughput Beats Branchy Optimization
+
+Across multiple versions and experiments, a consistent finding emerges: **branchless pipeline throughput defeats branch-based optimizations**, even when the branch-based approach does less total work.
+
+- **V3 Phase B transition scanning** (Thought Log): Scanning for value transitions in `small[]` to skip redundant u128 multiplies saved ~27 ms of multiply work but added ~38 ms of branch misprediction overhead. The 23% transition rate made every 4th branch unpredictable, costing 14 cycles each. The original 4× unrolled branchless multiply loop (3.5 cycles/op) was faster despite doing 4× more multiplies.
+
+- **V4 sparse prefix with conditional POPCNT** (Opt 65): Coarse prefix with up to 7 conditional POPCNTs per lookup. The `if block_offset > N` branches generate unpredictable patterns (average 3.5 taken out of 7), costing ~10.5 cycles of misprediction per lookup.
+
+- **V8 branchless loop restructure** (Opt 82): Splitting one loop with two well-predicted branches into six branchless loops increased code size 6× without measurable branch savings.
+
+The lesson: on modern out-of-order processors, a single branch misprediction (~14 cycles) costs as much as 4–7 branchless arithmetic operations. Unless a branch is >99% predictable or eliminates >14 cycles of work per prediction, the branchless path wins.
+
+### 7.12 Compact Encodings with Non-Power-of-2 Strides Are Anti-Patterns
+
+Wheel-30 and mod-240 encodings were tested independently in two different components (V4's S2 sieve and V8's BigPiTable), and both regressed:
+
+- **V4 wheel-30 S2 sieve**: Variable stride (`k += steps[ci]`, cycling through 8 coprime residues) defeated the hardware prefetcher, which tracks constant-stride access patterns. The odd-only sieve's constant stride (`k += p`) allows perfect prefetch prediction. Result: 3–21% regression across scales.
+
+- **V8 wheel-30 BigPiTable** (Opt 56): Index computation requires division by 240 + table lookup for residue class (~4 extra cycles), versus the odd-only encoding's single right-shift (`n >> 7`). At 31.2 billion AC lookups, 4 extra cycles × 31.2B = ~22 seconds of overhead.
+
+The underlying principle: modern CPU memory systems are optimized for power-of-2 addressing. Shift-based indexing (n >> k) compiles to a single instruction with zero latency; division by non-powers-of-2 requires multiply-shift sequences. Hardware prefetchers track linear strides but not modular patterns. **The 47% memory savings from wheel encoding is never worth the indexing overhead** for random-access workloads on current hardware.
+
+### 7.13 Barrett Reduction as the Architecture Enabler
+
+The BigPiTable architecture's viability depends critically on Barrett reduction (`fast_div`). Without it, the V8 approach would be fundamentally uncompetitive:
+
+- Each AC iteration computes `xpq = x/(p_b × p_l)`, requiring a 64-bit division
+- Hardware `DIV` on Arrow Lake: ~18 ns (23 cycles at 5.7 GHz, throughput-limited)
+- Barrett `fast_div`: ~3 ns (multiply-high + conditional add, fully pipelined)
+- With ~31.2 billion AC lookups, the division savings alone are: 31.2B × 15 ns = **468 seconds**
+
+This 468-second savings dwarfs the BigPiTable's additional latency cost. At ~50 ns average latency penalty vs primecount's L1-resident SegPiTable (over 31.2B lookups = 1,560 seconds penalty), Barrett reduction recovers 30% of that gap. Combined with the elimination of per-segment sieve reconstruction overhead (the other 70%), the two effects together make BigPiTable competitive.
+
+The `fast_div` implementation is exact (not approximate) thanks to a correction step:
+```rust
+q + (n - q.wrapping_mul(d) >= d) as u64  // branchless correction
+```
+This correction adds only ~1 cycle (compare + conditional add) but guarantees `fast_div(n, d, recip) == n / d` for all inputs — critical for algorithmic correctness.
+
+### 7.14 The 39.5× BigPiTable Transition: Why DRAM Can Beat L1
+
+The V6→V7 transition produced the single largest speedup in the project: **39.5×** (342s → 8.65s). This is counterintuitive — replacing an L1-resident table (~4 ns/lookup) with a 285 MB DRAM-resident table (~50 ns/lookup) should be slower, not faster.
+
+The resolution lies in **amortized per-segment overhead**. V6's segmented approach:
+1. For each of ~23,000 segments: rebuild a 3.7 KB SegmentedPiTable (cost: ~50 μs per thread)
+2. Process applicable b-values within the segment (fast L1 lookups)
+3. Total sieve rebuild cost: 23K segments × 50 μs × 24 threads = **27.6 seconds**
+
+V7's BigPiTable approach:
+1. Build the 285 MB table once at startup (0.14 seconds)
+2. Process all b-values with random L3/DRAM lookups (no per-segment overhead)
+3. Total lookup penalty vs L1: 31.2B × 50 ns = **~1,560 seconds** (but amortized by MLP and parallelism)
+
+With 4× unrolling providing 8 outstanding misses, the effective per-lookup cost drops from 50 ns to ~12 ns (4× MLP). Across 24 cores: 31.2B × 12 ns / 24 = **15.6 seconds** — plus Barrett saves 468s from V6's hardware divisions. Net: V7 is massively faster because **the one-time table build + MLP-amortized random access is cheaper than 23,000 per-segment sieve rebuilds**.
+
+This insight — that high-MLP random access to a large table can beat sequential access to many small rebuilt tables — is the fundamental architectural contribution of this work.
+
+### 7.15 SIMD and Vectorization Are Not Viable for Random-Access Lookups
+
+Early investigation (V3) evaluated AVX-512 and AVX2 for the inner loops:
+
+- **AVX-512 gather** (VPGATHERQQ): loads 4 scattered 64-bit values in ~20 cycles. Scalar loads of the same 4 values take ~4 cycles total (1 cycle each when L1-resident, pipelined). Gather is **5× slower** than scalar because it serializes the address generation and TLB lookups.
+
+- **AVX2 Karatsuba u128 multiply**: ~3 cycles per multiply via `vpmuludq` decomposition. Scalar `mulx` (BMI2): 1 cycle throughput. SIMD is **3× slower** for single multiplies.
+
+- **AVXIFMA** (52-bit fused multiply-add): Available on Arrow Lake, but the gather bottleneck for loading operands from random BigPiTable positions negates any ALU savings.
+
+The fundamental issue: SIMD excels at **uniform operations on contiguous data**. The AC inner loop accesses random, non-contiguous BigPiTable positions determined by `fast_div` results. No SIMD gather instruction on current x86 hardware can compete with scalar loads for random-access patterns, because gather must sequentially resolve TLB entries for each lane.
+
+### 7.16 Correctness Bugs as Research Artifacts
+
+Several optimization experiments uncovered subtle algorithmic bugs whose diagnosis provided insights beyond their immediate fix:
+
+1. **`primes[]` is 1-indexed** (discovered during Opt 95, clustered leaves): The primes array has a sentinel `primes[0] = 0`, with `primes[k]` = k-th prime for k ≥ 1. Code using `primes[pi_val - 1]` (0-indexed assumption) silently produced wrong results at small scales and catastrophically wrong results at large scales. This convention, inherited from the sieve construction, affects every algorithm that converts between π-values and prime values.
+
+2. **`small[q] ≠ π(q)` during sieve** (discovered in V3 Phase B): During the sieve of Eratosthenes, the intermediate array `small[q]` counts integers ≤ q not divisible by primes sieved so far — NOT π(q). "Surviving composites" (like 25 = 5² surviving the sieve of {2,3}) cause `small[q]` to change at composite positions. This invalidated a prime-batching optimization that assumed constant-between-primes behavior.
+
+3. **Shift-by-64 wraps to shift-by-0** (discovered in V4 `count_delta`): In Rust release mode, `word >> 64` wraps to `word >> 0` (returning the original value), not 0. This caused silent miscounts in sieve position calculations when the bit offset was exactly 63. The fix required explicit mask checks.
+
+4. **Monotonic sweep off-by-one** (discovered in Opt 106): The scan range for counting primes in (xpq, prev_xpq] required start index `(xpq+1)/2`, not `xpq/2 + 1`. For even xpq, the latter overcounts by 1, undercounting primes subtracted from `running_pi`. This was the final bug in a chain of three that prevented correctness verification.
+
+These bugs share a common pattern: **indexing conventions and boundary conditions in number-theoretic code are extremely error-prone**. The 1-indexed primes array, the half-open vs closed interval distinctions, and the integer division rounding behavior all interact to create subtle off-by-one errors that produce correct results at small scales but diverge at large scales. Extensive cross-validation at multiple scales (10¹⁰ through 2⁶³−1) was essential for catching these issues.
+
+### 7.17 Adaptive Parameters Are Scale-Dependent
+
+The Gourdon formula has two tuning parameters (α_y, α_z) that control the work distribution among components. A finding consistent across all versions is that **optimal parameters change dramatically with input scale**:
+
+| Scale | Optimal α_y | Optimal α_z | Rationale |
+|-------|------------|------------|-----------|
+| 10¹² | 2.2 | 1.6 | Small y → fast sieve, many segments for parallelism |
+| 10¹⁵ | 6.0 | 2.0 | Larger y amortizes per-prime overhead in S2 |
+| 10¹⁸ | 13.0 | 1.75 | Very large y reduces AC iterations |
+| 2⁶³−1 | 18.5 | 1.3 | Maximum y to minimize AC (the bottleneck) |
+
+V4's adaptive alpha formula provided a **64% improvement at 10¹⁵** compared to the fixed α = 2.2 optimal at 10¹². This is the largest single optimization gain from parameter tuning in the entire project.
+
+The lesson: combinatorial algorithms with tunable parameters should not use fixed constants. The optimal work distribution depends on the hardware's relative costs for different operations (sieve rebuild, random lookup, division), which shift as the problem scale changes the data structure sizes relative to cache sizes.
+
+### 7.18 Work-Stealing Is Not Just "Better" — It Is Essential
+
+Every experiment that isolated thread pools caused catastrophic regression:
+
+| Experiment | Configuration | Regression |
+|-----------|--------------|------------|
+| Opt 61 | Dedicated AC pool (24 threads) | −65% |
+| Opt 84 | Dedicated D pool (16 threads) | −30% |
+| Opt 85 | AC limited to 16 threads | −72% |
+| Opt 97 | Separate AC + D pools | −75% |
+| Opt 90 | P-core affinity for AC (8 threads) | −120% |
+
+The shared rayon pool with work-stealing is not merely a convenience — it is architecturally essential because the workload has **phase-dependent resource needs**:
+
+1. D's heavy tasks create large rayon work items that may block for milliseconds
+2. When D tasks complete, the freed threads immediately help AC via work-stealing
+3. B runs in a separate pool but benefits from reduced CPU contention as D winds down
+4. The optimal thread-to-component ratio changes continuously during execution
+
+Static thread allocation cannot adapt to this dynamic load. Work-stealing provides automatic, microsecond-granularity load balancing that no manual scheduling can match. This finding generalizes: for concurrent workloads with unequal task granularity and phase-dependent resource needs, **work-stealing thread pools are not an optimization — they are a correctness requirement** for achieving acceptable performance.
+
+### 7.19 The Allocator Matters: mimalloc Under Contention
+
+V4 profiling revealed that memory allocation was consuming 47% of execution time under multi-threaded contention:
+
+- **Windows default heap**: 129 ms allocation overhead across 768 chunks (each allocating ~74 KB)
+- **mimalloc**: 15 ms for the same workload — **8.6× faster**
+
+The root cause: Windows' default allocator uses a global lock for heap operations, serializing allocations across 24 threads. mimalloc uses per-thread heaps with thread-local free lists, eliminating contention entirely.
+
+This finding applies beyond prime counting: **any multi-threaded workload with per-task allocations should use a scalable allocator** (mimalloc, jemalloc, tcmalloc). The default system allocator is often the hidden bottleneck in otherwise well-optimized parallel code.
+
+### 7.20 Rust vs C++ for HPC
 
 Our Rust implementation matches or beats a heavily optimized C++ implementation (primecount) with over a decade of development. Key Rust advantages:
 - **Zero-cost abstractions**: Rayon's `par_iter` with work-stealing achieves optimal thread utilization with minimal code complexity.
@@ -448,7 +594,7 @@ Our Rust implementation matches or beats a heavily optimized C++ implementation 
 - **`build-std`**: Recompiling the standard library with `target-cpu=native` provides a 1.3% improvement unavailable in pre-compiled C++ standard libraries.
 - **Safety with escape hatches**: `unsafe` blocks for `get_unchecked` and raw pointer arithmetic in the hot loop, with safe wrappers elsewhere.
 
-### 7.11 The Architecture Ceiling and Future Hardware
+### 7.21 The Architecture Ceiling and Future Hardware
 
 The b-first BigPiTable architecture has a provable performance ceiling on this hardware. Breaking through requires:
 
@@ -469,7 +615,7 @@ The b-first BigPiTable architecture has a provable performance ceiling on this h
 
 The MLP constraint model (§4) is portable: on any architecture, the performance ceiling is determined by min(per-core MLP × cores, DRAM bandwidth / bytes-per-lookup, register file / registers-per-iteration). The specific values change, but the analytical framework applies.
 
-### 7.12 Limitations
+### 7.22 Limitations
 
 Our comparison with primecount uses wall-clock time under controlled conditions but does not account for potential platform-specific advantages (primecount may perform differently on AMD processors or Linux systems). The thermal variance between cold-CPU best (8.39s) and sustained median (8.57s) reflects the reality of modern boost clocks and should be reported alongside best times in benchmarks.
 
@@ -495,18 +641,32 @@ Our comparison with primecount uses wall-clock time under controlled conditions 
 
 We have presented a Rust implementation of Gourdon's prime counting algorithm that achieves 8.39s for π(2⁶³ − 1) on Intel Arrow Lake, beating the long-standing C++ state-of-the-art by 1.2% (p = 0.011 by binomial test on head-to-head runs). Through 107 systematic experiments, we established that the code occupies a local performance optimum determined by four coupled hardware constraints: L2 miss-handling capacity, register file size, L3 cache pressure, and DRAM bandwidth.
 
-Beyond the specific result, this study yields several generalizable findings for high-performance computing on modern out-of-order processors:
+Beyond the specific result, this study yields generalizable findings across four categories:
 
+**Hardware constraints:**
 1. **MLP over cache hit rate**: Memory-level parallelism governs performance for random-access workloads; optimizations that improve locality at the cost of MLP are counterproductive (§7.1).
-2. **Software prefetch is harmful**: On processors with deep out-of-order windows (≥200 instructions), explicit prefetch competes with demand loads for miss-tracking resources (§7.2).
-3. **PGO fails for MLP-bound code**: When branches are already well-predicted and the bottleneck is memory bandwidth, PGO's inlining heuristics increase I-cache pressure (§7.3).
-4. **Shared-cache coupling**: Concurrent components sharing last-level cache cannot be analyzed independently; optimizing one may degrade another through cache eviction effects (§7.4).
-5. **Architectural convergence**: Radically different implementations (BigPiTable vs SegPiTable) converge to within 1.2%, suggesting a fundamental throughput floor (§7.5).
-6. **Cliff-edged optima**: Near-optimal code sits on a narrow peak; the vast majority of perturbations cause significant regression, not gradual degradation (§7.6).
-7. **The 16-GPR wall**: x86-64's register file is the hard limit on unroll factor for MLP-generating loops; only wider ISAs can push further (§7.8).
-8. **Textbook techniques fail at the floor**: Every standard HPC optimization (prefetch, PGO, cache tiling, loop transforms) was tested and failed, demonstrating that near a hardware-constrained optimum, the conventional playbook is exhausted (§7.9).
+2. **The 16-GPR wall**: x86-64's register file is the hard limit on unroll factor for MLP-generating loops; only wider ISAs (ARM, RISC-V with 32 GPRs) can push further (§7.8).
+3. **DRAM bandwidth is the true ceiling**: The system's 89.6 GB/s bandwidth, shared across all cores, is the ultimate limiter regardless of per-core optimizations (§4.1).
 
-These insights extend beyond prime counting to any large-scale computation with random memory access patterns on modern hardware. The MLP constraint model (§4) provides a portable analytical framework: on any architecture, the performance ceiling is determined by the minimum of per-core MLP capacity, system DRAM bandwidth, and register file depth — a framework applicable to hash tables, database joins, graph traversals, and other random-access workloads at scale.
+**Anti-patterns near the optimum:**
+4. **Software prefetch is harmful** on processors with deep OoO windows (§7.2).
+5. **PGO fails for MLP-bound code** — inlining increases I-cache pressure (§7.3).
+6. **Optimizations destroy each other** — PGO vs hand-tuning, prefetch vs MLP, interleaving vs spatial locality (§7.10).
+7. **Textbook techniques fail at the floor** — every standard HPC optimization was tested and failed (§7.9).
+8. **Non-power-of-2 encodings are anti-patterns** — wheel-30 failed twice, for different reasons (§7.12).
+
+**Systems-level insights:**
+9. **Shared-cache coupling** invalidates independent component analysis (§7.4).
+10. **Work-stealing is essential**, not optional, for phase-dependent concurrent workloads (§7.18).
+11. **The allocator matters** — mimalloc was 8.6× faster than the default heap under contention (§7.19).
+12. **Adaptive parameters are critical** — optimal α varies 8× across input scales (§7.17).
+
+**Architectural insights:**
+13. **DRAM can beat L1** — high-MLP random access to a large table beats sequential access to many small rebuilt tables, when amortized across enough lookups (§7.14).
+14. **Barrett reduction enables the architecture** — 6× faster division compensates for 20× slower π lookups (§7.13).
+15. **Architectural convergence** — radically different implementations converge to within 1.2%, suggesting a fundamental throughput floor (§7.5).
+
+The MLP constraint model (§4) provides a portable analytical framework: on any architecture, the performance ceiling is determined by the minimum of per-core MLP capacity, system DRAM bandwidth, and register file depth. This framework applies beyond prime counting to hash tables, database joins, graph traversals, and any random-access workload at scale where the working set exceeds the last-level cache.
 
 ---
 
