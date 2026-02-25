@@ -1008,10 +1008,89 @@ More threads cause oversubscription. Also tested AC_SEG sweep (50K-500K): defaul
 
 ---
 
-## Conclusions After 103 Experiments
+## Session 8: Memory Access Pattern Experiments (Opt 104-107)
+
+### Opt 104: Interleaved BigPiTable Layout (5% REGRESSION)
+
+**What**: Merge `bits[]` and `prefix[]` into a single interleaved `data[]` array:
+`data[2*w]` = prefix, `data[2*w+1]` = bits. Both values share a cache line (16B
+per entry, 4 entries per 64B line). Theory: halve DRAM accesses for random pi_fast
+lookups (1 cache line instead of 2).
+
+**Result**: AC = 8.75s (was 8.44s), total = 9.05s — **5% regression**.
+
+- Table grows from 285MB to 380MB (+33%) due to u64 padding for prefix
+- B's sequential bits scan becomes stride-2 (50% cache utilization)
+- **Key finding**: separate arrays have 8× better spatial locality for bits[]
+  (8 consecutive bits words per cache line vs 4 interleaved). Within each b-value's
+  iteration, consecutive xpq values often access nearby bits words, benefiting from
+  dense packing.
+- **Reverted completely**
+
+### Opt 105: Deep Software Prefetch (4% REGRESSION)
+
+**What**: Prefetch BigPiTable address 32-128 iterations ahead (300-1300ns lead time)
+instead of Opt 94's 4 iterations (~12ns). Theory: exceed DRAM latency (80ns) to
+pre-warm L2 for demand loads.
+
+| Distance | AC Time | Note |
+|----------|---------|------|
+| 32 iters | 8.77s | +3.9% |
+| 128 iters | 8.76s | +3.8% |
+
+- **Root cause**: each prefetch uses an L2 miss tracking entry (12-16 available).
+  With 2 demand loads per pi_fast × 4 unrolled = 8 entries, adding prefetch leaves
+  only 4-8 entries for demands. This REDUCES memory-level parallelism.
+- Extra fast_div computation for prefetch address adds ~6 μops per 4-iteration batch
+- **Reverted completely**
+
+### Opt 106: Monotonic Sweep with Running Pi (80% REGRESSION)
+
+**What**: Since xpq decreases monotonically within each b-value iteration, maintain
+a running pi counter and update via sequential sieve bit scans instead of random
+pi_fast lookups. For small Δxpq (< 4096), scan ~16 words (128 bytes, fits L1d).
+
+**Result**: AC = 15.48s (was 8.44s), total = 15.62s — **1.8× slower** (but correct).
+
+- **Root cause: loss of 4× unrolling MLP**. The monotonic sweep serializes iterations
+  (running_pi depends on previous scan result). Without 4× unrolling, MLP drops from
+  8 outstanding L2 misses to 1-2, cutting memory bandwidth utilization by 4-8×.
+- **Critical insight**: the AC inner loop is **memory-BANDWIDTH-bound**, not latency-bound.
+  The OoO engine hides latency via MLP (4× unrolling × 2 loads each = 8 outstanding misses).
+  Any optimization that reduces MLP is catastrophic.
+- Even though ~89% of iterations have Δxpq < 4096 (where scans would be L1d hits),
+  the bandwidth loss from serial execution overwhelms the cache benefit.
+- **Reverted completely**
+
+### Opt 107: 8× Unrolling (4% REGRESSION)
+
+**What**: Increase unrolling from 4× to 8× to saturate L2 miss handling capacity
+(16 outstanding misses vs 8 with 4×).
+
+**Result**: AC = 8.77s (was 8.44s) — **4% regression**.
+
+- 8 xpq + 8 pi values = 16 registers, exceeding x86-64's 16 GPRs → spills to stack
+- Larger loop body (2× more code) increases I-cache pressure (L1i = 32KB)
+- L2 miss handling was already near-saturated at 8 outstanding misses (4× unrolling)
+- **4× unrolling is the Pareto-optimal point**: enough MLP to saturate L2 miss handling
+  without register pressure or I-cache impact
+- **Reverted completely**
+
+---
+
+## Conclusions After 107 Experiments
 
 V8 at **8.39s best / 8.57s median** (build-std) is a **verified local optimum** for the
 b-first BigPiTable architecture on Intel Core Ultra 9 285K.
+
+### The Memory-Level Parallelism Constraint (Sessions 7-8 Discovery)
+
+The AC inner loop is **memory-BANDWIDTH-bound with high MLP**:
+- 4× unrolled loop generates 8 independent L2 miss requests (2 per pi_fast × 4)
+- This saturates Arrow Lake's L2 miss handling capacity (~12-16 outstanding)
+- Any change that reduces MLP is catastrophic (monotonic sweep: -80%, 8× unroll: -4%)
+- Any change that increases table size hurts spatial locality (interleaving: -5%)
+- Software prefetch competes with demand loads for L2 miss entries (-4%)
 
 ### The Concurrent Penalty Wall
 
