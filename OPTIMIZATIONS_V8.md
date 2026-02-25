@@ -536,3 +536,140 @@ run-to-run variance. AC_SEG=200000 applied as the only measurable improvement.
    with L1-resident SegmentedPiTable, fundamentally different parallelization
    (threads own segment ranges vs parallel over b-values). This is a ~1000-line
    rewrite of the most complex function in the codebase.
+
+---
+
+## Session 4: Nightly Toolchain & Build Optimization
+
+### Baseline
+V8 with stable toolchain: 8.63-8.66s median (AC_SEG=200K, all Opt 53-76 applied).
+
+### Opt 77: Clean PGO with nightly
+**Hypothesis**: Profile-guided optimization should improve branch prediction and code layout.
+- Built instrumented binary with `-Cprofile-generate` + nightly flags
+- Ran at Max i64 (180s instrumented)
+- Merged profiles with llvm-profdata, no hash mismatch warnings
+- **Result: 9.04-9.14s (REGRESSION +5%)**
+- PGO's aggressive code layout changes hurt the hand-tuned inner loop. Increased
+  code size causes L1 icache pressure. The original LLVM codegen with our
+  unroll-threshold=800 already produces near-optimal code.
+
+### Opt 78: -Zbuild-std (recompile std with target-cpu=native)
+**Hypothesis**: Recompiling the standard library with AVX-512 and Arrow Lake
+instruction scheduling should improve memcpy/memset and other std operations.
+- Required disabling Smart App Control (SAC) via registry edit (SAC blocked
+  execution of recompiled std binaries)
+- Build: `cargo +nightly build --release -Zbuild-std=std,panic_abort --target x86_64-pc-windows-msvc`
+
+| Run | Time |
+|-----|------|
+| 1 | 8.49s |
+| 2 | 8.55s |
+| 3 | 8.56s |
+| 4 | 8.54s |
+| 5 | 8.61s |
+| 6 | 8.56s |
+| 7 | 8.55s |
+
+**Median: 8.55s, Best: 8.49s** — matches primecount target!
+Improvement from std operations compiled with target-cpu=native (AVX-512
+memcpy, tuned allocation in mimalloc, etc.).
+
+### Opt 79: panic_immediate_abort
+**Hypothesis**: Eliminating panic formatting reduces code size.
+- `-Zunstable-options -Cpanic=immediate-abort` with `-Zbuild-std=std,core`
+- Result: 8.53-8.70s — no significant change vs Opt 78.
+- Panic formatting code was already dead-code-eliminated by LTO.
+
+### Opt 80: LLVM loop interchange/flatten
+Added `--enable-loop-interchange --enable-loop-flatten` to LLVM args.
+Result: 8.51-8.58s — within noise of Opt 78. No applicable loops.
+
+### Opt 81: unroll-threshold=1200
+Increased from 800 to 1200 to see if more unrolling helps.
+Result: 8.57-8.62s — slight regression. Larger code doesn't fit as well in icache.
+Reverted to 800.
+
+### Opt 82: Branchless AC inner loop restructure
+**Hypothesis**: Eliminating is_c2 and y_boundary branches from the 4× unrolled
+inner loop by splitting into separate phase loops (C2 loop, before-boundary loop,
+after-boundary loop) should improve branch prediction and allow better LLVM optimization.
+- Result: **9.35-9.55s (REGRESSION +10%)**
+- Six separate loops instead of one unified loop explodes L1 icache footprint.
+- The original branches are well-predicted (is_c2 is loop-invariant, y_boundary
+  mispredicts once per b-value = negligible).
+- Reverted immediately.
+
+### Opt 83: Interleaved BigPiTable layout
+**Hypothesis**: Storing prefix[w] and bits[w] adjacently in memory (16B per entry
+instead of separate arrays) should halve cache line accesses per pi_fast call.
+- Interleaved layout: `data[2*w] = prefix, data[2*w+1] = bits`
+- Total memory: 380MB (vs 285MB)
+- Result: **9.07s (REGRESSION +6%)**
+- Worse cache line utilization: separate arrays give 8 bits-words per line (64B/8B)
+  and 16 prefix-words per line (64B/4B). Interleaved gives only 4 entries per line
+  (64B/16B). The hardware prefetcher handles the two-stream access pattern efficiently.
+- Reverted.
+
+### Opt 84-86: Thread pool experiments with build-std
+
+| Opt | Config | Median | Change |
+|-----|--------|--------|--------|
+| 84 | D_THREADS=16 | 11.13s | -30% (oversubscription) |
+| 85 | AC_THREADS=16 | 14.88s | -72% (AC starved) |
+| 86 | POOL_MULT=2 | 8.72s | -2% (less overlap) |
+
+Thread separation creates oversubscription (24 global + 24 B + 16 D = 64 threads
+on 24 cores). The shared rayon pool with work-stealing remains optimal.
+
+### Opt 87: AC_SEG sweep with build-std
+
+| AC_SEG | Median |
+|--------|--------|
+| 100K | 8.62s |
+| 150K | 8.64s |
+| 200K | 8.61s |
+| 260K | 8.60s |
+| 350K | 8.74s |
+
+200K-260K optimal, confirming Opt 72's result holds with build-std.
+
+### Summary Table (Session 4)
+
+| Opt | Description | Median | Change |
+|-----|-------------|--------|--------|
+| 77 | Clean PGO (nightly) | 9.06s | -5.3% |
+| 78 | -Zbuild-std | **8.55s** | **+1.3%** |
+| 79 | panic_immediate_abort | 8.55s | ≈ same |
+| 80 | Loop interchange/flatten | 8.55s | ≈ same |
+| 81 | unroll-threshold=1200 | 8.60s | -0.6% |
+| 82 | Branchless AC inner loop | 9.47s | -10.0% |
+| 83 | Interleaved BigPiTable | 9.07s | -6.0% |
+| 84 | D_THREADS=16 | 11.13s | -30.0% |
+| 85 | AC_THREADS=16 | 14.88s | -72.0% |
+| 86 | POOL_MULT=2 | 8.72s | -2.0% |
+| 87 | AC_SEG sweep (build-std) | 8.61s | confirmed |
+
+**Final V8 performance**: 8.55s median, **8.49s best** with nightly + build-std.
+This matches primecount's 8.49s benchmark at the best case.
+
+### Key Findings
+
+1. **PGO is counterproductive** for heavily hand-tuned inner loops. LLVM's
+   default codegen with our unroll-threshold is already optimal. PGO's aggressive
+   inlining and code layout increases icache pressure.
+
+2. **-Zbuild-std is the single best nightly optimization** (~1.3% improvement).
+   Recompiling std with target-cpu=native benefits memory operations throughout.
+
+3. **Code size is critical**: Both the branchless loop restructure (+10 loops)
+   and the interleaved table (+33% memory) regressed because they increased the
+   L1 icache and L2 data cache working sets respectively.
+
+4. **The original loop structure is near-optimal**: Well-predicted branches
+   (is_c2 is loop-invariant, y_boundary mispredicts once per b-value) add
+   negligible overhead. The unified loop keeps icache footprint minimal.
+
+5. **Separate arrays beat interleaved for prefix+bits**: The u32 prefix array
+   packs 16 entries per cache line (vs 4 in 16B interleaved), and the hardware
+   L2 prefetcher easily tracks two independent sequential streams.

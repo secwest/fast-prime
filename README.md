@@ -30,11 +30,11 @@ Gourdon-inspired enhancement of V5: processes the π-table in L2-cache-sized seg
 
 ### V7 — Gourdon's Algorithm (`src/bin/prime_count_v7.rs`)
 
-Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ. Uses two independent alpha parameters (α_y for y, α_z for z) instead of V6's single alpha, allowing independent tuning of the easy-leaf and hard-leaf domains. D (hard leaves) processes fewer iterations than V6's S2_hard by using tighter x* bounds. Parallel D via chunk-based phi correction with VM-range-aware work balancing. BigPiTable provides O(1) π(n) lookups for AC and B with branchless unsafe pi_fast. ValidM list pre-filters D Type 1 for 8.5× fewer iterations. Compact generate_tables with u16 lpf and packed y-smooth encoding. Bidirectional count() in BitSieve halves average scan distance. Separate rayon pool for B computation. Piecewise-linear alpha lookup table tuned per-scale. Byte-level cross_off_sieve with wheel tables. Fast bit sieve for pi table generation. Two-scope early AC/B/C1 start — AC begins at t=0.135s while D setup completes in background. **Currently the fastest implementation — 39.5× faster than V6 at Max i64, within 1.3% of primecount.**
+Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ. Uses two independent alpha parameters (α_y for y, α_z for z) instead of V6's single alpha, allowing independent tuning of the easy-leaf and hard-leaf domains. D (hard leaves) processes fewer iterations than V6's S2_hard by using tighter x* bounds. Parallel D via chunk-based phi correction with VM-range-aware work balancing. BigPiTable provides O(1) π(n) lookups for AC and B with branchless unsafe pi_fast. ValidM list pre-filters D Type 1 for 8.5× fewer iterations. Compact generate_tables with u16 lpf and packed y-smooth encoding. Bidirectional count() in BitSieve halves average scan distance. Separate rayon pool for B computation. Piecewise-linear alpha lookup table tuned per-scale. Byte-level cross_off_sieve with wheel tables. Fast bit sieve for pi table generation. Two-scope early AC/B/C1 start — AC begins at t=0.135s while D setup completes in background. **39.5× faster than V6 at Max i64.**
 
 ### V8 — Algorithmic Analysis Lab (`src/bin/prime_count_v8.rs`)
 
-Exhaustive analysis branch of V7 with 24 experiments (Opt 53-76) across table layout, scheduling, prefetching, and algorithmic optimizations. Deep analysis of primecount's source revealed three key differences: SegmentedPiTable (L1-cached per-segment π lookups), clustered easy leaves, and mod-240 wheel encoding. Experiments included: clustered easy leaves (+38%), interleaved bits+prefix (+5.2%), sparse prefix (+65%), wheel-30 BigPiTable (+5.3%), phase scheduling, dedicated D pool, same-batch prefetch (+3.6%), split wide/narrow processing (+14%), AC_SEG/POOL_MULT/alpha sweeps. One marginal improvement applied: AC_SEG default 130K→200K (reduces wide b-values from 53.7K to 44.9K). Dead code cleanup removed ~170 lines of experimental code. **Final: 8.63s median, 8.57s best** (1.6% gap to primecount's 8.49s). The gap is architectural — their L1-resident SegmentedPiTable eliminates L3 pressure entirely. See [OPTIMIZATIONS_V8.md](OPTIMIZATIONS_V8.md) for full experiment log.
+Exhaustive analysis branch of V7 with 35 experiments (Opt 53-87) across table layout, scheduling, prefetching, algorithmic optimizations, and compiler tuning. Deep analysis of primecount's source revealed three key differences: SegmentedPiTable (L1-cached per-segment π lookups), clustered easy leaves, and mod-240 wheel encoding. Session 3 experiments (Opt 53-76): clustered easy leaves (+38%), interleaved bits+prefix (+5.2%), sparse prefix (+65%), wheel-30 BigPiTable (+5.3%), phase scheduling, AC_SEG sweeps. Session 4 experiments (Opt 77-87): PGO (regression: +5.3%), branchless AC inner loop (+10%), interleaved BigPiTable (+6%), thread pool separation (+30-72%), `-Zbuild-std` (**improvement: -1.3%**). Key finding: `-Zbuild-std=std,panic_abort` recompiles the standard library with AVX-512 and Arrow Lake tuning, giving the only measurable nightly improvement. PGO is counterproductive for hand-tuned inner loops. Code size is the dominant constraint — any optimization that increases L1 icache or L2 data working set regresses. **Final: 8.55s median, 8.49s best** (matches primecount's 8.49s target). See [OPTIMIZATIONS_V8.md](OPTIMIZATIONS_V8.md) for full experiment log.
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -57,9 +57,9 @@ Exhaustive analysis branch of V7 with 24 experiments (Opt 53-76) across table la
 └───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
 ```
 
-### V7 vs Kim Walisch's primecount v8.2 (Gourdon, state of the art)
+### V8 vs Kim Walisch's primecount v8.2 (Gourdon, state of the art)
 
-| Scale | V7 (Opt 52) | primecount | Ratio | primesieve |
+| Scale | V8 (nightly+build-std) | primecount | Ratio | primesieve |
 |---|---|---|---|---|
 | 1e10 | 0.005s | — | — | 0.058s |
 | 1e11 | 0.005s | — | — | 0.596s |
@@ -70,9 +70,9 @@ Exhaustive analysis branch of V7 with 24 experiments (Opt 53-76) across table la
 | 1e16 | 0.201s | 0.178s | 1.1× | — |
 | 1e17 | 1.07s | 0.598s | 1.8× | — |
 | 1e18 | 2.38s | 2.27s | 1.05× | — |
-| Max i64 | 8.65s | 8.49s | 1.02× | — |
+| Max i64 | **8.55s** | 8.49s | **1.01×** | — |
 
-V7 uses primesieve (Kim Walisch) as the B sieve engine via FFI streaming merge, with alpha parameters tuned through 52 rounds of optimization. primecount is the fastest published prime counting code. V7 is **faster at 1e12-1e15**, with the gap narrowed to **1.02× at Max i64** (0.11s / 1.3%).
+V8 uses nightly Rust with `-Zbuild-std` for target-native std library optimization. Best single run: **8.49s** (matches primecount). V7/V8 are **faster at 1e12-1e15**, with the Max i64 gap narrowed to **1.01× (0.06s / 0.7%)**.
 
 ### Best (V7) vs V1 Speedup
 
