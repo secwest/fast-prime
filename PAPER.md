@@ -10,7 +10,7 @@ How fast can you count the primes below 2⁶³? Kim Walisch's *primecount* — t
 
 Our Rust implementation of Gourdon's algorithm computes π(2⁶³ − 1) = 216,289,611,853,439,384 in **8.39 seconds** on an Intel Core Ultra 9 285K. Over **107 controlled experiments**, we systematically explored every optimization axis — and discovered that **106 of them failed**. The only improvement came from recompiling the Rust standard library (+1.3%). Every other change — software prefetch, profile-guided optimization, cache tiling, loop restructuring, data structure compaction, thread pool isolation — made things worse, often dramatically.
 
-This is a story about reaching the hardware floor and what you find when you get there: a stable equilibrium where four hardware constraints (L2 miss-handling capacity, register file size, DRAM bandwidth, and L3 cache pressure) interlock so tightly that improving any one necessarily degrades another. It is also a story about how a human and an AI worked together to get there — a researcher directing strategy while an LLM implemented code changes, executed experiments, diagnosed 20 correctness bugs, and maintained documentation across sessions interrupted by power failures and context limits. The human brought the intuition ("try Barrett reduction"); the AI brought the stamina (107 experiments, each requiring build-benchmark-analyze-revert cycles). Neither could have done this alone in the same timeframe.
+This is a story about reaching what appears to be the hardware floor, and what you find when you get there: a stable equilibrium where four hardware constraints (L2 miss-handling capacity, register file size, DRAM bandwidth, and L3 cache pressure) interlock so tightly that every improvement we attempted on one dimension degraded another. It is also a story about how a human and an AI worked together to get there — a researcher directing strategy while an LLM implemented code changes, executed experiments, diagnosed 20 correctness bugs, and maintained documentation across sessions interrupted by power failures and context limits. The human brought the intuition ("try Barrett reduction"); the AI brought the stamina (107 experiments, each requiring build-benchmark-analyze-revert cycles). Neither could have done this alone in the same timeframe.
 
 Along the way, we discovered that improving cache hit rate can *slow things down* by 80%, that making one component faster can paradoxically slow the *total* computation, and that every textbook HPC optimization technique fails near the hardware floor. We catalogued 20 correctness bugs and found that 45% were off-by-one errors — the eternal nemesis of number-theoretic code, from Meissel's manual miscalculation of π(10⁹) in 1885 to our SegmentedPiTable indexing error in 2026. These findings — detailed across 22 lessons in §7 — apply broadly to any memory-bound computation on modern out-of-order processors.
 
@@ -68,11 +68,11 @@ Specifically, our contributions are:
 
 2. **A taxonomy of 107 optimization experiments** with detailed performance analysis, providing an empirical map of the optimization landscape for memory-bandwidth-bound parallel computations on Intel Arrow Lake.
 
-3. **Identification of the MLP constraint** as the fundamental performance limiter: the 4× unrolled inner loop generates 8 independent L2 miss requests that saturate the processor's 12–16 outstanding miss capacity, creating an equilibrium that cannot be improved by any local code transformation.
+3. **Identification of the MLP constraint** as the apparent performance limiter: the 4× unrolled inner loop generates 8 independent L2 miss requests that appear to saturate the processor's 12–16 outstanding miss capacity, creating an equilibrium that resisted improvement by every local code transformation we attempted.
 
 4. **Discovery of the BigPiTable L3 warming effect**: the AC computation's continuous random accesses to the 285 MB π-table keep it warm in L3 cache, benefiting the concurrent B computation. Scheduling changes that accelerate AC paradoxically slow the overall computation by depriving B of this cache warming.
 
-5. **Quantification of the concurrent penalty**: AC alone completes in 2.10s, but concurrent execution with D inflates this to 8.42s — a 4.0× penalty from L3 cache pressure, work-stealing overhead, and power throttling. This penalty is irreducible within the current architecture.
+5. **Quantification of the concurrent penalty**: AC alone completes in 2.10s, but concurrent execution with D inflates this to 8.42s — a 4.0× penalty from L3 cache pressure, work-stealing overhead, and power throttling. We found no way to reduce this penalty within the current architecture.
 
 6. **A case study in human-AI collaborative research**: demonstrating that an LLM-assisted workflow can compress months of optimization work into weeks, while producing documentation (this paper, 1100+ lines of optimization logs, 2700+ lines of thought log) that would typically be omitted from a solo effort.
 
@@ -93,7 +93,7 @@ All experiments were conducted on:
 
 ### 1.4 Paper Organization and Key Surprises
 
-**§2** describes the algorithm and implementation, including the two key data structures (BigPiTable for O(1) π lookups, Barrett reduction for fast division) and our experimental methodology. **§3** catalogs all 107 experiments across six optimization axes. **§4** presents the MLP constraint model that explains why the code can't be improved. **§5** gives performance results with statistical analysis. **§6** traces the implementation's evolution through 8 major versions — the narrative heart of the paper, including the dead ends, the breakthroughs, and the bugs that haunted every version. **§7** draws 22 lessons from the experiments. **§8** places our work in the context of 150 years of prime counting algorithms. **§9** concludes with findings about hardware, software, correctness, and the human-AI collaboration that produced this work.
+**§2** describes the algorithm and implementation, including the two key data structures (BigPiTable for O(1) π lookups, Barrett reduction for fast division) and our experimental methodology. **§3** catalogs all 107 experiments across six optimization axes. **§4** presents the MLP constraint model — our best explanation for why the code resisted improvement. **§5** gives performance results with statistical analysis. **§6** traces the implementation's evolution through 8 major versions — the narrative heart of the paper, including the dead ends, the breakthroughs, and the bugs that haunted every version. **§7** draws 22 lessons from the experiments. **§8** places our work in the context of 150 years of prime counting algorithms. **§9** concludes with findings about hardware, software, correctness, and the human-AI collaboration that produced this work.
 
 For the reader short on time, the most surprising and broadly applicable findings are:
 
@@ -101,7 +101,7 @@ For the reader short on time, the most surprising and broadly applicable finding
 - **Making one component faster slowed the whole system** (§7.4) — accelerating AC deprived B of a cache-warming side effect, a violation of the independence assumption in Amdahl's Law.
 - **Every textbook optimization failed** (§7.9) — prefetch, PGO, cache tiling, loop transforms, data compaction: all tested, all regressed.
 - **DRAM can beat L1** (§7.14) — a 285 MB table with high MLP outperforms 23,000 rebuilds of a 3.7 KB L1-resident table, yielding a 39.5× speedup.
-- **Optimizations destroy each other** (§7.10) — near the hardware floor, improving one dimension always degrades another.
+- **Optimizations destroy each other** (§7.10) — near the hardware floor, every improvement we tried on one dimension degraded another.
 - **Off-by-one errors are the dominant bug category** (§7.16) — 45% of 20 bugs, invisible at small scales, catastrophic at large scales. Meissel got π(10⁹) wrong in 1885 for the same reason we got SegmentedPiTable wrong in 2026.
 
 ---
@@ -326,13 +326,13 @@ The DELAY_D experiment (Opt 101) revealed a second-order effect: the three concu
 - D runs sieves → evicts BigPiTable from L3 → B suffers
 - The "optimal" schedule maximizes BigPiTable L3 residency for B while overlapping all three computations
 
-This means no scheduling rearrangement can improve total time: accelerating AC by reducing its overlap with D deprives B of cache warming, slowing B by the same amount.
+This means no scheduling rearrangement we tested could improve total time: accelerating AC by reducing its overlap with D deprived B of cache warming, slowing B by a comparable amount.
 
 ---
 
 ## 5. Results
 
-Despite the constraint model predicting that no local optimization can improve performance, V8 achieves a measurable advantage over primecount through its different architectural tradeoff: trading expensive π lookups for cheap Barrett divisions.
+Although the constraint model suggests that no local optimization should improve performance, V8 achieves a measurable advantage over primecount through its different architectural tradeoff: trading expensive π lookups for cheap Barrett divisions.
 
 ### 5.1 Final Performance
 
@@ -427,15 +427,15 @@ Before diving into the lessons, it is useful to understand how the implementatio
 
 **V3: Meissel-Lehmer — and the first wall.** Our first implementation of the classical combinatorial approach, and the version where we discovered Barrett reduction: replacing the hardware `DIV` instruction (25 cycles on Arrow Lake) with a precomputed reciprocal multiply-shift (3 cycles, exact with a single correction multiply). This 8× speedup on the hot-path division became the cornerstone of every subsequent version.
 
-But V3 also taught us what it feels like to hit a wall. After 15 optimization attempts — parallelization, cache tuning, loop unrolling, reciprocal precision tricks — the u128 multiply throughput saturated at 3.5 cycles per operation. The profiler showed 100% ALU utilization. There was nothing left to optimize. The algorithm itself was the bottleneck, and the only way forward was a better algorithm. This was a pivotal moment: the decision to abandon a working, heavily-optimized codebase and start over with LMO.
+But V3 also taught us what it feels like to hit a wall. After 15 optimization attempts — parallelization, cache tuning, loop unrolling, reciprocal precision tricks — the u128 multiply throughput saturated at 3.5 cycles per operation. The profiler showed 100% ALU utilization. We could find nothing left to optimize. The algorithm itself appeared to be the bottleneck, and the most promising way forward was a better algorithm. This was a pivotal moment: the decision to abandon a working, heavily-optimized codebase and start over with LMO.
 
 **V4: Lagarias-Miller-Odlyzko — the first answer.** V4 was the first version to produce the number: π(2⁶³ − 1) = 216,289,611,853,439,384. It took 939 seconds. We remember the moment — 15 minutes of watching a progress bar crawl, followed by the thrill of cross-checking the result against the OEIS.
 
 From there, V4 became an optimization laboratory. Parallel phi computation via delta-correction gave 1.8×. A pre-sieve template for small primes gave 1.9×. Adaptive alpha parameters — discovered by sweeping α from 1.5 to 3.0 across input scales — gave 64% at 10¹⁵. A custom ParallelPiSieve replacing the single-threaded `primal` crate gave 2×. Each optimization peeled away a layer of overhead, revealing the next bottleneck beneath.
 
-V4 also produced the project's most insidious bug. Barrett reduction, our prized 8× speedup, turned out to have a subtle overflow: when n × (d − 1) ≥ 2⁶⁴, the reciprocal overestimates the quotient by exactly 1. At 10¹² this never happens. At 10¹⁴ it happens but the errors cancel. At 10¹⁶ the accumulated miscount becomes visible. We discovered it only by cross-validating V2, V3, and V4 at 100 trillion — three implementations of different algorithms, two agreeing with each other and disagreeing with the third. The fix — `q - (q*d > n) as u64`, a single conditional subtract — became permanent across all versions. The lesson became §7.16's Pattern 2: *integer overflows are scale-dependent, and the only defense is testing at maximum scale*.
+V4 also produced the project's most insidious bug. Barrett reduction, our prized 8× speedup, turned out to have a subtle overflow: when n × (d − 1) ≥ 2⁶⁴, the reciprocal overestimates the quotient by exactly 1. At 10¹² this never happens. At 10¹⁴ it happens but the errors cancel. At 10¹⁶ the accumulated miscount becomes visible. We discovered it only by cross-validating V2, V3, and V4 at 100 trillion — three implementations of different algorithms, two agreeing with each other and disagreeing with the third. The fix — `q - (q*d > n) as u64`, a single conditional subtract — became permanent across all versions. The lesson became §7.16's Pattern 2: *integer overflows are scale-dependent, and the strongest defense is testing at maximum scale*.
 
-**V5: Deléglise-Rivat — the bridge.** V5 implemented the easy-leaf/hard-leaf decomposition that is the key insight of modern prime counting: most "special leaves" in the LMO formula can be evaluated by a single table lookup, without touching the sieve at all. By tuning the alpha parameter, work shifts from expensive S₂_hard (requires sieve) to cheap S₂_easy (a single π-table lookup per leaf). V5 was a stepping stone to Gourdon — it validated the decomposition and taught us the parameter interactions — but its S₂_hard bottleneck at ~81 seconds proved immovable. Four separate optimization attempts (segment size cap, hierarchical counters, chunk tuning, Fenwick tree) all failed. The algorithm had reached its architectural limit, just as V3 had reached its pipeline limit.
+**V5: Deléglise-Rivat — the bridge.** V5 implemented the easy-leaf/hard-leaf decomposition that is the key insight of modern prime counting: most "special leaves" in the LMO formula can be evaluated by a single table lookup, without touching the sieve at all. By tuning the alpha parameter, work shifts from expensive S₂_hard (requires sieve) to cheap S₂_easy (a single π-table lookup per leaf). V5 was a stepping stone to Gourdon — it validated the decomposition and taught us the parameter interactions — but its S₂_hard bottleneck at ~81 seconds proved immovable. Four separate optimization attempts (segment size cap, hierarchical counters, chunk tuning, Fenwick tree) all failed. The algorithm appeared to have reached its architectural limit, just as V3 had reached its pipeline limit.
 
 **V6: Gourdon with segmented π — the detour that almost worked.** Our first Gourdon implementation followed primecount's architecture faithfully: per-segment SegmentedPiTables of ~3.7 KB, rebuilt for each of ~23,000 segments, ensuring every π lookup hit L1 cache. It achieved 342s at Max i64 — a 2.7× improvement over V4 that validated Gourdon's formula. But the per-segment rebuild cost scaled poorly, and the S₂_hard bottleneck at ~81 seconds could not be broken.
 
@@ -488,11 +488,11 @@ This section distills 22 lessons organized into five themes: the nature of the h
 
 #### Theme 1: The Hardware Bottleneck
 
-### 7.1 Memory-Level Parallelism is the Critical Resource
+### 7.1 Memory-Level Parallelism is the Critical Resource (on This Hardware)
 
-The most important lesson from 107 experiments is that for large-scale combinatorial computations on modern out-of-order processors, **memory-level parallelism is more important than cache hit rate**. The monotonic sweep experiment (Opt 106) converted 89% of L3/DRAM misses to L1d hits, yet performed 80% slower because serializing iterations reduced MLP from 8 to 1–2 outstanding requests.
+The most important lesson from 107 experiments is that for large-scale combinatorial computations on modern out-of-order processors, **memory-level parallelism appears to be more important than cache hit rate**. The monotonic sweep experiment (Opt 106) converted 89% of L3/DRAM misses to L1d hits, yet performed 80% slower because serializing iterations reduced MLP from 8 to 1–2 outstanding requests.
 
-This finding has broad implications: optimization strategies that prioritize cache locality (e.g., cache-oblivious algorithms, loop tiling) may be counterproductive if they reduce the number of independent memory requests visible to the hardware.
+This finding has broad implications: optimization strategies that prioritize cache locality (e.g., cache-oblivious algorithms, loop tiling) may be counterproductive for workloads like ours if they reduce the number of independent memory requests visible to the hardware. Whether this generalizes to all random-access workloads at scale is an open question, but our 107 experiments provide strong evidence for this class of problem.
 
 ### 7.2 Software Prefetch is Obsolete on Modern Out-of-Order CPUs
 
@@ -506,7 +506,7 @@ Profile-guided optimization was tested three independent times across different 
 
 ### 7.4 Shared-Cache Components Cannot Be Analyzed in Isolation
 
-The DELAY_D experiment (Opt 101) revealed that concurrent components sharing L3 cache are not independent and cannot be optimized in isolation. Solo AC completes in 2.10s, but concurrent AC takes 8.42s — a 4.0× penalty. More surprisingly, *accelerating* AC by removing its overlap with D (DELAY_D scheduling) increased total time from 8.60s to 8.70s because B lost the cache-warming side effect of AC's continuous BigPiTable lookups.
+The DELAY_D experiment (Opt 101) revealed that concurrent components sharing L3 cache are not independent and should not be optimized in isolation. Solo AC completes in 2.10s, but concurrent AC takes 8.42s — a 4.0× penalty. More surprisingly, *accelerating* AC by removing its overlap with D (DELAY_D scheduling) increased total time from 8.60s to 8.70s because B lost the cache-warming side effect of AC's continuous BigPiTable lookups.
 
 This violates a core assumption of traditional Amdahl's Law analysis: that component times are independent and the total is max(concurrent components). In reality, the components form a coupled system where AC's "wasted" L3 accesses are a free benefit to B. Any analysis that treats component times as independent would conclude that DELAY_D should help — the opposite of reality. For shared-memory parallel systems with working sets exceeding the last-level cache, component interactions through cache eviction must be modeled explicitly.
 
@@ -521,7 +521,7 @@ V8 and primecount achieve near-identical performance (~8.5s) despite radically d
 | Table size | 285 MB (full-range) | 3.7 KB (per-segment) |
 | Parallelism model | b-first, work-stealing | segment-first, ranges |
 
-V8 compensates for 7.5–20× more expensive π lookups with 6× cheaper divisions, while primecount compensates for 6× more expensive divisions with 7.5–20× cheaper L1-resident π lookups. The fact that these radically different tradeoffs converge to within 1.2% of each other suggests that the total computation approaches a **fundamental throughput floor** — the minimum number of memory accesses × the minimum cost per access — that no single-machine implementation can break without reducing the algorithmic work itself.
+V8 compensates for 7.5–20× more expensive π lookups with 6× cheaper divisions, while primecount compensates for 6× more expensive divisions with 7.5–20× cheaper L1-resident π lookups. The fact that these radically different tradeoffs converge to within 1.2% of each other is striking, and suggests — though does not prove — that the total computation may be approaching a **throughput floor** defined by the minimum number of memory accesses × the minimum cost per access. Whether a fundamentally different approach could break through this floor remains an open question.
 
 ### 7.6 The Optimization Landscape is Cliff-Edged, Not Plateau-Shaped
 
@@ -545,7 +545,7 @@ The V7→V8 transition invested 107 experiments for a 3% improvement, while V6�
 
 The 8× unrolling experiment (Opt 107) crossed a hard architectural boundary: x86-64's 16 general-purpose registers. The 4× unrolled loop uses 12–14 registers (4 xpq values, 4 pi values, loop counter, accumulators, base pointers) — near the limit. Doubling to 8× requires 24+ live values, causing stack spills that serialize memory accesses and destroy the MLP advantage that unrolling is meant to provide.
 
-This is not a software limitation but a **fundamental ISA constraint**. No compiler optimization, register allocation strategy, or code transformation can create registers that don't exist. Breaking through this wall would require architectures with wider register files — ARM SVE (32 GPRs), RISC-V (32 GPRs), or future x86 extensions. On current x86-64, 4× unrolling is provably optimal for this access pattern.
+This is not a software limitation but an **ISA constraint**. No compiler optimization or register allocation strategy can create registers that don't exist. Breaking through this wall would require architectures with wider register files — ARM SVE (32 GPRs), RISC-V (32 GPRs), or future x86 extensions. On current x86-64, our experiments strongly suggest that 4× unrolling is optimal for this access pattern, though we cannot rule out a clever transformation we haven't considered.
 
 ### 7.9 Textbook HPC Optimizations Fail Near the Hardware Floor
 
@@ -564,7 +564,7 @@ A striking meta-conclusion emerges from the 107 experiments: **every standard te
 
 The only successful optimization was recompiling the Rust standard library (`-Zbuild-std`, Opt 78, +1.3%) — a compiler infrastructure change, not an algorithmic or micro-architectural one.
 
-This does not mean these techniques are generally useless — they are well-proven for other workloads. Rather, it demonstrates that **near a hardware-constrained optimum, the standard optimization playbook is exhausted**. The code is already operating at the intersection of multiple hardware limits (MLP, register file, DRAM bandwidth, L3 capacity), and any change that improves one dimension necessarily degrades another. This is a cautionary tale: practitioners applying textbook techniques to already-optimized code should expect diminishing (or negative) returns.
+This does not mean these techniques are generally useless — they are well-proven for other workloads. Rather, it demonstrates that **near a hardware-constrained optimum, the standard optimization playbook may be exhausted**. The code appears to be operating at the intersection of multiple hardware limits (MLP, register file, DRAM bandwidth, L3 capacity), and every change we tried that improved one dimension degraded another. This is a cautionary tale: practitioners applying textbook techniques to already-optimized code should expect diminishing (or negative) returns.
 
 #### Theme 3: How Optimizations Interact
 
@@ -641,7 +641,7 @@ V7's BigPiTable approach:
 
 With 4× unrolling providing 8 outstanding misses, the effective per-lookup cost drops from 50 ns to ~12 ns (4× MLP). Across 24 cores: 31.2B × 12 ns / 24 = **15.6 seconds** — plus Barrett saves 468s from V6's hardware divisions. Net: V7 is massively faster because **the one-time table build + MLP-amortized random access is cheaper than 23,000 per-segment sieve rebuilds**.
 
-This insight — that high-MLP random access to a large table can beat sequential access to many small rebuilt tables — is the fundamental architectural contribution of this work.
+This insight — that high-MLP random access to a large table can beat sequential access to many small rebuilt tables — is the central architectural contribution of this work.
 
 ### 7.15 SIMD and Vectorization Are Not Viable for Random-Access Lookups
 
@@ -758,7 +758,7 @@ The shared rayon pool with work-stealing is not merely a convenience — it is a
 3. B runs in a separate pool but benefits from reduced CPU contention as D winds down
 4. The optimal thread-to-component ratio changes continuously during execution
 
-Static thread allocation cannot adapt to this dynamic load. Work-stealing provides automatic, microsecond-granularity load balancing that no manual scheduling can match. This finding generalizes: for concurrent workloads with unequal task granularity and phase-dependent resource needs, **work-stealing thread pools are not an optimization — they are a correctness requirement** for achieving acceptable performance.
+Static thread allocation cannot adapt to this dynamic load. Work-stealing provides automatic, microsecond-granularity load balancing that no manual scheduling we tested could match. This finding generalizes: for concurrent workloads with unequal task granularity and phase-dependent resource needs, **work-stealing thread pools appear to be essential** for achieving acceptable performance — closer to a correctness requirement than a mere optimization.
 
 ### 7.19 The Allocator Matters: mimalloc Under Contention
 
@@ -781,7 +781,7 @@ Our Rust implementation matches or beats a heavily optimized C++ implementation 
 
 ### 7.21 The Architecture Ceiling and Future Hardware
 
-The b-first BigPiTable architecture has a provable performance ceiling on this hardware. We know this not merely from theoretical analysis but from **empirical evidence**: the segment-first SegmentedPiTable approach (primecount's architecture) was actually implemented and benchmarked three separate times:
+The b-first BigPiTable architecture has an apparent performance ceiling on this hardware. We believe this not merely from theoretical analysis but from **empirical evidence**: the segment-first SegmentedPiTable approach (primecount's architecture) was actually implemented and benchmarked three separate times:
 
 | Attempt | Configuration | Result | Failure mode |
 |---------|--------------|--------|-------------|
@@ -793,7 +793,7 @@ The SegmentedPiTable's L1 cache advantage (~4 ns vs ~50 ns per lookup) is real, 
 
 Breaking through the current ceiling requires one of:
 
-1. **Segment-first with sequential scheduling** (~1000-line rewrite): Adopt primecount's sequential AC→B→D scheduling, enabling single-rebuild-per-segment SegPiTable. This trades concurrent overlap for L1-resident lookups — the opposite tradeoff from our current architecture. Expected: comparable to primecount (both are at the same throughput floor).
+1. **Segment-first with sequential scheduling** (~1000-line rewrite): Adopt primecount's sequential AC→B→D scheduling, enabling single-rebuild-per-segment SegPiTable. This trades concurrent overlap for L1-resident lookups — the opposite tradeoff from our current architecture. Expected: comparable to primecount (both appear to be near the same throughput floor).
 
 2. **B optimization**: At 7.3s concurrent, B becomes the bottleneck if AC improves. B uses primesieve's streaming iterator, which is already highly optimized. A custom counting sieve with batch π queries could reduce B by ~40%.
 
@@ -808,7 +808,7 @@ Breaking through the current ceiling requires one of:
 | **Apple M4** | 192-entry ROB, 16 MB shared L2, unified memory | Higher per-core MLP potential; unified memory eliminates DRAM bandwidth wall |
 | **Future x86 (APX)** | Potential extension to 32 GPRs | Would break the 16-GPR wall, enabling deeper unrolling |
 
-The MLP constraint model (§4) is portable: on any architecture, the performance ceiling is determined by min(per-core MLP × cores, DRAM bandwidth / bytes-per-lookup, register file / registers-per-iteration). The specific values change, but the analytical framework applies.
+The MLP constraint model (§4) is portable: on any architecture, the performance ceiling appears to be determined by min(per-core MLP × cores, DRAM bandwidth / bytes-per-lookup, register file / registers-per-iteration). The specific values change, but the analytical framework should apply.
 
 ### 7.22 Limitations
 
@@ -846,7 +846,7 @@ Our comparison with primecount uses wall-clock time under controlled conditions 
 
 ### 8.3 This Work in Context
 
-Our contribution is not a new algorithm but rather a new **architectural tradeoff**: replacing primecount's segment-first approach (L1-resident SegmentedPiTable with hardware division) with a b-first approach (285 MB BigPiTable with Barrett reduction and high MLP). The two approaches represent opposite ends of a design spectrum — ours sacrifices cache hit rate for MLP and division speed, while primecount sacrifices division speed and MLP for cache locality. That both converge to within 1.2% of each other (§7.5) suggests the total computation approaches a fundamental throughput floor.
+Our contribution is not a new algorithm but rather a new **architectural tradeoff**: replacing primecount's segment-first approach (L1-resident SegmentedPiTable with hardware division) with a b-first approach (285 MB BigPiTable with Barrett reduction and high MLP). The two approaches represent opposite ends of a design spectrum — ours sacrifices cache hit rate for MLP and division speed, while primecount sacrifices division speed and MLP for cache locality. That both converge to within 1.2% of each other (§7.5) is suggestive evidence that the total computation may be approaching a throughput floor.
 
 Notably, we actually implemented and benchmarked primecount's SegmentedPiTable approach three separate times (V6, V8 Opts 86–90, V8 Opts 95–98), each with different parameters (L1-sized to L2-sized segments). All three attempts were slower than the BigPiTable architecture, ranging from 3% to 80% regression. The failure is not because SegmentedPiTable is a bad idea — it is excellent in primecount — but because the rebuild cost per segment (~50 μs × 23,000 segments × redundant work across threads) exceeds the latency savings from L1-resident lookups when combined with our Barrett reduction and 4× unrolled MLP pipeline. This empirical finding contradicts the intuition that "closer to the CPU is always faster."
 
@@ -866,8 +866,8 @@ Beyond the specific result, this study yields generalizable findings across four
 
 **Hardware constraints:**
 1. **MLP over cache hit rate**: Memory-level parallelism governs performance for random-access workloads; optimizations that improve locality at the cost of MLP are counterproductive (§7.1).
-2. **The 16-GPR wall**: x86-64's register file is the hard limit on unroll factor for MLP-generating loops; only wider ISAs (ARM, RISC-V with 32 GPRs) can push further (§7.8).
-3. **DRAM bandwidth is the true ceiling**: The system's 105.6 GB/s bandwidth, shared across all cores, is the ultimate limiter regardless of per-core optimizations (§4.1).
+2. **The 16-GPR wall**: x86-64's register file appears to be the binding constraint on unroll factor for MLP-generating loops; wider ISAs (ARM, RISC-V with 32 GPRs) could potentially push further (§7.8).
+3. **DRAM bandwidth as the apparent ceiling**: The system's 105.6 GB/s bandwidth, shared across all cores, appears to be the ultimate limiter regardless of per-core optimizations (§4.1).
 
 **Anti-patterns near the optimum:**
 4. **Software prefetch is harmful** on processors with deep OoO windows (§7.2).
@@ -885,12 +885,12 @@ Beyond the specific result, this study yields generalizable findings across four
 **Architectural insights:**
 13. **DRAM can beat L1** — high-MLP random access to a large table beats sequential access to many small rebuilt tables, when amortized across enough lookups (§7.14).
 14. **Barrett reduction enables the architecture** — 6× faster division compensates for 20× slower π lookups (§7.13).
-15. **Architectural convergence** — radically different implementations converge to within 1.2%, suggesting a fundamental throughput floor (§7.5).
+15. **Architectural convergence** — radically different implementations converge to within 1.2%, suggesting an apparent throughput floor (§7.5).
 
 **On correctness:**
-16. **Off-by-one errors are the dominant failure mode** in number-theoretic code — 45% of our 20 bugs — and they are invisible at small scales. The only defense is testing at maximum scale with cross-validation between independent implementations (§7.16).
+16. **Off-by-one errors are the dominant failure mode** in number-theoretic code — 45% of our 20 bugs — and they are invisible at small scales. The most effective defense we found is testing at maximum scale with cross-validation between independent implementations (§7.16).
 
-The MLP constraint model (§4) provides a portable analytical framework: on any architecture, the performance ceiling is determined by the minimum of per-core MLP capacity, system DRAM bandwidth, and register file depth. This framework applies beyond prime counting to hash tables, database joins, graph traversals, and any random-access workload at scale where the working set exceeds the last-level cache.
+The MLP constraint model (§4) provides a portable analytical framework: on any architecture, the performance ceiling appears to be determined by the minimum of per-core MLP capacity, system DRAM bandwidth, and register file depth. We believe this framework applies beyond prime counting to hash tables, database joins, graph traversals, and any random-access workload at scale where the working set exceeds the last-level cache.
 
 Finally, a note on method. This work was produced by a human-AI collaboration in approximately 80 hours of interactive sessions. The AI's contribution — implementing 107 experiments with full documentation of every failure — would have taken a solo researcher months. The human's contribution — the three strategic pivots that provided 99.7% of the speedup — could not have come from the AI. We believe this workflow, where human intuition guides and AI stamina executes, represents a productive model for empirical systems research. The complete experiment logs, thought journal, and source code are available at https://github.com/secwest/fast-prime.
 
