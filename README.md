@@ -34,7 +34,7 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 
 ### V8 — Algorithmic Analysis Lab (`src/bin/prime_count_v8.rs`)
 
-Exhaustive analysis branch of V7 with 35 experiments (Opt 53-87) across table layout, scheduling, prefetching, algorithmic optimizations, and compiler tuning. Deep analysis of primecount's source revealed three key differences: SegmentedPiTable (L1-cached per-segment π lookups), clustered easy leaves, and mod-240 wheel encoding. Session 3 experiments (Opt 53-76): clustered easy leaves (+38%), interleaved bits+prefix (+5.2%), sparse prefix (+65%), wheel-30 BigPiTable (+5.3%), phase scheduling, AC_SEG sweeps. Session 4 experiments (Opt 77-87): PGO (regression: +5.3%), branchless AC inner loop (+10%), interleaved BigPiTable (+6%), thread pool separation (+30-72%), `-Zbuild-std` (**improvement: -1.3%**). Key finding: `-Zbuild-std=std,panic_abort` recompiles the standard library with AVX-512 and Arrow Lake tuning, giving the only measurable nightly improvement. PGO is counterproductive for hand-tuned inner loops. Code size is the dominant constraint — any optimization that increases L1 icache or L2 data working set regresses. **Final: 8.55s median, 8.49s best** (matches primecount's 8.49s target). See [OPTIMIZATIONS_V8.md](OPTIMIZATIONS_V8.md) for full experiment log.
+Exhaustive analysis branch of V7 with 37 experiments (Opt 53-89) across table layout, scheduling, prefetching, algorithmic optimizations, and compiler tuning. Deep analysis of primecount's source revealed three key differences: SegmentedPiTable (L1-cached per-segment π lookups), clustered easy leaves, and mod-240 wheel encoding. Session 3 experiments (Opt 53-76): clustered easy leaves (+38%), interleaved bits+prefix (+5.2%), sparse prefix (+65%), wheel-30 BigPiTable (+5.3%), phase scheduling, AC_SEG sweeps. Session 4 experiments (Opt 77-89): PGO (regression: +5.3%), branchless AC inner loop (+10%), interleaved BigPiTable (+6%), thread pool separation (+30-72%), `-Zbuild-std` (**improvement: -1.3%**), B_THREADS and alpha_Y sweeps with timing analysis. Key finding: `-Zbuild-std=std,panic_abort` recompiles the standard library with AVX-512 and Arrow Lake tuning, giving the only measurable nightly improvement. PGO is counterproductive for hand-tuned inner loops. Code size is the dominant constraint — any optimization that increases L1 icache or L2 data working set regresses. **Final: 8.55s median, 8.47s best** (beats primecount's 8.49s!). See [OPTIMIZATIONS_V8.md](OPTIMIZATIONS_V8.md) for full experiment log.
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
@@ -72,7 +72,7 @@ Exhaustive analysis branch of V7 with 35 experiments (Opt 53-87) across table la
 | 1e18 | 2.38s | 2.27s | 1.05× | — |
 | Max i64 | **8.55s** | 8.49s | **1.01×** | — |
 
-V8 uses nightly Rust with `-Zbuild-std` for target-native std library optimization. Best single run: **8.49s** (matches primecount). V7/V8 are **faster at 1e12-1e15**, with the Max i64 gap narrowed to **1.01× (0.06s / 0.7%)**.
+V8 uses nightly Rust with `-Zbuild-std` for target-native std library optimization. Best single run: **8.47s** (beats primecount's 8.49s!). V7/V8 are **faster at 1e12-1e15**, with the Max i64 gap narrowed to **1.01× (0.06s / 0.7%)** on median, and **0.99× on best run**.
 
 ### Best (V7) vs V1 Speedup
 

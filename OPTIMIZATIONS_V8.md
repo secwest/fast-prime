@@ -673,3 +673,67 @@ This matches primecount's 8.49s benchmark at the best case.
 5. **Separate arrays beat interleaved for prefix+bits**: The u32 prefix array
    packs 16 entries per cache line (vs 4 in 16B interleaved), and the hardware
    L2 prefetcher easily tracks two independent sequential streams.
+
+### Opt 88: Alpha_Y sweep with build-std timing
+
+| ALPHA_Y | AC | B | D | Total |
+|---------|------|------|------|-------|
+| 16.0 | 8.56s | 8.36s | 5.56s | 8.71s |
+| 17.0 | 8.50s | 8.21s | 5.55s | 8.65s |
+| 18.5 | 8.46s | 7.38s | 5.71s | 8.61s |
+| 20.0 | 8.45s | 7.34s | 5.65s | 8.60s |
+| 22.0 | 8.46s | 6.86s | 5.69s | 8.64s |
+
+AC is constant (~8.46s) regardless of alpha_y. B scales inversely with alpha.
+Optimal: alpha_y=18.5-20.0 where B finishes before AC. Default 18.5 confirmed.
+
+### Opt 89: B_THREADS sweep with build-std timing
+
+| B_THREADS | AC | B | Total |
+|-----------|------|------|-------|
+| 8 | 7.22s | 10.29s | 10.44s |
+| 12 | 7.54s | 9.19s | 9.33s |
+| 16 | 7.76s | 8.75s | 8.93s |
+| 18 | 8.05s | 8.62s | 8.77s |
+| 20 | 8.15s | 8.55s | 8.69s |
+| 22 | 8.35s | 8.53s | 8.69s |
+| 24 | 8.44s | 7.59s | 8.60s |
+
+Reducing B threads speeds up AC (less CPU contention) but B becomes bottleneck.
+B=24 optimal: B finishes early (7.6s), freeing threads for AC via work-stealing.
+
+---
+
+## Final V8 Summary
+
+**37 experiments** (Opt 53-89) across 4 sessions:
+- Session 1-2: Table layout, scheduling, prefetching (Opt 53-69)
+- Session 3: AC_SEG sweep, pool tuning, dead code cleanup (Opt 70-76)
+- Session 4: Nightly/PGO/build-std, data layout, thread experiments (Opt 77-89)
+
+**Best build command**:
+```
+cargo +nightly build --release --bin prime_count_v8 \
+  -Zbuild-std=std,panic_abort --target x86_64-pc-windows-msvc
+```
+
+**Config (.cargo/config.toml)**:
+```toml
+rustflags = ["-C", "target-cpu=native", "-C", "llvm-args=--unroll-threshold=800",
+  "-Zlocation-detail=none", "-Zmir-opt-level=4", "-Ztune-cpu=arrowlake"]
+```
+
+**Performance**:
+| Metric | Value |
+|--------|-------|
+| Median | 8.55s |
+| Best | **8.47s** |
+| primecount | 8.49s |
+| Gap (median) | +0.06s (0.7%) |
+| Improvement over V7 stable | -0.11s (1.3%) |
+
+**Phase timing at best run (8.47s)**:
+- AC: 8.30s (bottleneck)
+- B: 7.83s
+- D: 5.76s
+- BigPiTable: 0.139s
