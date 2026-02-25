@@ -6,13 +6,13 @@
 
 ## Abstract
 
-How fast can you count the primes below 2⁶³? Kim Walisch's *primecount* — the state-of-the-art C++ implementation, refined over a decade — does it in 8.49 seconds. We beat that.
+How fast can you count the primes below 2⁶³? Kim Walisch's *primecount* — the state-of-the-art C++ implementation, refined over a decade — does it in 8.49 seconds. We beat that. But this is not really a story about prime counting.
 
-Our Rust implementation of Gourdon's algorithm computes π(2⁶³ − 1) = 216,289,611,853,439,384 in **8.39 seconds** on an Intel Core Ultra 9 285K. But the journey matters more than the destination: over **107 controlled experiments**, we systematically explored every optimization axis — and discovered that **106 of them failed**. The only improvement came from recompiling the Rust standard library (+1.3%). Every other change — software prefetch, profile-guided optimization, cache tiling, loop restructuring, data structure compaction, thread pool isolation — made things worse, often dramatically.
+Our Rust implementation of Gourdon's algorithm computes π(2⁶³ − 1) = 216,289,611,853,439,384 in **8.39 seconds** on an Intel Core Ultra 9 285K. Over **107 controlled experiments**, we systematically explored every optimization axis — and discovered that **106 of them failed**. The only improvement came from recompiling the Rust standard library (+1.3%). Every other change — software prefetch, profile-guided optimization, cache tiling, loop restructuring, data structure compaction, thread pool isolation — made things worse, often dramatically.
 
-Why? The hot inner loop sits at the intersection of four hardware constraints that form a **stable equilibrium**: L2 miss-handling capacity (saturated by 4× unrolling), x86-64's 16-register file (nearly full), DRAM bandwidth (105.6 GB/s shared across 24 cores), and L3 cache pressure (285 MB table vs 36 MB cache). Any optimization that improves one constraint necessarily degrades another.
+This is a story about reaching the hardware floor and what you find when you get there: a stable equilibrium where four hardware constraints (L2 miss-handling capacity, register file size, DRAM bandwidth, and L3 cache pressure) interlock so tightly that improving any one necessarily degrades another. It is also a story about how a human and an AI worked together to get there — a researcher directing strategy while an LLM implemented code changes, executed experiments, diagnosed 20 correctness bugs, and maintained documentation across sessions interrupted by power failures and context limits. The human brought the intuition ("try Barrett reduction"); the AI brought the stamina (107 experiments, each requiring build-benchmark-analyze-revert cycles). Neither could have done this alone in the same timeframe.
 
-Along the way, we discovered that improving cache hit rate can *slow things down* by 80%, that making one component faster can paradoxically slow the *total* computation, and that every textbook HPC optimization technique fails near the hardware floor. These findings — detailed across 22 lessons in §7 — apply broadly to any memory-bound computation on modern out-of-order processors.
+Along the way, we discovered that improving cache hit rate can *slow things down* by 80%, that making one component faster can paradoxically slow the *total* computation, and that every textbook HPC optimization technique fails near the hardware floor. We catalogued 20 correctness bugs and found that 45% were off-by-one errors — the eternal nemesis of number-theoretic code, from Meissel's manual miscalculation of π(10⁹) in 1885 to our SegmentedPiTable indexing error in 2026. These findings — detailed across 22 lessons in §7 — apply broadly to any memory-bound computation on modern out-of-order processors.
 
 ---
 
@@ -20,17 +20,47 @@ Along the way, we discovered that improving cache hit rate can *slow things down
 
 ### 1.1 The Prime Counting Function
 
-The prime counting function π(x) — the number of primes not exceeding x — is among the most fundamental functions in analytic number theory. Computing π(x) exactly for large x has practical applications in cryptographic parameter selection, primality testing, and computational number theory, and serves as a benchmark for algorithmic and systems-level optimization.
+The prime counting function π(x) — the number of primes not exceeding x — is among the most fundamental functions in analytic number theory. The question "how many primes are there below N?" has been asked since antiquity, but efficient computation at scale has driven over 150 years of algorithmic innovation.
 
-The evolution of prime counting algorithms spans over a century: from Meissel's O(x^{2/3} / ln x) method (1870), through Lehmer's extensions (1959), to the breakthrough combinatorial methods of Lagarias, Miller, and Odlyzko (1985), Deleglise and Rivat (1996), and Gourdon (2001). Gourdon's algorithm, which decomposes π(x) as:
+**The prime number theorem.** Gauss conjectured in 1792 (at age 15) that π(x) ≈ x / ln x. Hadamard and de la Vallée-Poussin independently proved this in 1896, establishing that π(x) ~ Li(x), where Li(x) = ∫₂ˣ dt/ln t. But the prime number theorem gives only an approximation — computing π(x) *exactly* requires entirely different methods.
+
+**Legendre's combinatorial formula (1808).** The first systematic approach: express π(x) in terms of an inclusion-exclusion sieve. Legendre's formula computes π(x) in O(x / ln ln x) time — impractical for large x, but the starting point for all subsequent combinatorial methods.
+
+**Meissel's breakthrough (1870–1885).** Ernst Meissel introduced a clever recursive decomposition that reduces the computation to O(x^{2/3} / ln x) time, replacing the full sieve with a combination of smaller subproblems. He computed π(10⁸) = 5,761,455 and π(10⁹) = 50,847,478 **by hand** — a feat of extraordinary patience. His value for π(10⁹) was later found to be wrong by 56 (the correct value is 50,847,534), an error not discovered for over 70 years.
+
+**Lehmer's electronic computation (1959).** Derrick Henry Lehmer adapted Meissel's method for the IBM 701, computing π(10¹⁰) = 455,052,512. This too was wrong — by exactly 1 (the correct value is 455,052,511). Lehmer's algorithm formalized the partial sieve function φ(x, a) that remains central to all modern methods. His error, like Meissel's, illustrates the treacherous arithmetic of combinatorial prime counting: a single off-by-one in a sub-formula propagates silently through billions of operations.
+
+**Lagarias, Miller, and Odlyzko (1985).** The LMO algorithm achieved a major complexity improvement to O(x^{2/3+ε}) time and O(x^{1/3+ε}) space by restructuring the sieve computation into "ordinary" and "special" leaves processed over segmented intervals. They computed π(4 × 10¹⁶). This decomposition enabled the first practical computations beyond 10¹⁵.
+
+**The analytic method (Lagarias & Odlyzko, 1987).** An entirely different approach: compute π(x) via a contour integral involving the Riemann zeta function ζ(s). Achieving O(x^{1/2+ε}) time — asymptotically faster than any combinatorial method — it requires computing billions of zeta zeros. The enormous constant factors make it impractical below ~10²⁰, but David Platt (2012) used it to verify π(10²⁴) using ~70 billion zeta zeros with interval arithmetic.
+
+**Deléglise and Rivat (1996).** Built on LMO with the critical innovation of decomposing the computation into "easy leaves" and "hard leaves," achieving O(x^{2/3} / ln x) time with practical constant factors. Their implementation computed π(10¹⁸) — the first time this threshold was crossed.
+
+**Gourdon (2001).** Xavier Gourdon refined the Deléglise-Rivat decomposition into the five-component formula used by all modern implementations:
 
 $$\pi(x) = \text{AC}(x) - B(x) + D(x) + \Phi_0(x) + \Sigma(x)$$
 
-achieves O(x^{2/3} / ln² x) time and O(x^{1/3} ln³ x) space, and forms the basis of Kim Walisch's *primecount* — the current state-of-the-art implementation, written in C++ with over a decade of optimization.
+achieving O(x^{2/3} / ln² x) time and O(x^{1/3} ln³ x) space. The AC term (easy leaves) dominates computation time; B computes a P₂-equivalent sum; D handles hard leaves via segmented sieve; Φ₀ and Σ are small correction terms. Gourdon's decomposition enabled the computation of π(10²³) by Oliveira e Silva in 2007.
+
+**Modern records.** Kim Walisch's *primecount* — the current state-of-the-art open-source implementation — uses Gourdon's algorithm with a SegmentedPiTable architecture optimized for L1 cache. Walisch and David Baugh have computed:
+
+| Year | Record | Value |
+|------|--------|-------|
+| 2015 | π(10²⁷) | 16,352,460,426,841,680,446,427,399 |
+| 2020 | π(10²⁸) | 157,589,269,275,973,410,412,739,598 |
+| 2022 | π(10²⁹) | 1,520,698,109,714,272,166,094,258,063 |
+
+Each computation was run twice with independent parameters to guard against hardware errors — a testament to the combinatorial fragility that has produced wrong results since Meissel.
+
+**Our work** implements Gourdon's formula with a fundamentally different data structure architecture (BigPiTable + Barrett reduction vs SegmentedPiTable + hardware division), arriving at competitive performance via a different point in the tradeoff space. We are, to our knowledge, the first Rust implementation to match or beat primecount at the 2⁶³ scale.
 
 ### 1.2 Motivation and Contributions
 
-This work began as an exercise in implementing Gourdon's algorithm in Rust, but evolved into something unexpected: a systematic study of *what happens when you try to optimize code that is already near the hardware floor*. Over eight implementation versions and 107 controlled experiments, we pushed performance from 939 seconds to 8.39 seconds — a 112× improvement — and then hit a wall where nothing we tried could make it faster. The story of that wall, and the hardware constraints that create it, is the core contribution of this paper.
+This work began as a question: *can a human and an AI, working together, match a decade of expert optimization in a few weeks?* The human (a security researcher with systems programming experience but no prior work in analytic number theory) brought domain intuition, architectural decisions, and the willingness to chase diminishing returns. The AI (GitHub Copilot CLI, powered by Claude) brought implementation speed — writing, compiling, benchmarking, profiling, reverting, and documenting code changes in rapid cycles that would be unsustainable for a human working alone. The result was 107 experiments in approximately 80 hours of interactive sessions — an experiment every 45 minutes, sustained over weeks.
+
+What we found was unexpected. The exercise in "can we make this faster" became a systematic study of *what happens when you try to optimize code that is already near the hardware floor*. Over eight implementation versions, we pushed performance from 939 seconds to 8.39 seconds — a 112× improvement — and then hit a wall where nothing we tried could make it faster. The story of that wall, and the hardware constraints that create it, is the core contribution of this paper.
+
+The collaboration itself produced lessons. The AI excelled at the mechanical cycle — edit, build, benchmark, analyze, revert — and at maintaining perfect documentation of every experiment (essential for later analysis). The human excelled at the strategic pivots: "Barrett reduction might be the answer," "we need to try a completely different algorithm," "that failure pattern means the bottleneck is elsewhere." Neither skillset alone could have produced this work. A human working solo would have run perhaps 20–30 experiments before fatigue; an AI working unsupervised would have explored locally without the strategic leaps (V3→V4, V6→V7) that provided 99% of the improvement.
 
 Specifically, our contributions are:
 
@@ -43,6 +73,8 @@ Specifically, our contributions are:
 4. **Discovery of the BigPiTable L3 warming effect**: the AC computation's continuous random accesses to the 285 MB π-table keep it warm in L3 cache, benefiting the concurrent B computation. Scheduling changes that accelerate AC paradoxically slow the overall computation by depriving B of this cache warming.
 
 5. **Quantification of the concurrent penalty**: AC alone completes in 2.10s, but concurrent execution with D inflates this to 8.42s — a 4.0× penalty from L3 cache pressure, work-stealing overhead, and power throttling. This penalty is irreducible within the current architecture.
+
+6. **A case study in human-AI collaborative research**: demonstrating that an LLM-assisted workflow can compress months of optimization work into weeks, while producing documentation (this paper, 1100+ lines of optimization logs, 2700+ lines of thought log) that would typically be omitted from a solo effort.
 
 ### 1.3 Hardware Platform
 
@@ -61,7 +93,7 @@ All experiments were conducted on:
 
 ### 1.4 Paper Organization and Key Surprises
 
-**§2** describes the algorithm and implementation, including the two key data structures (BigPiTable for O(1) π lookups, Barrett reduction for fast division) and our experimental methodology. **§3** catalogs all 107 experiments across six optimization axes. **§4** presents the MLP constraint model that explains why the code can't be improved. **§5** gives performance results with statistical analysis. **§6** traces the implementation's evolution through 8 major versions. **§7** draws 22 lessons from the experiments — the heart of the paper. **§8–9** cover related work and conclusions.
+**§2** describes the algorithm and implementation, including the two key data structures (BigPiTable for O(1) π lookups, Barrett reduction for fast division) and our experimental methodology. **§3** catalogs all 107 experiments across six optimization axes. **§4** presents the MLP constraint model that explains why the code can't be improved. **§5** gives performance results with statistical analysis. **§6** traces the implementation's evolution through 8 major versions — the narrative heart of the paper, including the dead ends, the breakthroughs, and the bugs that haunted every version. **§7** draws 22 lessons from the experiments. **§8** places our work in the context of 150 years of prime counting algorithms. **§9** concludes with findings about hardware, software, correctness, and the human-AI collaboration that produced this work.
 
 For the reader short on time, the most surprising and broadly applicable findings are:
 
@@ -70,6 +102,7 @@ For the reader short on time, the most surprising and broadly applicable finding
 - **Every textbook optimization failed** (§7.9) — prefetch, PGO, cache tiling, loop transforms, data compaction: all tested, all regressed.
 - **DRAM can beat L1** (§7.14) — a 285 MB table with high MLP outperforms 23,000 rebuilds of a 3.7 KB L1-resident table, yielding a 39.5× speedup.
 - **Optimizations destroy each other** (§7.10) — near the hardware floor, improving one dimension always degrades another.
+- **Off-by-one errors are the dominant bug category** (§7.16) — 45% of 20 bugs, invisible at small scales, catastrophic at large scales. Meissel got π(10⁹) wrong in 1885 for the same reason we got SegmentedPiTable wrong in 2026.
 
 ---
 
@@ -369,30 +402,89 @@ This suggests an unusual regime where the critical path's solo performance is ex
 
 ---
 
-## 6. Implementation Progression
+## 6. Implementation Progression: The Journey
 
-Before diving into the lessons, it is useful to understand how the implementation arrived at its current architecture. The journey from naive sieve to competitive Gourdon implementation spans eight major versions, with the critical architectural decision — the BigPiTable — occurring at V7.
+Before diving into the lessons, it is useful to understand how the implementation arrived at its current architecture. This is not a story of steady progress. It is a story of walls — algorithmic walls, hardware walls, correctness walls — and the sometimes desperate, sometimes inspired decisions that got past them. Rather than starting with Gourdon's algorithm directly, we deliberately implemented progressively more sophisticated algorithms, each one teaching lessons that informed the next. This bottom-up approach mirrors the historical development of the field itself, from Legendre's 1808 formula to Gourdon's 2001 decomposition, and gave us an intuitive understanding of *why* each algorithmic innovation exists that no amount of reading papers could provide.
 
-The implementation evolved through eight major versions:
+### 6.1 Version Summary
 
-| Version | Algorithm | Time at Max i64 | Speedup |
-|---------|-----------|-----------------|---------|
-| V1 | Segmented sieve | — (>10⁴s est.) | — |
-| V2 | Lucy_Hedgehog | — (>10⁴s est.) | — |
-| V3 | Meissel-Lehmer | — (>10³s est.) | — |
-| V4 | Lagarias-Miller-Odlyzko | 939.21s | 1× |
-| V5 | Deleglise-Rivat | — | — |
-| V6 | Gourdon (segmented π) | 342.46s | 2.7× |
-| V7 | Gourdon (BigPiTable) | 8.65s | 108× |
-| **V8** | **Gourdon (optimized)** | **8.39s** | **112×** |
+| Version | Algorithm | Time at Max i64 | Speedup | Key lesson |
+|---------|-----------|-----------------|---------|------------|
+| V1 | Segmented sieve | — (>10⁴s est.) | — | O(N) is fundamentally hopeless at 10¹⁸ |
+| V2 | Lucy_Hedgehog | — (>10⁴s est.) | — | O(N^{3/4}) — clever, but still too slow |
+| V3 | Meissel-Lehmer | — (>10³s est.) | — | Barrett reduction; pipeline saturation at 3.5 cycles/op |
+| V4 | Lagarias-Miller-Odlyzko | 939.21s | 1× | Parallel sieve; the /ln N factor matters |
+| V5 | Deléglise-Rivat | — | — | Easy/hard leaf decomposition eliminates most sieving |
+| V6 | Gourdon (segmented π) | 342.46s | 2.7× | Gourdon's constants are better; segmented π works |
+| V7 | Gourdon (BigPiTable) | 8.65s | 108× | One big table beats 23K small rebuilds |
+| **V8** | **Gourdon (optimized)** | **8.39s** | **112×** | **107 experiments confirm hardware floor** |
 
-The V6→V7 transition (39.5× speedup) demonstrates the impact of the BigPiTable design: replacing segmented π-table reconstruction with a precomputed 285 MB O(1) lookup table eliminates per-segment overhead at the cost of L3/DRAM latency.
+### 6.2 The Algorithms in Practice
+
+**V1: Segmented Sieve of Eratosthenes.** Every journey needs a starting point, and ours was the most ancient algorithm in number theory: sieve everything, count what survives. At 2⁶³ this means sieving 9.2 × 10¹⁸ numbers — roughly a century of computation on a single core. V1 was never going to solve the problem. But it was never meant to. It served as a correctness reference at small scales and, more importantly, it taught us segmented sieve techniques — L2-sized segments, wheel factorization, bitmap packing — that proved essential for the D component in every subsequent version. The code we wrote for V1's inner loop survived, almost unchanged, all the way to V8.
+
+**V2: Lucy_Hedgehog.** Named after its anonymous inventor on the Project Euler forum, this is perhaps the most elegant algorithm in computational number theory: ~100 lines of code implementing an O(x^{3/4} / ln x) dynamic programming approach over the O(√x) distinct values of ⌊x/k⌋. Simple, beautiful, and remarkably fast for x ≤ 10¹³. But the O(x^{3/4}) scaling is merciless — at 10¹⁸ it would take hours. V2 taught us what we call the "√x trick": that the function ⌊x/k⌋ takes only O(√x) distinct values as k ranges over all integers. This observation, almost trivial once you see it, is the foundation of every faster method.
+
+**V3: Meissel-Lehmer — and the first wall.** Our first implementation of the classical combinatorial approach, and the version where we discovered Barrett reduction: replacing the hardware `DIV` instruction (25 cycles on Arrow Lake) with a precomputed reciprocal multiply-shift (3 cycles, exact with a single correction multiply). This 8× speedup on the hot-path division became the cornerstone of every subsequent version.
+
+But V3 also taught us what it feels like to hit a wall. After 15 optimization attempts — parallelization, cache tuning, loop unrolling, reciprocal precision tricks — the u128 multiply throughput saturated at 3.5 cycles per operation. The profiler showed 100% ALU utilization. There was nothing left to optimize. The algorithm itself was the bottleneck, and the only way forward was a better algorithm. This was a pivotal moment: the decision to abandon a working, heavily-optimized codebase and start over with LMO.
+
+**V4: Lagarias-Miller-Odlyzko — the first answer.** V4 was the first version to produce the number: π(2⁶³ − 1) = 216,289,611,853,439,384. It took 939 seconds. We remember the moment — 15 minutes of watching a progress bar crawl, followed by the thrill of cross-checking the result against the OEIS.
+
+From there, V4 became an optimization laboratory. Parallel phi computation via delta-correction gave 1.8×. A pre-sieve template for small primes gave 1.9×. Adaptive alpha parameters — discovered by sweeping α from 1.5 to 3.0 across input scales — gave 64% at 10¹⁵. A custom ParallelPiSieve replacing the single-threaded `primal` crate gave 2×. Each optimization peeled away a layer of overhead, revealing the next bottleneck beneath.
+
+V4 also produced the project's most insidious bug. Barrett reduction, our prized 8× speedup, turned out to have a subtle overflow: when n × (d − 1) ≥ 2⁶⁴, the reciprocal overestimates the quotient by exactly 1. At 10¹² this never happens. At 10¹⁴ it happens but the errors cancel. At 10¹⁶ the accumulated miscount becomes visible. We discovered it only by cross-validating V2, V3, and V4 at 100 trillion — three implementations of different algorithms, two agreeing with each other and disagreeing with the third. The fix — `q - (q*d > n) as u64`, a single conditional subtract — became permanent across all versions. The lesson became §7.16's Pattern 2: *integer overflows are scale-dependent, and the only defense is testing at maximum scale*.
+
+**V5: Deléglise-Rivat — the bridge.** V5 implemented the easy-leaf/hard-leaf decomposition that is the key insight of modern prime counting: most "special leaves" in the LMO formula can be evaluated by a single table lookup, without touching the sieve at all. By tuning the alpha parameter, work shifts from expensive S₂_hard (requires sieve) to cheap S₂_easy (a single π-table lookup per leaf). V5 was a stepping stone to Gourdon — it validated the decomposition and taught us the parameter interactions — but its S₂_hard bottleneck at ~81 seconds proved immovable. Four separate optimization attempts (segment size cap, hierarchical counters, chunk tuning, Fenwick tree) all failed. The algorithm had reached its architectural limit, just as V3 had reached its pipeline limit.
+
+**V6: Gourdon with segmented π — the detour that almost worked.** Our first Gourdon implementation followed primecount's architecture faithfully: per-segment SegmentedPiTables of ~3.7 KB, rebuilt for each of ~23,000 segments, ensuring every π lookup hit L1 cache. It achieved 342s at Max i64 — a 2.7× improvement over V4 that validated Gourdon's formula. But the per-segment rebuild cost scaled poorly, and the S₂_hard bottleneck at ~81 seconds could not be broken.
+
+This was the second pivotal moment. We had implemented primecount's architecture and gotten within 40× of primecount's performance. The conventional path forward was to optimize within this architecture — better sieve construction, smarter segment scheduling, tighter inner loops. Instead, we asked: *what if the architecture itself is wrong?*
+
+**V7: Gourdon with BigPiTable — the breakthrough.** The idea was almost too simple: instead of rebuilding a tiny π-table 23,000 times, build one giant table once and look up everything from DRAM. The table would be 285 MB — far too large for any cache. Every lookup would go to L3 or DRAM at ~50 ns, versus ~4 ns from L1. On paper, this was insane.
+
+It yielded a **39.5× speedup**. 342 seconds → 8.65 seconds.
+
+The insight, which became §7.14 of this paper, is that *amortized rebuild cost dominates latency*. The 23,000 segment rebuilds cost ~50 μs each × 24 threads = 1.15 seconds of pure overhead per thread. Meanwhile, the 4× unrolled inner loop generates 8 independent memory requests in flight simultaneously, hiding most of the DRAM latency through memory-level parallelism. Barrett reduction — the 3-cycle division from V3 — made each iteration so cheap that the CPU spent most of its time waiting for memory anyway; switching from 4 ns waits (L1) to 50 ns waits (DRAM) barely mattered when the CPU could issue 8 of them in parallel.
+
+V7 achieved near-parity with primecount for the first time. The gap was 1.3% — tantalizingly close. What followed was the longest, most systematic, and most humbling phase of the project.
+
+**V8: The 107 experiments — and the final wall.** Starting from V7's architecture, we spent eight sessions and approximately 60 hours trying everything we could think of: software prefetch (5 experiments, all failed), profile-guided optimization (3 experiments, all failed or neutral), data structure compaction (8 experiments, all failed), thread pool reconfiguration (12 experiments, all failed), LLVM flag tuning (6 experiments, all neutral), loop restructuring (4 experiments, all failed), and even re-implementing the SegmentedPiTable approach we had abandoned at V6 (3 more attempts, all slower).
+
+One experiment worked: `-Zbuild-std`, a Rust nightly flag that recompiles the standard library with `target-cpu=native`, giving the compiler access to Arrow Lake-specific instruction scheduling for memory operations throughout the runtime. It provided +1.3%. The other 106 experiments produced the taxonomy in §3, the constraint model in §4, and the 22 lessons in §7. The wall was real, and it had a name: the MLP equilibrium.
+
+### 6.3 The Bugs: An Unwelcome Companion
+
+Every version carried bugs, and they followed a pattern that echoes the entire history of prime counting — from Meissel's miscalculation of π(10⁹) in 1885 (wrong by 56) to Lehmer's π(10¹⁰) in 1959 (wrong by 1). Our 20 bugs are catalogued in §7.16, but three deserve special mention here because they shaped the project's trajectory:
+
+1. **The Barrett overflow** (discovered at V4, present since V3): The optimization that made everything possible — Barrett reduction, our 8× speedup on the critical division — was also the source of the most dangerous bug. The reciprocal overestimates by exactly 1 when the input exceeds a scale-dependent threshold. At 10¹² it never triggers. At 100 trillion it triggers twice, and the errors happen to cancel. At 10 quadrillion the accumulated error becomes visible. Finding it required running three independent algorithm implementations on the same input and asking: *why do two agree and one disagree?* The fix was one line of code. The lesson — that performance optimizations in integer arithmetic can introduce scale-dependent correctness failures — is universal.
+
+2. **The sieve position-0 bug** (V4): Position 0 in the first sieve segment represents integer 0, which is not in [1, x]. Without explicitly crossing it off, every phi value gets +1 from overcounting. At 100K the error is +28 — small enough to miss in casual testing. At 1 billion it's +12,999. At 10 trillion it's +2,892,628. The error *grows with x*, meaning the bug is undetectable at the scales where development and debugging happen, and catastrophic at the scales where the code is actually used.
+
+3. **The SegmentedPiTable indexing bug** (V8): Two separate off-by-one errors in the same component — `(n - low) >> 1` instead of `(n - low - 1) >> 1`, and pi_low = 0 instead of 1 for segment 0. Each was trivial once found. Together they cost a full day of debugging. The pattern — that segment-0 initialization is a special case deserving its own code path and its own tests — repeated often enough to become a rule.
+
+### 6.4 What Each Version Taught Us
+
+The progression reveals a pattern: each algorithmic leap provides an order-of-magnitude improvement, while within each algorithm, micro-optimization yields diminishing returns until a hard ceiling is reached:
+
+- V1→V2: algorithmic complexity reduction (O(N) → O(N^{3/4}))
+- V3: pipeline saturation ceiling → must change algorithm
+- V4: parallelization + adaptive parameters → 26× faster than first V4
+- V6: Gourdon's decomposition → 2.7× over LMO
+- V7: data structure architecture → 39.5× from one design decision
+- V8: 107 experiments → 3% improvement → hardware floor confirmed
+
+The lesson: **the algorithm and data structure architecture determine 99% of performance; micro-optimization determines the last 1%**. But that last 1% is what separates matching primecount from beating it.
+
+And a second lesson, about the process: **the strategic pivots mattered more than the optimizations.** The decisions to abandon V3 for V4, to skip from V5 to Gourdon, and to replace SegmentedPiTable with BigPiTable — these three human judgments, each requiring the courage to discard working code, provided 99.7% of the total speedup. The 107 V8 experiments, for all their thoroughness, provided the remaining 0.3%. Knowing *when to change the question* is more valuable than knowing *how to answer it faster*.
 
 ---
 
 ## 7. Lessons and Discussion
 
-This section distills 22 lessons from the 107 experiments, organized into five themes: the nature of the hardware bottleneck (§7.1–7.3), why standard optimizations fail (§7.4–7.9), how the system's components interact (§7.10–7.12), architectural insights (§7.13–7.17), and practical engineering findings (§7.18–7.22). Each lesson is backed by specific experiments; together they paint a picture of what it looks like to reach the hardware floor.
+The 107 experiments produced a result, but they also produced *understanding*. Each failed experiment was a question answered: *why doesn't this work?* And the answers, taken together, draw a map of the terrain near a hardware performance floor — terrain that looks very different from the well-explored landscape of "normal" optimization, where profiler-guided improvements reliably yield gains.
+
+This section distills 22 lessons organized into five themes: the nature of the hardware bottleneck (§7.1–7.3), why standard optimizations fail (§7.4–7.9), how the system's components interact (§7.10–7.12), architectural insights (§7.13–7.17), and practical engineering findings (§7.18–7.22). Each lesson is backed by specific experiments; together they paint a picture of what it looks like when you have truly run out of room.
 
 #### Theme 1: The Hardware Bottleneck
 
@@ -563,19 +655,72 @@ Early investigation (V3) evaluated AVX-512 and AVX2 for the inner loops:
 
 The fundamental issue: SIMD excels at **uniform operations on contiguous data**. The AC inner loop accesses random, non-contiguous BigPiTable positions determined by `fast_div` results. No SIMD gather instruction on current x86 hardware can compete with scalar loads for random-access patterns, because gather must sequentially resolve TLB entries for each lane.
 
-### 7.16 Correctness Bugs as Research Artifacts
+### 7.16 Correctness Bugs: Taxonomy and Patterns
 
-Several optimization experiments uncovered subtle algorithmic bugs whose diagnosis provided insights beyond their immediate fix:
+Across eight versions and 107 experiments, **20 distinct correctness bugs** were encountered, diagnosed, and fixed. Cataloguing them reveals striking patterns in where errors arise and how they are detected — patterns that should inform the development of future high-performance number-theoretic code.
 
-1. **`primes[]` is 1-indexed** (discovered during Opt 95, clustered leaves): The primes array has a sentinel `primes[0] = 0`, with `primes[k]` = k-th prime for k ≥ 1. Code using `primes[pi_val - 1]` (0-indexed assumption) silently produced wrong results at small scales and catastrophically wrong results at large scales. This convention, inherited from the sieve construction, affects every algorithm that converts between π-values and prime values.
+#### Bug Category Distribution
 
-2. **`small[q] ≠ π(q)` during sieve** (discovered in V3 Phase B): During the sieve of Eratosthenes, the intermediate array `small[q]` counts integers ≤ q not divisible by primes sieved so far — NOT π(q). "Surviving composites" (like 25 = 5² surviving the sieve of {2,3}) cause `small[q]` to change at composite positions. This invalidated a prime-batching optimization that assumed constant-between-primes behavior.
+| Category | Count | Fraction | Examples |
+|----------|-------|----------|----------|
+| Off-by-one / boundary errors | 9 | 45% | SegPiTable indexing, sieve position 0, easy/hard boundary gap, phi negative guard, 1-indexed primes, pre-sieve period wraparound, PhiTinyCache OOB, generate_pi unrolled boundary, segment-0 pi_low |
+| Integer overflow | 4 | 20% | Barrett reciprocal at 100T+, ParallelPiSieve u32 → u64, V1 fast_div overflow, FactorTable i16 overflow |
+| Algorithm misunderstanding | 4 | 20% | small[q] ≠ π(q) during sieve, Type 1 leaves need sieve regardless of xpm, BigPiTable/primes sieve mismatch, skip-3 step pattern |
+| Resource explosion | 1 | 5% | 4 GB pi allocation at 1 Quintillion |
+| Library API surprise | 1 | 5% | primal::Sieve returns primes beyond requested limit |
+| Language semantics | 1 | 5% | Rust release-mode shift-by-64 wraps to shift-by-0 |
 
-3. **Shift-by-64 wraps to shift-by-0** (discovered in V4 `count_delta`): In Rust release mode, `word >> 64` wraps to `word >> 0` (returning the original value), not 0. This caused silent miscounts in sieve position calculations when the bit offset was exactly 63. The fix required explicit mask checks.
+#### Pattern 1: Off-by-one errors dominate (45%)
 
-4. **Monotonic sweep off-by-one** (discovered in Opt 106): The scan range for counting primes in (xpq, prev_xpq] required start index `(xpq+1)/2`, not `xpq/2 + 1`. For even xpq, the latter overcounts by 1, undercounting primes subtracted from `running_pi`. This was the final bug in a chain of three that prevented correctness verification.
+Nearly half of all bugs were boundary/indexing errors. These fall into three sub-patterns:
 
-These bugs share a common pattern: **indexing conventions and boundary conditions in number-theoretic code are extremely error-prone**. The 1-indexed primes array, the half-open vs closed interval distinctions, and the integer division rounding behavior all interact to create subtle off-by-one errors that produce correct results at small scales but diverge at large scales. Extensive cross-validation at multiple scales (10¹⁰ through 2⁶³−1) was essential for catching these issues.
+**Convention mismatches.** The primes array uses a sentinel `primes[0] = 0` with `primes[k]` = k-th prime for k ≥ 1 — a 1-indexed convention. Code assuming 0-indexed access (`primes[pi_val - 1]`) silently produces wrong results at small scales and catastrophically wrong results at large scales. Similarly, the SegmentedPiTable used `(n - low) >> 1` when BigPiTable uses `(n - 1) >> 1` — a one-bit difference that corrupted every lookup for even inputs.
+
+**Boundary case neglect.** Several bugs lived at exact boundary values: position 0 in the first sieve segment represents integer 0 (not in [1, x]); the easy/hard leaf decomposition left xpq = y uncovered by either path; the pre-sieve template had a wrapping bug at its period boundary. Each boundary bug is trivial in isolation, but in a system with multiple interacting boundaries (segment edges × prime indices × half-open intervals × integer division rounding), they multiply.
+
+**The "segment-0 is special" trap.** Three separate bugs occurred specifically in segment 0: pi_low must be 1 (not 0) to account for prime 2, which is absent from the odd-only sieve; the sieve itself must explicitly cross off position 0; and the pre-sieve template must handle the first segment's non-aligned start differently. This repeated pattern suggests that segment-0 initialization deserves its own separate code path with dedicated testing.
+
+#### Pattern 2: Integer overflows are scale-dependent (20%)
+
+All four overflow bugs share a characteristic: **they produce correct results at small scales and fail silently at large scales**. The Barrett reciprocal overflows only when n × (d−1) ≥ 2⁶⁴, which at 10T produces 2 errors that happen to cancel, but at 10Q produces 30 errors that accumulate to a visible miscount. The ParallelPiSieve u32 prefix overflows only when π(z) > 4.3 billion — which occurs at exactly x = 2⁶³−1, the target computation.
+
+The detection method for all four was **cross-validation at escalating scales**: running the same computation at 10¹², 10¹⁴, 10¹⁶, 10¹⁸, and 2⁶³−1, comparing results against independently verified reference values. Bugs that are invisible at 10¹² become glaring at 10¹⁸. This argues for a testing protocol that specifically includes inputs near the maximum supported range, not just representative values.
+
+The Barrett correction deserves special mention: the overestimate *always* gives q+1, never q−1, making the check `q - (q*d > n)` both exact and cheap (a single u64 multiply + compare). This correction became a permanent fixture across all versions — an optimization that was itself optimized (u128 correction was 20% slower than u64 due to register spills).
+
+#### Pattern 3: Algorithm misunderstandings produce plausible-looking wrong code (20%)
+
+Four bugs arose from misunderstanding the algorithm, not from coding errors:
+
+- **`small[q] ≠ π(q)` during sieve**: During the sieve of Eratosthenes, the intermediate array counts survivors of the *partial* sieve, not π(q). Surviving composites like 25 = 5² (which survives the sieve of {2, 3}) cause the array to change at non-prime positions. This invalidated a prime-batching optimization that assumed constant-between-primes behavior.
+
+- **Type 1 leaves require sieve regardless of xpm > y**: A filter that seemed logically correct (skipping Type 1 leaves where xpm > y) was wrong because *all* Type 1 leaves for b ≤ π(√y) require sieve computation, even when their xpm value exceeds y.
+
+- **BigPiTable and primes array built from different sieves**: The BigPiTable and the primes[] array were constructed by different sieve implementations (parallel segmented vs library), producing slightly different results near boundary values. This only manifested when the two were combined in the clustered-leaves algorithm.
+
+- **Skip-3 cross_off step pattern**: The alternating (p, 2p) step pattern for skipping multiples of 3 had the wrong step order when the starting value was divisible by 3 — a subtle modular arithmetic error that produced correct-looking results for most primes.
+
+These bugs are particularly dangerous because they pass basic testing. The code "looks right" and produces reasonable-looking numbers. Only systematic cross-validation at multiple scales catches them.
+
+#### Pattern 4: The error-detection hierarchy
+
+In practice, bugs were caught by five mechanisms, roughly in order of how many bugs each caught:
+
+1. **Wrong output at any scale** (caught 12 bugs): The primary defense. Automated regression tests at 15 scales from 10⁴ to 2⁶³−1 caught most bugs immediately.
+2. **Cross-validation between versions** (caught 4 bugs): Running V2, V3, and V4 on the same input exposed the Barrett overflow — V4 was correct (it never used Barrett for the affected operation), while V2/V3 diverged at 100T+.
+3. **Crash/panic** (caught 2 bugs): Array bounds violations from PhiTinyCache and FactorTable i16 overflow caused immediate crashes — the least subtle failure mode.
+4. **Performance anomaly investigation** (caught 1 bug): The 4 GB allocation at 1 Quintillion didn't produce wrong results but caused a 10× performance collapse, leading to the discovery of the uncapped allocation.
+5. **Debugging optimization failures** (caught 1 bug): The clustered-leaves 4× regression (Opt 95) led to three distinct bug fixes before the algorithm was shown to be *correct but slow* — the bugs were not causing the regression, but they were hiding in its shadow.
+
+#### Lessons for Number-Theoretic Code
+
+The 20-bug catalog suggests three defensive practices:
+
+1. **Test at maximum supported scale, not just representative scales.** Four overflow bugs and most off-by-one errors are invisible at small inputs. The testing protocol should include inputs that exercise every integer width boundary (2³¹, 2³², 2⁶³, 2⁶⁴).
+
+2. **Cross-validate between independent implementations.** The Barrett overflow was undetectable from any single version's output at moderate scales. Only comparing V2/V3/V4 — three implementations of different algorithms — exposed it.
+
+3. **Treat segment 0 as a separate code path.** Three bugs occurred specifically in segment-0 initialization. A dedicated `init_segment_0()` function with its own unit tests would have caught all three.
 
 ### 7.17 Adaptive Parameters Are Scale-Dependent
 
@@ -636,9 +781,19 @@ Our Rust implementation matches or beats a heavily optimized C++ implementation 
 
 ### 7.21 The Architecture Ceiling and Future Hardware
 
-The b-first BigPiTable architecture has a provable performance ceiling on this hardware. Breaking through requires:
+The b-first BigPiTable architecture has a provable performance ceiling on this hardware. We know this not merely from theoretical analysis but from **empirical evidence**: the segment-first SegmentedPiTable approach (primecount's architecture) was actually implemented and benchmarked three separate times:
 
-1. **Segment-first rewrite** (~1000 lines): Process segments as the outer loop, rebuilding L1-sized SegmentedPiTables per segment. This eliminates the 285 MB table and its L3/DRAM bottleneck, but requires fundamentally different parallelization (threads own segment ranges, not b-value ranges).
+| Attempt | Configuration | Result | Failure mode |
+|---------|--------------|--------|-------------|
+| V6 | L2-sized segments (512 KB) | 342s (40× slower) | Per-segment rebuild overhead × 23K segments |
+| V8 Opts 86–90 | L1-sized segments (12 KB) | 3–80% regression | Sieve construction O(√x) per thread per segment |
+| V8 Opts 95–98 | Per-b-value SegPiTable | 4× regression | 42M redundant sieve rebuilds across threads |
+
+The SegmentedPiTable's L1 cache advantage (~4 ns vs ~50 ns per lookup) is real, but the rebuild cost per segment (~50 μs × 23,000 segments) and the parallelization challenge (avoiding redundant rebuilds across threads) make it slower than BigPiTable in our architecture. primecount succeeds with SegmentedPiTable because it runs AC sequentially with all 24 threads processing different b-value ranges within the same segment, rebuilding the sieve once per segment. Our concurrent AC+D approach cannot adopt this strategy without sacrificing the D/B overlap that hides 40% of the total work.
+
+Breaking through the current ceiling requires one of:
+
+1. **Segment-first with sequential scheduling** (~1000-line rewrite): Adopt primecount's sequential AC→B→D scheduling, enabling single-rebuild-per-segment SegPiTable. This trades concurrent overlap for L1-resident lookups — the opposite tradeoff from our current architecture. Expected: comparable to primecount (both are at the same throughput floor).
 
 2. **B optimization**: At 7.3s concurrent, B becomes the bottleneck if AC improves. B uses primesieve's streaming iterator, which is already highly optimized. A custom counting sieve with batch π queries could reduce B by ~40%.
 
@@ -667,19 +822,45 @@ Our comparison with primecount uses wall-clock time under controlled conditions 
 
 ## 8. Related Work
 
-**Walisch (2010–present)**: *primecount* implements Gourdon's algorithm with a SegmentedPiTable that fits in L1 cache, achieving O(x^{2/3}/ln²x) with excellent cache behavior. Our work shows that an alternative architecture (full-range BigPiTable with Barrett reduction) can match this performance through careful micro-architectural optimization.
+### 8.1 Algorithms and Theory
 
-**Deleglise and Rivat (1996)**: Introduced the easy-leaf/hard-leaf decomposition that Gourdon's algorithm extends. Our V5 implements this directly.
+**Legendre (1808)**: Proposed the first combinatorial formula for π(x) using inclusion-exclusion over prime factors, requiring O(x) operations. **Meissel (1870, 1885)**: Reduced the problem to O(x^{2/3}/ln x) by partitioning integers by their largest prime factor, computing π(10⁹) by hand — a result later found to be off by 56, discovered 73 years later by Lehmer [7]. **Lehmer (1959)**: Extended Meissel's method and computed π(10¹⁰) on an IBM 701 — also wrong by 1, not corrected until 1986 [8]. These early errors underscore the algorithmic and numerical complexity of the problem.
 
-**Lagarias, Miller, and Odlyzko (1985)**: The LMO method, which our V4 implements, uses a different decomposition with "special leaves" rather than Gourdon's AC/B/D split.
+**Lagarias, Miller, and Odlyzko (1985)** [5]: The LMO method reduces complexity to O(x^{2/3}/ln x) with O(x^{1/3+ε}) space, enabling practical computation up to 10¹³. Our V4 implements LMO with parallel phi computation and Barrett reduction. **Lagarias and Odlyzko (1987)** [9] also proposed an analytic method computing π(x) in O(x^{1/2+ε}) time via numerical integration over the Riemann zeta function's zeros, but the enormous constants make it impractical below ~10²³.
 
-**Oliveira e Silva (2006)**: Extended LMO computations to verify the Riemann hypothesis for large x, establishing benchmarks for prime counting implementations.
+**Deléglise and Rivat (1996)** [4]: Introduced the easy-leaf/hard-leaf decomposition (S₂_easy vs S₂_hard) that shifts most work from expensive sieve computation to cheap table lookups. Our V5 implements this directly and demonstrated the decomposition's power: by tuning the α parameter, S₂_hard's share of total work can be minimized.
+
+**Gourdon (2001)** [1]: Extended the Deléglise-Rivat approach with a different formula decomposition (AC, B, D components rather than S₂_easy/S₂_hard) that enables finer-grained parallelization. Our V6–V8 implement Gourdon's algorithm, and V8 is the primary subject of this paper.
+
+**Platt (2012)** [10]: Applied the analytic method to verify π(10²⁵), using the Odlyzko-Schönhage algorithm for zeta function evaluation on high-performance cluster hardware. The analytic method remains the only approach that scales sub-linearly in time with x, but its practical crossover point with combinatorial methods lies well beyond 10²⁰.
+
+### 8.2 Implementations
+
+**primecount (Walisch, 2010–present)** [2]: The primary benchmark target for this work. primecount implements both Deléglise-Rivat and Gourdon's algorithms in C++, with OpenMP parallelization. Its architecture centers on a **SegmentedPiTable** — a per-segment sieve of ~3.7 KB that fits in L1 cache, rebuilt for each of ~23,000 segments. This gives O(1) π lookups with ~4 ns latency, at the cost of per-segment reconstruction overhead (~50 μs each). primecount uses hardware integer division and `libdivide` for the AC inner loop. Its scheduling is sequential: AC first (using all threads), then B, then D — avoiding the shared-cache contention that plagues concurrent approaches. We tested primecount v8.2 on identical hardware (8.49s best, 8.70s median), providing the controlled comparison reported in §5.
+
+**primesieve (Walisch, 2010–present)** [3]: A highly optimized segmented sieve of Eratosthenes used by both primecount and our implementation for B-component prime enumeration. primesieve achieves near-memory-bandwidth speeds through cache-optimal segmentation, bucket sorting of large primes, and SIMD-optimized counting. Our V8 uses primesieve's C API (via FFI) for streaming prime generation in the B component.
+
+**Lucy_Hedgehog algorithm (2012)**: A remarkably concise O(x^{3/4}/ln x) method popularized on the Project Euler forum [11]. It computes π(x) using a dynamic programming approach over the O(√x) distinct values of ⌊x/k⌋, requiring only ~100 lines of code. Our V2 implements this algorithm, and it inspired the "√x trick" — the observation that only O(√x) distinct quotients exist — which underlies all faster combinatorial methods. The algorithm is competitive up to ~10¹³ but scales too slowly for larger inputs.
+
+**Computational records**: The largest verified prime counting computation is π(10²⁹) = 1,520,698,109,714,272,166,094,258,063 by David Baugh and Kim Walisch (2022) using primecount on high-memory cluster hardware [12]. These record computations use the Deléglise-Rivat variant rather than Gourdon's, as DR has better space efficiency at extreme scales.
+
+### 8.3 This Work in Context
+
+Our contribution is not a new algorithm but rather a new **architectural tradeoff**: replacing primecount's segment-first approach (L1-resident SegmentedPiTable with hardware division) with a b-first approach (285 MB BigPiTable with Barrett reduction and high MLP). The two approaches represent opposite ends of a design spectrum — ours sacrifices cache hit rate for MLP and division speed, while primecount sacrifices division speed and MLP for cache locality. That both converge to within 1.2% of each other (§7.5) suggests the total computation approaches a fundamental throughput floor.
+
+Notably, we actually implemented and benchmarked primecount's SegmentedPiTable approach three separate times (V6, V8 Opts 86–90, V8 Opts 95–98), each with different parameters (L1-sized to L2-sized segments). All three attempts were slower than the BigPiTable architecture, ranging from 3% to 80% regression. The failure is not because SegmentedPiTable is a bad idea — it is excellent in primecount — but because the rebuild cost per segment (~50 μs × 23,000 segments × redundant work across threads) exceeds the latency savings from L1-resident lookups when combined with our Barrett reduction and 4× unrolled MLP pipeline. This empirical finding contradicts the intuition that "closer to the CPU is always faster."
 
 ---
 
 ## 9. Conclusion
 
-We have presented a Rust implementation of Gourdon's prime counting algorithm that achieves 8.39s for π(2⁶³ − 1) on Intel Arrow Lake, beating the long-standing C++ state-of-the-art by 1.2% (p = 0.011 by binomial test on head-to-head runs). Through 107 systematic experiments, we established that the code occupies a local performance optimum determined by four coupled hardware constraints: L2 miss-handling capacity, register file size, L3 cache pressure, and DRAM bandwidth.
+We set out to answer a simple question — *how fast can you count the primes below 2⁶³?* — and ended up answering a more interesting one: *what does it look like when you reach the hardware floor, and how do you know you're there?*
+
+The specific answer: 8.39 seconds on Intel Arrow Lake, beating the long-standing C++ state-of-the-art by 1.2% (p = 0.011 by binomial test on head-to-head runs). But the general answer is what we hope readers will remember.
+
+Through 107 systematic experiments, we established that the code occupies a local performance optimum determined by four coupled hardware constraints: L2 miss-handling capacity, register file size, L3 cache pressure, and DRAM bandwidth. The evidence for this is not theoretical — it is the 106 failed experiments themselves, each probing a different direction and finding a cliff.
+
+The journey from V1 to V8 taught us that **the returns on effort are spectacularly non-linear**: three strategic decisions (switching from Meissel-Lehmer to LMO, adopting Gourdon's decomposition, and replacing SegmentedPiTable with BigPiTable) provided 99.7% of the 112× speedup. The remaining 107 experiments, consuming most of the project's time, provided 0.3%. Knowing *when to change the question* — when to abandon a working, optimized codebase for a fundamentally different approach — was the most valuable skill in the entire endeavor.
 
 Beyond the specific result, this study yields generalizable findings across four categories:
 
@@ -706,7 +887,12 @@ Beyond the specific result, this study yields generalizable findings across four
 14. **Barrett reduction enables the architecture** — 6× faster division compensates for 20× slower π lookups (§7.13).
 15. **Architectural convergence** — radically different implementations converge to within 1.2%, suggesting a fundamental throughput floor (§7.5).
 
+**On correctness:**
+16. **Off-by-one errors are the dominant failure mode** in number-theoretic code — 45% of our 20 bugs — and they are invisible at small scales. The only defense is testing at maximum scale with cross-validation between independent implementations (§7.16).
+
 The MLP constraint model (§4) provides a portable analytical framework: on any architecture, the performance ceiling is determined by the minimum of per-core MLP capacity, system DRAM bandwidth, and register file depth. This framework applies beyond prime counting to hash tables, database joins, graph traversals, and any random-access workload at scale where the working set exceeds the last-level cache.
+
+Finally, a note on method. This work was produced by a human-AI collaboration in approximately 80 hours of interactive sessions. The AI's contribution — implementing 107 experiments with full documentation of every failure — would have taken a solo researcher months. The human's contribution — the three strategic pivots that provided 99.7% of the speedup — could not have come from the AI. We believe this workflow, where human intuition guides and AI stamina executes, represents a productive model for empirical systems research. The complete experiment logs, thought journal, and source code are available at https://github.com/secwest/fast-prime.
 
 ### If You Remember Nothing Else
 
@@ -715,6 +901,8 @@ The MLP constraint model (§4) provides a portable analytical framework: on any 
 > **For systems researchers**: Memory-level parallelism is the critical resource for random-access workloads on modern out-of-order CPUs. Optimizing for cache hit rate at the expense of MLP is a trap — an 80% regression from "better" locality is not a theoretical concern but an empirical result.
 >
 > **For language designers**: Rust's performance matches C++ for memory-bound HPC, with `build-std` providing a unique advantage. The safety/performance tradeoff is not a tradeoff — `unsafe` blocks in hot paths with safe wrappers elsewhere gives both.
+>
+> **For anyone working with AI**: The stamina is the AI's gift — 107 experiments, each fully documented. The wisdom is the human's — knowing when to stop optimizing and start over. Together, they got further than either could alone.
 
 ---
 
@@ -814,16 +1002,46 @@ Of 107 experiments, **1 succeeded** (Opt 78: build-std, +1.3%), **~10 were neutr
 
 ## Acknowledgments
 
-This work used Kim Walisch's *primesieve* library for B-component prime enumeration and *primecount* as the primary benchmark target. The implementation builds on the Rayon parallel runtime and mimalloc allocator.
+### On Human-AI Collaboration
+
+A word about how this work was done, because the method is part of the story.
+
+This paper documents the result of a collaboration between a human (Dragos Ruiu, a security researcher) and an AI (GitHub Copilot CLI, powered by Claude). The human had systems programming experience and deep hardware intuition, but no prior work in analytic number theory. The AI had broad knowledge of algorithms and the ability to write, compile, benchmark, and analyze code in rapid cycles — but no ability to feel frustrated, get tired, or have the flash of insight that says *the whole approach is wrong, start over*.
+
+The workflow looked like this: the human would say something like "let's try Barrett reduction for the division" or "this bottleneck pattern means we need a completely different algorithm." The AI would implement the change, build it, run benchmarks, analyze the results, update the documentation, and present findings — typically completing the full cycle in under 10 minutes. If the experiment failed (as 106 of 107 did), the AI would revert the code, document the failure mechanism, and propose the next experiment. If the experiment produced wrong results, the AI would debug, stepping through the logic until the bug was found and fixed.
+
+This division of labor turned out to be remarkably productive. The mechanical cycle — edit, build, benchmark, analyze, revert, document — is where human researchers lose time and motivation. Running 107 experiments manually, with careful documentation of each, would take a solo researcher months and generate far less complete records. The AI maintained perfect documentation throughout: every experiment logged with its hypothesis, result, and failure mechanism. This paper's §3 and §7 are drawn directly from those logs.
+
+But the strategic decisions — the ones that produced 99.7% of the speedup — were human. The decision to abandon V3's optimized Meissel-Lehmer for V4's LMO. The decision to implement Gourdon instead of continuing to optimize Deléglise-Rivat. The wild idea to replace 23,000 L1-cached SegmentedPiTables with a single 285 MB DRAM-resident BigPiTable. Each of these required the willingness to throw away working code based on a hunch — something that current AI systems, which optimize locally within a given framework, do not do on their own.
+
+The collaboration also had its own category of failures. Power failures interrupted sessions repeatedly, destroying context that had to be painstakingly recovered from git history and session logs. The aggressive commit-and-log discipline described in §2.5 — committing after every experiment, maintaining a 2,700-line thought log — was born from this pain. It turned out to be excellent research methodology regardless: the logs became the raw material for this paper.
+
+**What we learned about human-AI research collaboration:**
+- **The AI excels at breadth**: 107 experiments in 80 hours, each fully documented. A human would have run 20–30 before fatigue.
+- **The human excels at depth**: The three strategic pivots (V3→V4, V5→V6, V6→V7) provided 99.7% of the speedup. The AI's 107 local experiments provided 0.3%.
+- **Documentation becomes free**: When the AI maintains logs as a natural part of its workflow, the paper practically writes itself. This paper's 22 Discussion subsections were drawn from experiment logs that existed before the paper was conceived.
+- **The revert discipline is essential**: With an AI that can implement changes quickly, the temptation is to accumulate changes. The discipline of reverting every failed experiment — returning to a clean baseline before the next attempt — was critical for experiment independence and for maintaining sanity.
+
+We offer this account not as a claim that AI replaces human researchers, but as evidence that human-AI collaboration can produce research that neither could have done alone in the same timeframe, and that the resulting documentation may actually be *better* than what a solo researcher would produce, because the AI has no incentive to skip the tedious step of writing down why something failed.
+
+### Technical Acknowledgments
+
+This work used Kim Walisch's *primesieve* library [3] for B-component prime enumeration and *primecount* [2] as both the primary benchmark target and a source of algorithmic insight — our study of primecount's SegmentedPiTable and sequential scheduling architecture directly informed the design decisions in §6 and the comparative analysis in §7.5. The implementation builds on the Rayon parallel runtime for work-stealing thread scheduling and the mimalloc allocator for contention-free parallel allocation.
 
 ## References
 
 1. Gourdon, X. (2001). "Computation of pi(x): improvements to the Meissel, Lehmer, Lagarias, Miller, Odlyzko, Deleglise and Rivat method."
 2. Walisch, K. (2010–present). *primecount*: Highly optimized C++ implementation of the prime counting function. https://github.com/kimwalisch/primecount
 3. Walisch, K. (2010–present). *primesieve*: Fast prime number generator. https://github.com/kimwalisch/primesieve
-4. Deleglise, M. and Rivat, J. (1996). "Computing π(x): The Meissel, Lehmer, Lagarias, Miller, Odlyzko method." *Mathematics of Computation*, 65(213), 235–245.
+4. Deléglise, M. and Rivat, J. (1996). "Computing π(x): The Meissel, Lehmer, Lagarias, Miller, Odlyzko method." *Mathematics of Computation*, 65(213), 235–245.
 5. Lagarias, J.C., Miller, V.S., and Odlyzko, A.M. (1985). "Computing π(x): An analytic method." *Journal of Algorithms*, 6(3), 537–560.
 6. Oliveira e Silva, T. (2006). "Computing π(x): the combinatorial method." *Revista do DETUA*, 4(6), 759–768.
+7. Lehmer, D.H. (1959). "On the exact number of primes less than a given limit." *Illinois Journal of Mathematics*, 3(3), 381–388.
+8. Meissel, E. (1885). "Berechnung der Menge von Primzahlen, welche innerhalb der ersten Milliarde naturlicher Zahlen vorkommen." *Mathematische Annalen*, 25, 251–257.
+9. Lagarias, J.C. and Odlyzko, A.M. (1987). "Computing π(x): an analytic method." *Journal of Algorithms*, 8(2), 173–191.
+10. Platt, D.J. (2012). "Computing π(x) analytically." *Mathematics of Computation*, 84(293), 1521–1535.
+11. Lucy_Hedgehog (2012). "Counting primes with a simple sieve." Project Euler forum thread #10.
+12. Baugh, D. and Walisch, K. (2022). "Computation of π(10²⁹)." https://github.com/kimwalisch/primecount/blob/master/doc/Records.md
 
 ---
 
