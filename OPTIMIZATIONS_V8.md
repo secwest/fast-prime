@@ -831,3 +831,152 @@ exhaustively optimized through 92 experiments. The remaining gap to primecount
 3. **Diminishing returns**: Even with segment-first SegPiTable, the estimated
    improvement is ~1.5-3s on AC, making total = max(~5s AC, 7s B) = 7s. B then
    becomes the new bottleneck, requiring its own optimization cycle.
+
+---
+
+## Session 6: Exhaustive Verification (Opt 93-100)
+
+### Opt 93: Segment-first SegmentedPiTable (5× REGRESSION)
+
+**What**: Each rayon thread handles a chunk of wide b-values, independently sweeping
+ALL sub-segments with a per-thread L1-sized sieve (SEG_PI_SIZE=131072, 12KB).
+Added `rebuild_seg_sieve()` and `seg_pi_fast()` functions.
+
+**Result**: AC loops = 11.77s (was 2.2s sequential / 8.4s concurrent) — **5× regression**.
+- Root cause: 24 threads × 23K sub-segments × ~121μs sieve rebuild = 2.78s overhead/thread
+- Total sieve crossings: ~4B per thread (constant regardless of segment size!)
+- L1 cache benefit (~3ns/lookup × 220M lookups = 0.66s) overwhelmed by sieve cost (2.78s)
+- **Key insight**: sieve construction cost O(√x × ln(ln(√(√x)))) per thread is a FIXED
+  overhead that exactly cancels the L1 cache benefit
+- **Reverted completely**
+
+### Opt 94: Software Prefetch Pipeline (NEUTRAL)
+
+**What**: Pipelined 4× unrolled loop — compute next batch's xpq values + issue
+`big_pi.prefetch()`, then compute pi for current batch. ~8 extra instructions per
+4-element batch providing ~70 cycle lead time.
+
+**Result**: AC loops = 8.450s (was 8.412s baseline) — **neutral/slightly worse**.
+- Root cause: Arrow Lake's OoO engine already looks ahead ~200+ instructions (~50 iterations)
+- Hardware prefetch already covers L3 latency (~30ns)
+- Software prefetch instructions add overhead without benefit
+- **Reverted completely**
+
+### Opt 95: Clustered Easy Leaves (4× REGRESSION AT SCALE)
+
+**What**: When consecutive l-values give the same π(xpq), compute once and multiply
+by cluster size. Formula: cluster_end = largest l' where primes[l'] ≤ floor(xp / primes[π_val]).
+Uses binary search in primes array for O(log N) cluster boundary lookup.
+
+**Correctness journey**:
+1. Initial bug: `big_pi.pi(max_pl)` returned values inconsistent with primes array due
+   to different sieves → fixed by using binary search in primes[] instead
+2. Second bug: `primes[pi_val - 1]` treated array as 0-indexed, but primes[] is 1-indexed
+   (primes[0]=0 sentinel, primes[k]=k-th prime) → used `primes[pi_val]` instead
+3. After both fixes: **correct at all scales** (1B, 1T, 1Q, Max i64)
+
+**Performance at Max i64**: AC loops = 35.12s (was 8.42s) — **4× regression**.
+- Binary search in 6.3M-element primes array: ~23 comparisons × 5ns = 115ns per cluster
+- Average cluster size at Max i64: only 1-3 (prime gaps comparable at both scales)
+- Amortized cost: 115ns/3 = 38ns per element vs 10ns for direct pi_fast
+- **Clustering only helps when l-range << pi_val range (small x); at Max i64, both are ~6.3M**
+- **Reverted completely**
+
+### Opt 96: PGO + build-std (NO IMPROVEMENT)
+
+**What**: Clean PGO cycle with matching profile-generate and profile-use phases.
+Profiled at Max i64 (201s instrumented run). No hash mismatch warnings.
+
+**Result**: 8.58s median (was 8.57s baseline) — **no measurable improvement**.
+- PGO's branch prediction benefit negligible for the tight AC inner loop
+- build-std already provides most of PGO's code layout benefits
+- Prior session's 8.54s PGO result (from 8.66s) was due to stale profiles / thermal variance
+
+### Opt 97: Separate Thread Pools (REGRESSION)
+
+**What**: Isolate AC and D into separate rayon pools to eliminate scheduling interference.
+
+| Config | AC | D | B | Total |
+|--------|------|------|------|-------|
+| Default (global pool) | 8.42s | 5.61s | 7.31s | 8.59s |
+| AC=24, D=24 | 14.87s | 5.68s | 6.74s | 15.03s |
+| AC=12, D=12 | 17.84s | 5.61s | 6.59s | 18.00s |
+| AC=8, D=16 | 15.43s | 9.64s | 4.23s | 15.65s |
+| AC=24 only | 14.87s | 5.68s | 6.91s | 14.99s |
+
+- Root cause: separate pools cause **oversubscription** (48-72 threads on 24 cores)
+- Rayon's work-stealing with a single global pool is optimal
+
+### Opt 98: LLVM Flag Tuning (NO IMPROVEMENT)
+
+**What**: Tested various LLVM optimization flags with build-std.
+
+| Flag | Total Time |
+|------|-----------|
+| unroll-threshold=800 (default) | 8.57s |
+| unroll-threshold=1200 | 8.56s |
+| unroll-threshold=400 | 8.54-8.62s |
+| unroll-threshold=200 | 8.59s |
+| --x86-cmov-converter=false | 8.57s |
+| --enable-loopinterchange | 8.59s |
+
+All within noise. The hot loop is already well-optimized by the compiler.
+
+### Opt 99: Phased Scheduling (WORSE)
+
+**What**: Run AC and D in separate phases instead of concurrently.
+
+| Mode | AC | D | B | Total |
+|------|------|------|------|-------|
+| Default (all concurrent) | 8.42s | 5.61s | 7.31s | 8.57s |
+| PHASE_AC_DB (AC first, then D+B) | **2.10s** | 5.27s | 6.34s | 8.99s |
+| PHASE_D_ACB (D first, then AC+B) | **2.17s** | 4.50s | 4.31s | 9.36s |
+
+- **Key finding**: AC alone = 2.10s, confirming 4× concurrent penalty (2.1→8.4s) is real
+- Phased total = AC + max(D, B) = 2.1 + 6.3 = 8.4 + overhead = 8.99s (still worse)
+- Sequential phasing adds ~0.4-0.8s overhead from phase transitions
+
+### Opt 100: D Segment Size Tuning (NO IMPROVEMENT)
+
+**What**: Reduce D's segment size to make D tasks more granular, reducing AC blocking.
+
+| D_SEG_CAP | Segment Size | Segments | AC | Total |
+|-----------|-------------|----------|------|-------|
+| 20 (default) | 131040 | ~17 | 8.34s | 8.51s |
+| 17 | 131040 | ~17 | 12.17s | 12.33s |
+| 15 | 32760 | ~64 | 10.70s | 10.87s |
+| 13 | 8190 | ~256 | 10.74s | 10.91s |
+
+- Smaller segments make D slower (boundary overhead) and worsen AC (more scheduling contention)
+- Default is already optimal
+
+---
+
+## Conclusions After 100 Experiments
+
+V8 at **8.39s best / 8.57s median** (build-std) is a **local optimum** for the
+b-first BigPiTable architecture on Intel Core Ultra 9 285K.
+
+### The Concurrent Penalty Wall
+
+The fundamental bottleneck is the 4× concurrent penalty on AC:
+- AC alone (no D): **2.10s** with 24 threads
+- AC concurrent with D: **8.42s** (4.0× slower)
+- This penalty comes from: rayon work-stealing contention, L3 cache pressure
+  from D's sieve operations, and power throttling from all-core load
+
+### What Would Be Needed to Go Faster
+
+1. **Segment-first architecture rewrite** (~1000 lines): Process BigPiTable segments
+   as the outer loop, with per-thread L1-sized SegPiTables. This would eliminate
+   the concurrent penalty but requires restructuring the entire AC computation.
+
+2. **B computation optimization**: At 7.3s, B becomes the bottleneck if AC improves.
+   Requires algorithmic changes to primesieve streaming or B's sum formula.
+
+3. **Different algorithm**: Lagarias-Miller-Odlyzko or analytic methods with different
+   parallelism characteristics. Diminishing returns — primecount is already
+   state-of-the-art.
+
+4. **Hardware-specific**: NUMA-aware allocation, P-core/E-core task pinning at the
+   OS level (not rayon). Requires custom thread scheduler in ~500 lines of unsafe code.

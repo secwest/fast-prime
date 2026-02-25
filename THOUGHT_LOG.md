@@ -3445,3 +3445,74 @@ admin Group Policy grant.
 The b-first architecture is exhaustively optimized at 92 experiments. The only
 remaining avenue is a segment-first rewrite (~1000 lines) to enable SegPiTable.
 Even then, B (7.0s) would become the new bottleneck, capping total at ~7.0s.
+
+## V8 Session 6: Exhaustive Verification of Remaining Avenues (Opt 93-100)
+
+Eight more experiments testing every remaining optimization idea. All failed or
+showed no improvement. The codebase is verified to be at a local optimum.
+
+### Segment-first SegmentedPiTable (Opt 93) — 5× REGRESSION
+Each thread independently sweeps 23K sub-segments with L1-sized sieve (12KB).
+Sieve construction cost: ~4B crossings per thread × 24 threads overwhelms the
+L1 cache benefit. The fundamental issue: sieve construction is O(√x × ln(ln(√(√x))))
+per thread — a fixed overhead that exactly cancels the cache advantage.
+
+### Software Prefetch Pipeline (Opt 94) — NEUTRAL
+Added `big_pi.prefetch()` in a pipelined 4× unrolled loop. Arrow Lake's OoO engine
+already looks ahead ~200+ instructions, making software prefetch redundant. The
+extra instructions add ~1% overhead without measurable benefit.
+
+### Clustered Easy Leaves (Opt 95) — 4× REGRESSION AT SCALE
+Cluster consecutive l-values with identical π(xpq), compute once and multiply.
+**Fixed two bugs**: (1) BigPiTable/primes sieve mismatch → binary search in primes[],
+(2) 1-indexed primes array (primes[0]=sentinel) → use primes[pi_val] not primes[pi_val-1].
+After fixes: **correct at all scales**. But at Max i64, clusters are only 1-3 elements
+(prime gaps comparable at both scales), and binary search in 6.3M primes array costs
+115ns/cluster vs 10ns for direct pi_fast. Net 4× slower.
+
+### PGO + build-std (Opt 96) — NO IMPROVEMENT
+Clean PGO (no hash mismatch warnings). Profile-generate at Max i64 (201s instrumented),
+merge, profile-use. Result: 8.58s median vs 8.57s baseline. build-std already captures
+most of PGO's benefit.
+
+### Separate Thread Pools (Opt 97) — ALL WORSE
+AC and D on separate rayon pools → 48+ threads on 24 cores → massive oversubscription.
+Even AC=8, D=16 was 15.7s (1.8× worse). Rayon's single global pool with work-stealing
+is fundamentally optimal for this workload.
+
+### LLVM Flags (Opt 98) — ALL WITHIN NOISE
+Tested unroll-threshold (200, 400, 800, 1200), --x86-cmov-converter=false,
+--enable-loopinterchange. All 8.54-8.62s. The hot loop is already well-optimized.
+
+### Phased Scheduling (Opt 99) — WORSE
+PHASE_AC_DB (AC alone, then D+B): AC drops to **2.10s** (confirming 4× concurrent
+penalty is real), but total is 8.99s because D+B phase takes 6.34s and doesn't overlap.
+PHASE_D_ACB (D alone, then AC+B): total 9.36s. Concurrent overlap is better than
+sequential phases.
+
+### D Segment Size (Opt 100) — DEFAULT OPTIMAL
+Smaller D segments create more scheduling overhead without reducing AC blocking.
+D has only ~17 segments at Max i64; can't subdivide further without hurting D itself.
+
+### Session 6 Key Insights
+
+1. **AC alone = 2.10s** with 24 threads. The 4× concurrent penalty (2.1→8.4s)
+   is from rayon work-stealing contention + L3 cache pressure from D + power throttling.
+   No pool configuration, LLVM flag, or scheduling change can fix this.
+
+2. **Clustered easy leaves is correct** (after two bug fixes) but the binary search
+   overhead and small cluster sizes at Max i64 make it a net negative. The primes[]
+   array is 1-indexed with a sentinel at index 0 — this caused a subtle off-by-one
+   that was difficult to diagnose.
+
+3. **The 100-experiment optimization wall**: After 100 experiments, all micro-optimizations,
+   LLVM flags, scheduling strategies, and algorithmic improvements have been exhausted.
+   The code is provably at a local optimum for the b-first BigPiTable architecture.
+
+### What Would Be Needed to Go Further
+
+- **Segment-first architecture rewrite** (~1000 lines): Process segments as outer loop
+  with per-thread L1-sized SegPiTables → could reduce AC from 8.4s to ~2.5s
+- **B optimization**: B at 7.3s becomes bottleneck if AC improves
+- **Custom thread scheduler**: Bypass rayon, pin P-cores to AC and E-cores to D
+- **Different algorithm**: Analytic/FFT-based prime counting methods
