@@ -2351,6 +2351,135 @@ sum += running
 - Collect actual x/p values (not wheel positions) in ascending order
 - Divide value range [sqrt_x+1, max_xp] into nchunks = nthreads × 8
 - For each chunk (parallel): start primesieve iterator, merge with xp values
+
+---
+
+## V8: Algorithmic Analysis Session
+
+### Deep Analysis of primecount Source Code
+
+Studied kimwalisch/primecount's AC.cpp, SegmentedPiTable.hpp, and util.cpp
+to understand the algorithmic differences causing our 1.3% gap (8.60s vs 8.49s).
+
+**Three key differences found:**
+
+1. **SegmentedPiTable**: Per-segment O(x^{1/4}) π table (~3.7KB, fits in L1).
+   Rebuilt each segment via streaming primesieve. Every lookup = L1 hit.
+
+2. **Clustered Easy Leaves**: For C2, when consecutive l-values give same
+   π(x/pq), compute once and multiply. Uses `primes[π(xpq)+1]` to find
+   cluster boundary. Activated when `avg_clustered_leaves >= 6`.
+
+3. **mod-240 Wheel**: 8 coprime-to-30 residues per byte, 240 numbers per u64.
+   1.875× more compact than odd-only encoding.
+
+**Our advantage**: Barrett reduction (fast_div) is ~6× faster than primecount's
+hardware div. This is a significant per-iteration advantage.
+
+### The Fundamental L3 Bandwidth Wall
+
+Extensive experimentation (10 different approaches, all failed) revealed that
+L3/DRAM bandwidth is the irreducible bottleneck:
+
+- **BigPiTable is 285MB**: L3 is 36MB, so ~88% of lookups go to DRAM
+- **AC sequential = 2.2s, concurrent = 8.5s**: 4× penalty from L3 contention
+- **Smaller tables** (wheel-30: 152MB) don't help because indexing overhead
+  (division by 240 ≈ 4 extra cycles) negates bandwidth savings
+- **Interleaved tables** increase size more than they reduce cache line loads
+- **Software prefetching** costs more in computation than it saves in latency
+- **PGO** doesn't help memory-bound code
+
+### Critical Discovery: Monomorphization I-Cache Regression
+
+Generic `compute_ac<P: PiTable>` instantiated for both BigPiTable and
+SegmentedPiTable created TWO copies of the 200-line hot inner loop.
+Even though only one path executes at runtime, LLVM can't eliminate
+the dead-code path (env var check is opaque). Result: +1.0s (12%) from
+instruction cache pressure alone.
+
+**Fix**: Made compute_ac take `&BigPiTable` directly. Performance restored.
+
+---
+
+## V8 Session 2: Deep Architectural Analysis
+
+### Experiments 63-69: Exhaustive Table & Scheduling Optimization
+
+Seven more optimization approaches tested, all failed to improve on V7:
+
+#### Clustered Easy Leaves (Opt 63: 11.90s, +38%)
+Implemented primecount's cluster optimization for C2: when consecutive l-values
+produce the same π(xpq), batch-multiply instead of iterating. Added
+`next_prime_after()` to BigPiTable and clustering pre-loop before the regular
+4× unrolled loop. FAILED because `next_prime_after()` adds a second cache miss
+per cluster iteration. Only works with L1-resident tables (primecount's approach).
+
+#### Table Layout Experiments (Opt 64-65: 9.06s, 14.18s)
+- **Interleaved bits+prefix (Opt 64)**: data[2w]=bits, data[2w+1]=prefix.
+  Halves cache misses per lookup but 381MB table (vs 285MB) reduces L3 coverage.
+  Result: 9.06s (+5.2%).
+- **Sparse prefix (Opt 65)**: coarse_prefix per 8 words (12MB) + in-line
+  popcount of up to 7 words. Result: 14.18s (+65%). The conditional popcounts
+  are devastating — unpredictable branches + 10.5 extra cycles average.
+
+#### Scheduling & Pool Isolation (Opt 66-69)
+Comprehensive scheduling analysis revealed the root cause of AC's 4× penalty:
+
+**Phase scheduling confirmed AC alone = 2.19s (vs 8.57s concurrent)**:
+- PHASE_DB_AC: D+B then AC → 9.06s (AC=2.19s alone, but no overlap)
+- PHASE_B_ACD: B then AC+D → 9.96s (AC=6.62s even with D only!)
+- Default concurrent: 8.72s (overlap benefit > contention cost)
+
+**B_THREADS=4 revealed contention source**: AC dropped to 7.14s (17% faster)
+but B became 14.21s bottleneck. Confirms B↔AC L3 contention.
+
+**Dedicated D pool (Opt 68)**: D_THREADS=32 gave AC_loops=4.75s (44% faster!)
+but D=8.51s. More threads = 8.71s (matches baseline). Proves D↔AC rayon task
+blocking, but idle D threads must be available for AC work-stealing.
+
+### Definitive Architectural Conclusion
+
+The 1.3% gap to primecount (8.68s vs 8.49s) comes from a fundamental
+architectural difference:
+
+**Primecount**: L-first (segment-first). Iterates over segments of output space,
+builds tiny (~3.7KB) SegmentedPiTable per segment in L1 cache. Every π lookup
+is ~4 cycles. AC has zero L3 pressure — all lookups hit L1. The L1 table is
+private per core (no cross-thread cache contention).
+
+**Ours**: B-first. Iterates over b-values, looks up π in 285MB BigPiTable stored
+in L3/DRAM. Every π lookup costs ~30-400 cycles depending on cache level. 24
+threads compete for L3 bandwidth. AC + B + D all run concurrently in shared
+rayon pool, creating 4× concurrent penalty on AC.
+
+To close the gap would require rewriting compute_ac (~1000 lines) from b-first
+to segment-first architecture. This is the largest possible change to the codebase
+and carries significant correctness risk.
+
+**V8 Final: 8.68s median (17 experiments, 0 improvements). V7's implementation
+is the optimal point for our b-first architecture on Arrow Lake 285K.**
+
+### Alpha Parameter Comparison
+
+Our tuned α_y=18.5, α_z=1.3 vs primecount's computed α_y≈17.05, α_z=2.0.
+Primecount's values give 9.72s on our system (+12.5%). Our higher α_y
+reduces AC iterations at the cost of more B/Sigma work — correct tradeoff
+for our implementation where AC is the bottleneck.
+
+### Thread Pool Isolation is Counterproductive
+
+Giving AC its own rayon pool (to prevent D from "stealing" AC threads)
+caused 14.3s (+65%). The shared rayon pool's work-stealing is essential:
+when D's heavy chunks finish, idle threads help AC. Isolating pools creates
+48 threads on 24 hardware threads → context switching disaster.
+
+### Current State
+
+V8 = V7 performance (8.63s) after reverting all experiments. The 1.3% gap
+to primecount appears to be a fundamental difference in their SegmentedPiTable
+approach (L1-cached lookups) which doesn't translate well to our b-first
+architecture. Closing this gap may require restructuring the entire AC
+computation — a high-risk, high-effort change with uncertain payoff.
 - After last xp in chunk, continue iterating to count total primes (for prefix)
 - Post-hoc: apply prefix corrections (same pattern as before)
 
@@ -3143,3 +3272,55 @@ Total inner loop work: 35.85B × 9 cycles / 24 cores / 5.7 GHz ≈ 2.36s (matche
 
 ### Gap to primecount: 8.60 - 8.49 = 0.11s (1.3%)
 Remaining gap is setup overhead + D/AC scheduling. Algorithm-level changes (Deleglise-Rivat) or C++/OpenMP port would be needed for further gains.
+
+## V8 Session 3 — Final Micro-Optimization Sweep & Dead Code Cleanup
+
+### Approach
+After Sessions 1-2 exhausted table layout and scheduling optimizations (24 experiments,
+all failed to improve on V7), Session 3 focused on:
+1. Dead code cleanup: removing ~170 lines of unused experimental code
+2. Micro-optimization sweep: prefetch, AC_SEG tuning, POOL_MULT, alpha, B_THREADS
+3. Structural changes: split wide/narrow processing
+
+### Key Findings
+
+**Same-batch prefetch (Opt 70)** hurts: +3.6% regression. The 4-cycle distance
+between prefetch and pi_fast load is too short — the OoO engine already overlaps
+independent loads without explicit prefetch. The prefetch instructions themselves
+add overhead.
+
+**PGO blocked by security**: Windows Application Control policy prevents instrumented
+binaries from executing. The PGO runtime libraries are flagged as unauthorized.
+
+**AC_SEG=200K is marginally better (Opt 72)**: Reduces wide b-values from 53.7K to
+44.9K by using larger segments (2.4MB vs 1.6MB per segment). Despite exceeding
+P-core L2 (2MB), the benefit from shifting more work to the narrow path outweighs
+the L2 overflow cost. Applied as new default.
+
+**Split wide/narrow processing (Opt 76)** is catastrophic: +14% regression. Removing
+segmentation from wide b-values destroys L2 locality, causing massive L3/DRAM
+bandwidth contention with B. The segmented approach's per-segment par_iter barriers
+(183 barriers) are cheap compared to the L2 cache benefit they provide.
+
+### Architecture Status
+
+The code is now clean (0 warnings) with all dead experimental code removed:
+- SegmentedPiTable, PiTable trait, generate_pi, SET_BIT_240/UNSET_LARGER_240
+- USE_FULLPI build thread
+- min_clustered_l from BLookup
+
+V8 Final: **8.63s median, 8.57s best** at Max i64 (vs primecount 8.49s = 1.6% gap)
+
+### Complete V8 experiment count: 24 experiments (Opt 53-76)
+- 0 improvements adopted (V8 matches V7)
+- 1 marginal default tuning: AC_SEG 130K → 200K
+- Dead code reduced: ~170 lines removed
+
+### Conclusion
+The b-first architecture with 285MB BigPiTable has been fully optimized. Every
+micro-optimization opportunity has been explored: prefetching, table layout, sparse
+prefix, segmentation, scheduling, pool isolation, chunk granularity, alpha tuning,
+and structural reorganization. All regressed or showed no improvement.
+
+The remaining 1.6% gap to primecount requires a fundamentally different approach:
+segment-first AC processing with L1-resident SegmentedPiTable (~1000-line rewrite).
