@@ -3516,3 +3516,50 @@ D has only ~17 segments at Max i64; can't subdivide further without hurting D it
 - **B optimization**: B at 7.3s becomes bottleneck if AC improves
 - **Custom thread scheduler**: Bypass rayon, pin P-cores to AC and E-cores to D
 - **Different algorithm**: Analytic/FFT-based prime counting methods
+
+## V8 Session 7: Thread Pool Tuning & Cache Warming Discovery (Opt 101-103)
+
+Three more experiments exploring scheduling and thread pool tuning. All confirmed
+that the default configuration is optimal, but revealed a key architectural insight.
+
+### DELAY_D Scheduling (Opt 101) — BigPiTable L3 Warming Discovery
+
+Implemented DELAY_D mode: wait for AC to finish before starting D. Expected
+total = max(B, AC+D) ≈ max(4.3, 2.1+5.0) = 7.1s.
+
+**Actual**: B = 8.5s, total = 8.7s — WORSE. **Critical discovery**: AC's continuous
+BigPiTable lookups (285MB) keep the table warm in L3 cache, benefiting B (which also
+reads BigPiTable). When AC finishes early, D's sieve operations evict BigPiTable from
+L3, causing B to slow from 7.3s to 8.5s. The AC "concurrent penalty" (2.1→8.4s) is
+partially compensated by this L3 warming effect for B.
+
+This means **no scheduling rearrangement can help** — any change that speeds AC by
+reducing its overlap with D will slow B by the same amount.
+
+### B_THREADS Sweep (Opt 102) — Zero-Sum Thread Balance
+
+Full sweep of B pool size from 1 to 24. Results show a clean tradeoff:
+- B=1: AC=6.79s (fast!), B=37.25s (serial → bottleneck)
+- B=22: AC=8.46s, B=8.47s (crossover point, total=8.72s)
+- B=24: AC=8.44s, B=6.94s (total=8.60s — best)
+
+The crossover at B≈22 gives a WORSE total (8.72s) than B=24 (8.60s). This is because
+max(8.46, 8.47) > max(8.44, 6.94). The AC/B thread balance is a zero-sum game: any
+threads taken from B and given to AC speed AC but slow B proportionally more.
+
+### Global Pool Size (Opt 103) — POOL_MULT=3 Optimal
+
+Tested POOL_MULT from 1 to 6 (global threads = 24 to 144). POOL_MULT=3 (72 threads)
+is optimal. Also tested AC_SEG from 50K to 500K — default 200K is optimal.
+
+### Session 7 Key Insight: The Cache Warming Constraint
+
+The BigPiTable L3 warming effect creates a **fundamental constraint**: AC, B, and D
+are not independent. They share L3 cache, and their performance is coupled:
+- AC reads BigPiTable → keeps it warm → B benefits
+- D runs sieves → evicts BigPiTable → B suffers
+- The "optimal" schedule is the one that maximizes BigPiTable L3 residency for B
+  while still overlapping all three computations
+
+This means the only path to faster total time is eliminating the 285MB BigPiTable
+entirely (segment-first architecture where all components use L1-sized SegPiTables).

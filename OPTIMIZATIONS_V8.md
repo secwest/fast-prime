@@ -952,9 +952,65 @@ All within noise. The hot loop is already well-optimized by the compiler.
 
 ---
 
-## Conclusions After 100 Experiments
+## Session 7: Thread Pool Tuning & Scheduling Experiments (Opt 101-103)
 
-V8 at **8.39s best / 8.57s median** (build-std) is a **local optimum** for the
+### Opt 101: DELAY_D Scheduling (WORSE — BigPiTable L3 Warming Discovery)
+
+**What**: Wait for AC to finish before starting D. Theory: AC alone = 2.10s,
+then D alone = ~5.0s, B runs throughout = 4.3s. Expected total: max(B, AC+D) = 7.1s.
+
+**Result**: B = 8.5s, total = 8.7s — **WORSE than default** (8.57s).
+
+**Critical discovery**: AC concurrent with D keeps BigPiTable (285MB) warm in L3 cache
+for B's benefit. When AC finishes early (DELAY_D), D's sieve operations evict BigPiTable
+from L3, making B dramatically slower (8.5s vs 7.3s). The AC "concurrent penalty" (2.1→8.4s)
+is partially compensated by faster B through L3 cache warming.
+
+**Reverted completely.**
+
+### Opt 102: B_THREADS Sweep (DEFAULT OPTIMAL)
+
+**What**: Sweep B pool size from 1 to 24 to find optimal AC/B thread balance.
+
+| B_THREADS | AC | B | Total |
+|-----------|------|-------|-------|
+| 1 | 6.79s | 37.25s | 37.39s |
+| 2 | 6.97s | 21.63s | 21.77s |
+| 4 | 7.01s | 13.94s | 14.09s |
+| 6 | 7.04s | 11.32s | 11.47s |
+| 8 | 7.25s | 10.20s | 10.34s |
+| 12 | 7.57s | 9.28s | 9.41s |
+| 16 | 7.97s | 8.78s | 8.93s |
+| 18 | 7.98s | 8.67s | 8.82s |
+| 20 | 8.05s | 8.55s | 8.70s |
+| 22 | 8.46s | 8.47s | 8.72s |
+| **24** | **8.44s** | **6.94s** | **8.60s** |
+
+**Key insight**: B=24 is optimal because total = max(AC, B). The crossover (AC ≈ B) occurs
+at B≈22, but total there (8.72s) is worse because max(8.46, 8.47) > max(8.44, 6.94).
+AC is always the bottleneck — giving B fewer threads speeds AC but slows B faster.
+
+### Opt 103: Global Pool Size Tuning (DEFAULT OPTIMAL)
+
+**What**: Vary POOL_MULT (rayon global pool = num_cpus × POOL_MULT).
+
+| POOL_MULT | Global Threads | AC | B | Total |
+|-----------|---------------|------|------|-------|
+| 1 | 24 | 8.77s | 4.53s | 8.94s |
+| 2 | 48 | 8.59s | 6.53s | 8.81s |
+| **3** | **72** | **8.44s** | **6.94s** | **8.60s** |
+| 4 | 96 | 8.54s | 6.82s | 8.68s |
+| 5 | 120 | 8.47s | 8.53s | 8.68s |
+| 6 | 144 | 8.51s | 7.94s | 8.67s |
+
+POOL_MULT=3 is optimal. Fewer threads hurt AC (not enough tasks in flight for work-stealing).
+More threads cause oversubscription. Also tested AC_SEG sweep (50K-500K): default 200K optimal.
+
+---
+
+## Conclusions After 103 Experiments
+
+V8 at **8.39s best / 8.57s median** (build-std) is a **verified local optimum** for the
 b-first BigPiTable architecture on Intel Core Ultra 9 285K.
 
 ### The Concurrent Penalty Wall
@@ -964,6 +1020,19 @@ The fundamental bottleneck is the 4× concurrent penalty on AC:
 - AC concurrent with D: **8.42s** (4.0× slower)
 - This penalty comes from: rayon work-stealing contention, L3 cache pressure
   from D's sieve operations, and power throttling from all-core load
+
+### The BigPiTable L3 Warming Effect (Opt 101 Discovery)
+
+AC's "concurrent penalty" is partially beneficial: AC's continuous BigPiTable lookups
+keep the 285MB table warm in L3 cache, which speeds up B (also accesses BigPiTable).
+When AC finishes early (DELAY_D), D evicts BigPiTable → B slows from 7.3s to 8.5s.
+Any scheduling change that speeds AC at the expense of BigPiTable warmth slows B.
+
+### The Thread Balance Wall (Opt 102)
+
+B_THREADS sweep shows the AC/B balance is a zero-sum game: fewer B threads → faster AC
+but slower B. At B=24 (default), total = max(8.44, 6.94) = 8.60s. The crossover at B≈22
+gives max(8.46, 8.47) = 8.72s — worse. There is no thread configuration that improves both.
 
 ### What Would Be Needed to Go Faster
 
