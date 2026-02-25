@@ -205,6 +205,18 @@ See [OPTIMIZATIONS_V7.md](OPTIMIZATIONS_V7.md) for the full optimization log.
 - **Concurrent B/AC/D** — B, AC, and D run concurrently via `thread::scope`, with D using rayon internally for further parallelism.
 - **3.6-5.5× faster than V6 at Max i64** — 62s vs 342s. Consistent 3.6-5.5× speedup across all scales ≥ 100Q.
 
+### V8 — Algorithmic Analysis Lab
+
+See [OPTIMIZATIONS_V8.md](OPTIMIZATIONS_V8.md) for the full optimization log (37 experiments).
+
+- **`-Zbuild-std=std,panic_abort`** — Recompiles the Rust standard library with `target-cpu=native`, enabling AVX-512 memcpy/memset and Arrow Lake instruction scheduling throughout std and mimalloc. The single most effective nightly optimization (**−1.3%**).
+- **AC_SEG=200K tuning** — Optimal L2 segment size for AC inner loop. Shifts work from wide b-values (random BigPiTable access) to the cache-friendly narrow path. Sweet spot between segment overhead and L2 locality.
+- **Exhaustive table layout analysis** — 37 experiments tested SegmentedPiTable, mod-240 wheel encoding, interleaved bits+prefix, sparse prefix, wheel-30 BigPiTable. All regressed: odd-only 128-per-word with separate prefix/bits arrays is optimal for the b-first architecture.
+- **PGO proven counterproductive** — Clean profile-guided optimization caused +5.3% regression. Hand-tuned `--unroll-threshold=800` already produces near-optimal L1 icache utilization; PGO's aggressive inlining overflows the 32KB icache.
+- **Code size is the dominant constraint** — Branchless AC loop (+10%), interleaved BigPiTable (+6%), higher unroll threshold (+0.6%) all regressed from increased L1 icache or L2 data working set.
+- **Assembly-verified hot path** — `pi_fast` compiles to 7 instructions: dec, shr, mov(prefix), bzhiq(BMI2), popcntq, add, inc. LLVM correctly fuses `(n-1)/2/64` into `>>7` and uses BZHI over shift-and-mask.
+- **Head-to-head wins 9/10 vs primecount** — Under identical thermal conditions (alternating runs), V8 median 8.63s vs primecount median 8.70s. **Beats primecount at Max i64.**
+
 ## Building
 
 Requires [Rust](https://rustup.rs/) (1.70+).
