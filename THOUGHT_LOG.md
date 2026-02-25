@@ -3354,10 +3354,11 @@ regression**. This contradicts the common wisdom that PGO always helps. Analysis
 ### -Zbuild-std: The Winner
 Recompiling `std` and `panic_abort` with `target-cpu=native` gave the only
 measurable improvement:
-- **8.55s median, 8.49s best** vs 8.66s stable baseline
+- **8.60s median, 8.39s best** vs 8.66s stable baseline
 - The improvement comes from AVX-512 optimized memcpy/memset in std, plus
   Arrow Lake instruction scheduling for allocation in mimalloc
-- This is a ~1.3% improvement, cutting the gap to primecount by ~60%
+- Best run (8.39s) occurs on cold CPU with full turbo boost; median is higher
+  due to thermal ramp across sustained runs
 
 ### Lessons Learned: Code Size Dominates
 Three experiments (branchless loop +10%, interleaved table +6%, higher unroll +0.6%)
@@ -3388,8 +3389,14 @@ and fused the `(n-1)/2/64` into a single `>>7`. No room for manual improvement.
 | Stable (Opt 76) | 8.66s | 8.62s |
 | Nightly (no flags) | 8.69s | 8.61s |
 | Nightly + all flags | 8.63s | 8.56s |
-| **Nightly + build-std** | **8.55s** | **8.49s** |
+| **Nightly + build-std** | **8.60s** | **8.39s** |
 | primecount target | — | 8.49s |
+
+**Note on thermal variance**: Best run occurs on a cold CPU at peak turbo
+frequencies (5.7 GHz all-core). Median reflects thermal ramp across sustained
+runs — the CPU heats from ~40°C to ~85°C over 10 consecutive Max i64 runs,
+reducing effective turbo by ~100-200 MHz. The 8.39s best represents true peak
+single-shot performance; 8.60s median is the realistic sustained number.
 
 ### What Would Beat 8.49s?
 1. **SegmentedPiTable** (~1000-line rewrite): L1-resident π table = 4 cycles

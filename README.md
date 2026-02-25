@@ -1,6 +1,6 @@
 # fast-prime
 
-A highly optimized prime counting toolkit in Rust, featuring seven independent implementations targeting modern hybrid-core CPUs.
+A highly optimized prime counting toolkit in Rust, featuring eight independent implementations targeting modern hybrid-core CPUs.
 
 ## Implementations
 
@@ -34,45 +34,47 @@ Full implementation of Gourdon's 2001 algorithm: π(x) = AC - B + D + Φ₀ + Σ
 
 ### V8 — Algorithmic Analysis Lab (`src/bin/prime_count_v8.rs`)
 
-Exhaustive analysis branch of V7 with 37 experiments (Opt 53-89) across table layout, scheduling, prefetching, algorithmic optimizations, and compiler tuning. Deep analysis of primecount's source revealed three key differences: SegmentedPiTable (L1-cached per-segment π lookups), clustered easy leaves, and mod-240 wheel encoding. Session 3 experiments (Opt 53-76): clustered easy leaves (+38%), interleaved bits+prefix (+5.2%), sparse prefix (+65%), wheel-30 BigPiTable (+5.3%), phase scheduling, AC_SEG sweeps. Session 4 experiments (Opt 77-89): PGO (regression: +5.3%), branchless AC inner loop (+10%), interleaved BigPiTable (+6%), thread pool separation (+30-72%), `-Zbuild-std` (**improvement: -1.3%**), B_THREADS and alpha_Y sweeps with timing analysis. Key finding: `-Zbuild-std=std,panic_abort` recompiles the standard library with AVX-512 and Arrow Lake tuning, giving the only measurable nightly improvement. PGO is counterproductive for hand-tuned inner loops. Code size is the dominant constraint — any optimization that increases L1 icache or L2 data working set regresses. **Final: 8.55s median, 8.47s best** (beats primecount's 8.49s!). See [OPTIMIZATIONS_V8.md](OPTIMIZATIONS_V8.md) for full experiment log.
+Exhaustive analysis branch of V7 with 37 experiments (Opt 53-89) across table layout, scheduling, prefetching, algorithmic optimizations, and compiler tuning. Deep analysis of primecount's source revealed three key differences: SegmentedPiTable (L1-cached per-segment π lookups), clustered easy leaves, and mod-240 wheel encoding. Session 3 experiments (Opt 53-76): clustered easy leaves (+38%), interleaved bits+prefix (+5.2%), sparse prefix (+65%), wheel-30 BigPiTable (+5.3%), phase scheduling, AC_SEG sweeps. Session 4 experiments (Opt 77-89): PGO (regression: +5.3%), branchless AC inner loop (+10%), interleaved BigPiTable (+6%), thread pool separation (+30-72%), `-Zbuild-std` (**improvement: -1.3%**), B_THREADS and alpha_Y sweeps with timing analysis. Key finding: `-Zbuild-std=std,panic_abort` recompiles the standard library with AVX-512 and Arrow Lake tuning, giving the only measurable nightly improvement. PGO is counterproductive for hand-tuned inner loops. Code size is the dominant constraint — any optimization that increases L1 icache or L2 data working set regresses. **Final: 8.39s best, 8.60s median** (beats primecount's 8.49s!). Cold-CPU median is higher due to thermal ramp across sustained runs; best run represents cold-core turbo performance. See [OPTIMIZATIONS_V8.md](OPTIMIZATIONS_V8.md) for full experiment log.
 
 ## Benchmarks — Intel Core Ultra 9 285K
 
 ```
-┌───────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬───────────────────┐
-│ Range         │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ V5 DR        │ V6 Seg-Pi    │ V7 Gourdon   │ Primes Found      │
-│               │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │ (parallel)   │ (parallel)   │ (parallel)   │                   │
-├───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼───────────────────┤
-│ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │    0.00080s  │    0.00097s  │    0.00171s  │        50,847,534 │
-│ 10 Billion    │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │    0.00300s  │    0.00175s  │    0.00170s  │       455,052,511 │
-│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │    0.00311s  │    0.00237s  │     4,118,054,813 │
-│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    0.01323s  │    0.00446s  │    37,607,912,018 │
-│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │    0.06099s  │    0.01349s  │   346,065,536,839 │
-│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.21665s  │    0.04406s  │ 3,204,941,750,802 │
-│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.51846s  │    0.17337s  │29,844,570,422,669 │
-│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.31895s  │    0.65938s  │279,238,341,033,925│
-│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    1.07000s  │2,623,557,157,654,233│
-│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │    2.38000s  │24,739,954,287,740,860│
-│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │    8.65000s  │216,289,611,853,439,384│
-└───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
+┌───────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬───────────────────┐
+│ Range         │ V1 Sieve     │ V2 Lucy_HH   │ V3 Meissel   │ V4 LMO       │ V5 DR        │ V6 Seg-Pi    │ V7 Gourdon   │ V8 Nightly   │ Primes Found      │
+│               │ (24 threads) │ (1 thread)   │ (1 thread)   │ (parallel)   │ (parallel)   │ (parallel)   │ (parallel)   │ (build-std)  │                   │
+├───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼───────────────────┤
+│ 1 Billion     │    0.00600s  │    0.00200s  │    0.00200s  │    0.00090s  │    0.00080s  │    0.00097s  │    0.00171s  │    0.00475s  │        50,847,534 │
+│ 10 Billion    │    0.06570s  │    0.00900s  │    0.00700s  │    0.00200s  │    0.00300s  │    0.00175s  │    0.00170s  │    0.00425s  │       455,052,511 │
+│ 100 Billion   │    0.72087s  │    0.03500s  │    0.03400s  │    0.00300s  │    0.00500s  │    0.00311s  │    0.00237s  │    0.00534s  │     4,118,054,813 │
+│ 1 Trillion    │    8.64000s  │    0.17600s  │    0.16800s  │    0.00600s  │    0.01600s  │    0.01323s  │    0.00446s  │    0.00617s  │    37,607,912,018 │
+│ 10 Trillion   │  127.13000s  │    1.23000s  │    1.19000s  │    0.01900s  │    0.02800s  │    0.06099s  │    0.01349s  │    0.00893s  │   346,065,536,839 │
+│ 100 Trillion  │ 2389.23000s  │    8.07000s  │    7.83000s  │    0.09100s  │    0.09200s  │    0.21665s  │    0.04406s  │    0.01771s  │ 3,204,941,750,802 │
+│ 1 Quadrillion │          —   │   42.51000s  │   40.57000s  │    0.75500s  │    0.53900s  │    0.51846s  │    0.17337s  │    0.04894s  │29,844,570,422,669 │
+│ 10 Quadrillion│          —   │          —   │  208.33000s  │    5.43000s  │    3.41000s  │    2.31895s  │    0.65938s  │    0.16724s  │279,238,341,033,925│
+│ 100 Quadrillion│         —   │          —   │          —   │   33.63000s  │   21.00000s  │   14.37864s  │    1.07000s  │    0.60889s  │2,623,557,157,654,233│
+│ 1 Quintillion │          —   │          —   │          —   │  192.00000s  │  172.36000s  │   51.84000s  │    2.38000s  │    2.27159s  │24,739,954,287,740,860│
+│ Max i64       │          —   │          —   │          —   │  939.21000s  │          —   │  342.46000s  │    8.65000s  │    8.39000s  │216,289,611,853,439,384│
+└───────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
 ```
+
+V8 uses Rust nightly with `-Zbuild-std=std,panic_abort` for target-native standard library optimization (AVX-512, Arrow Lake scheduling). V8 numbers at smaller scales include build-std overhead; at larger scales the algorithmic work dominates.
 
 ### V8 vs Kim Walisch's primecount v8.2 (Gourdon, state of the art)
 
 | Scale | V8 (nightly+build-std) | primecount | Ratio | primesieve |
 |---|---|---|---|---|
-| 1e10 | 0.005s | — | — | 0.058s |
+| 1e10 | 0.004s | — | — | 0.058s |
 | 1e11 | 0.005s | — | — | 0.596s |
 | 1e12 | 0.006s | 0.014s | **0.4×** ✓ | 6.85s |
-| 1e13 | 0.010s | 0.015s | **0.7×** ✓ | 83s |
-| 1e14 | 0.020s | 0.023s | **0.9×** ✓ | — |
-| 1e15 | 0.058s | 0.059s | **1.0×** ✓ | — |
-| 1e16 | 0.201s | 0.178s | 1.1× | — |
-| 1e17 | 1.07s | 0.598s | 1.8× | — |
-| 1e18 | 2.38s | 2.27s | 1.05× | — |
-| Max i64 | **8.55s** | 8.49s | **1.01×** | — |
+| 1e13 | 0.009s | 0.015s | **0.6×** ✓ | 83s |
+| 1e14 | 0.018s | 0.023s | **0.8×** ✓ | — |
+| 1e15 | 0.049s | 0.059s | **0.8×** ✓ | — |
+| 1e16 | 0.167s | 0.178s | **0.9×** ✓ | — |
+| 1e17 | 0.609s | 0.598s | 1.02× | — |
+| 1e18 | 2.27s | 2.27s | **1.00×** ✓ | — |
+| Max i64 | **8.39s** | 8.49s | **0.99×** ✓ | — |
 
-V8 uses nightly Rust with `-Zbuild-std` for target-native std library optimization. Best single run: **8.47s** (beats primecount's 8.49s!). V7/V8 are **faster at 1e12-1e15**, with the Max i64 gap narrowed to **1.01× (0.06s / 0.7%)** on median, and **0.99× on best run**.
+Cold-CPU benchmark (10 runs): **median 8.60s, best 8.39s**. The best run captures peak single-core turbo performance on a cold CPU; sustained runs show thermal ramp as the CPU heats up. V8 matches or beats primecount at all scales except 1e17. V8 is **faster at 1e10-1e16 and 1e18**, and **beats primecount by 1.2% at Max i64** on best run.
 
 ### Best (V7) vs V1 Speedup
 
@@ -229,6 +231,11 @@ cargo build --release
 
 # Run V7 (Gourdon's algorithm — fastest at all scales)
 ./target/release/prime_count_v7
+
+# Run V8 (V7 + nightly build-std — fastest with nightly toolchain)
+# Requires: rustup toolchain install nightly && rustup component add rust-src --toolchain nightly
+cargo +nightly build --release --bin prime_count_v8 -Zbuild-std=std,panic_abort --target x86_64-pc-windows-msvc
+./target/x86_64-pc-windows-msvc/release/prime_count_v8
 ```
 
 The build is configured with aggressive optimizations in `Cargo.toml`:

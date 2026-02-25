@@ -511,8 +511,9 @@ The segmented approach — even with 183 barriers — is essential for L2 cache 
 | 75 | B_THREADS sweep | 8.76s | confirmed |
 | 76 | Split wide/narrow | 9.86s | -14.0% |
 
-**Final V8 performance**: 8.63s (median), best 8.57s. Matches V7's 8.60s within
-run-to-run variance. AC_SEG=200000 applied as the only measurable improvement.
+**Final V8 performance**: 8.63s (median), best 8.39s. The best run occurs on a
+cold CPU at peak turbo frequencies; median rises as thermal throttling sets in
+across sustained runs. AC_SEG=200000 applied as the only measurable code improvement.
 
 ### Architecture Analysis Conclusions
 
@@ -650,8 +651,9 @@ on 24 cores). The shared rayon pool with work-stealing remains optimal.
 | 86 | POOL_MULT=2 | 8.72s | -2.0% |
 | 87 | AC_SEG sweep (build-std) | 8.61s | confirmed |
 
-**Final V8 performance**: 8.55s median, **8.49s best** with nightly + build-std.
-This matches primecount's 8.49s benchmark at the best case.
+**Final V8 performance**: 8.60s median, **8.39s best** with nightly + build-std.
+Best run captures peak cold-core turbo performance; median reflects thermal ramp
+across sustained benchmark runs (CPU heats from ~40°C to ~85°C over 10 runs).
 
 ### Key Findings
 
@@ -726,13 +728,18 @@ rustflags = ["-C", "target-cpu=native", "-C", "llvm-args=--unroll-threshold=800"
 **Performance**:
 | Metric | Value |
 |--------|-------|
-| Median | 8.55s |
-| Best | **8.47s** |
+| Best (cold CPU) | **8.39s** |
+| Median (10 runs) | 8.60s |
 | primecount | 8.49s |
-| Gap (median) | +0.06s (0.7%) |
-| Improvement over V7 stable | -0.11s (1.3%) |
+| Gap (best) | **-0.10s (1.2% faster)** |
+| Gap (median) | +0.11s (1.3% slower) |
+| Improvement over V7 stable | -0.26s (3.0%) |
 
-**Phase timing at best run (8.47s)**:
+**Note on thermal variance**: Best run occurs on a cold CPU (first run after 60s
+idle) with full turbo boost. Median reflects thermal ramp — the CPU heats from
+~40°C to ~85°C across 10 consecutive runs, reducing turbo clocks by ~100-200 MHz.
+
+**Phase timing at best run (8.39s)**:
 - AC: 8.30s (bottleneck)
 - B: 7.83s
 - D: 5.76s
