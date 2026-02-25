@@ -484,7 +484,7 @@ And a second lesson, about the process: **the strategic pivots mattered more tha
 
 The 107 experiments produced a result, but they also produced *understanding*. Each failed experiment was a question answered: *why doesn't this work?* And the answers, taken together, draw a map of the terrain near a hardware performance floor — terrain that looks very different from the well-explored landscape of "normal" optimization, where profiler-guided improvements reliably yield gains.
 
-This section distills 22 lessons organized into five themes: the nature of the hardware bottleneck (§7.1–7.3), why standard optimizations fail (§7.4–7.9), how the system's components interact (§7.10–7.12), architectural insights (§7.13–7.17), and practical engineering findings (§7.18–7.22). Each lesson is backed by specific experiments; together they paint a picture of what it looks like when you have truly run out of room.
+This section distills 23 lessons organized into five themes: the nature of the hardware bottleneck (§7.1–7.3), why standard optimizations fail (§7.4–7.9), how the system's components interact (§7.10–7.12), architectural insights (§7.13–7.17), and practical engineering findings (§7.18–7.23). Each lesson is backed by specific experiments; together they paint a picture of what it looks like when you have truly run out of room.
 
 #### Theme 1: The Hardware Bottleneck
 
@@ -810,9 +810,27 @@ Breaking through the current ceiling requires one of:
 
 The MLP constraint model (§4) is portable: on any architecture, the performance ceiling appears to be determined by min(per-core MLP × cores, DRAM bandwidth / bytes-per-lookup, register file / registers-per-iteration). The specific values change, but the analytical framework should apply.
 
-### 7.22 Limitations
+### 7.22 Thermal Effects: The Hidden Variable in Modern Benchmarking
 
-Our comparison with primecount uses wall-clock time under controlled conditions but does not account for potential platform-specific advantages (primecount may perform differently on AMD processors or Linux systems). The thermal variance between cold-CPU best (8.39s) and sustained median (8.57s) reflects the reality of modern boost clocks and should be reported alongside best times in benchmarks.
+One of the underappreciated realities of performance work on modern processors is that **the CPU you benchmark on the first run is not the same CPU you benchmark on the fifth**. Modern processors aggressively exploit thermal headroom: Intel's Turbo Boost 3.0 can sustain 5.7 GHz on the 285K when the die is cool, but sustained all-core workloads drive temperatures up and frequencies down. Our data quantifies this precisely: cold-CPU best is 8.39s while sustained median is 8.57s — a **2.1% penalty from thermal throttling alone**.
+
+This has several implications for practitioners:
+
+1. **Cooldown cycles are part of the methodology.** We enforced ≥60 seconds of idle time before cold measurements and monitored core temperatures. Without this discipline, "best" times are artifacts of when the CPU happened to be coolest, not properties of the code.
+
+2. **Alternating runs equalize thermal bias.** Our head-to-head protocol (V8, primecount, V8, primecount, ...) ensures that both tools face similar thermal conditions. Had we run all 10 V8 measurements first, then all 10 primecount measurements, the second tool would systematically appear slower due to accumulated die heating.
+
+3. **Report both cold and sustained numbers.** A researcher reporting only the cold-CPU best is presenting an idealized scenario that users will rarely encounter in production. The sustained median better represents real-world performance. We report both because neither alone tells the complete story.
+
+4. **Thermal variance sets a noise floor for comparisons.** Our 1.2% advantage over primecount is meaningful only because it exceeds the within-run thermal variance and is confirmed by the head-to-head protocol. Claims of improvement smaller than the thermal variance (~2% on this hardware) require extraordinary statistical rigor.
+
+5. **Power-management features interact with workload phases.** During the D→AC→B pipeline, different phases stress different hardware resources — D is compute-heavy, AC is memory-heavy, B mixes both. Each phase generates different thermal profiles, and the transition between them can trigger frequency adjustments mid-run. This is why our run-to-run variance (~0.05s for V8) is nonzero even on an otherwise-idle machine.
+
+These effects are not unique to prime counting. Any benchmark on a modern boost-clock processor — from database queries to neural network inference — faces the same thermal confound. The broader lesson: **on modern processors, performance is a function of temperature as much as code quality**, and benchmarking methodology must account for this.
+
+### 7.23 Limitations
+
+Our comparison with primecount uses wall-clock time under controlled conditions but does not account for potential platform-specific advantages (primecount may perform differently on AMD processors or Linux systems). The thermal effects discussed in §7.22 are mitigated by our alternating-run protocol but remain a source of systematic uncertainty.
 
 **Energy efficiency.** We do not measure power consumption or energy-per-computation. The BigPiTable architecture's heavy DRAM traffic (estimated ~50–70 GB/s sustained during AC) likely consumes significantly more memory-subsystem power than primecount's L1-resident approach. An energy-efficiency comparison (joules per π(x) computation) could favor primecount despite its slower wall-clock time.
 
@@ -889,6 +907,9 @@ Beyond the specific result, this study yields generalizable findings across four
 
 **On correctness:**
 16. **Off-by-one errors are the dominant failure mode** in number-theoretic code — 45% of our 20 bugs — and they are invisible at small scales. The most effective defense we found is testing at maximum scale with cross-validation between independent implementations (§7.16).
+
+**On methodology:**
+17. **Thermal effects are the hidden variable** — modern boost clocks create a 2.1% performance gap between cold and sustained runs, setting a noise floor that small improvements must exceed to be credible. Benchmarking methodology must account for cooldown cycles, alternating runs, and reporting both cold and sustained numbers (§7.22).
 
 The MLP constraint model (§4) provides a portable analytical framework: on any architecture, the performance ceiling appears to be determined by the minimum of per-core MLP capacity, system DRAM bandwidth, and register file depth. We believe this framework applies beyond prime counting to hash tables, database joins, graph traversals, and any random-access workload at scale where the working set exceeds the last-level cache.
 
