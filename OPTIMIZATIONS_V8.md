@@ -744,3 +744,22 @@ idle) with full turbo boost. Median reflects thermal ramp — the CPU heats from
 - B: 7.83s
 - D: 5.76s
 - BigPiTable: 0.139s
+
+**Head-to-head vs primecount** (10 alternating runs, identical thermal conditions):
+
+| Run | V8 (internal) | primecount (wall) | Delta |
+|-----|---------------|-------------------|-------|
+| 1 | 8.525s | 9.227s | **V8 −0.702s** |
+| 2 | 8.543s | 8.685s | **V8 −0.142s** |
+| 3 | 8.585s | 8.698s | **V8 −0.113s** |
+| 4 | 8.593s | 8.620s | **V8 −0.027s** |
+| 5 | 8.623s | 8.723s | **V8 −0.100s** |
+| 6 | 8.631s | 8.699s | **V8 −0.068s** |
+| 7 | 8.660s | 8.661s | **V8 −0.001s** |
+| 8 | 8.666s | 8.696s | **V8 −0.030s** |
+| 9 | 8.668s | 8.761s | **V8 −0.093s** |
+| 10 | 8.727s | 8.690s | PC −0.037s |
+
+V8 wins **9/10 runs**. V8 median: 8.63s, primecount median: 8.70s (−0.07s gap).
+primecount's published 8.49s is a cold-CPU best; under sustained load both tools
+show similar thermal ramp, with V8 consistently ahead.

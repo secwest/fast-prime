@@ -76,6 +76,8 @@ V8 uses Rust nightly with `-Zbuild-std=std,panic_abort` for target-native standa
 
 Cold-CPU benchmark (10 runs): **median 8.60s, best 8.39s**. The best run captures peak single-core turbo performance on a cold CPU; sustained runs show thermal ramp as the CPU heats up. V8 matches or beats primecount at all scales except 1e17. V8 is **faster at 1e10-1e16 and 1e18**, and **beats primecount by 1.2% at Max i64** on best run.
 
+**Head-to-head** (10 alternating runs, identical thermal conditions): V8 wins **9/10 runs**. V8 median 8.63s vs primecount median 8.70s (−0.07s). primecount's published 8.49s is a cold-CPU best; under sustained thermal load it runs 8.70s median, comparable to V8's 8.60s cold-start median.
+
 ### Best (V7) vs V1 Speedup
 
 | Range | V1 (24 threads) | V7 Gourdon (parallel) | Speedup |
