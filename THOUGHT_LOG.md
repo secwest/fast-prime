@@ -3414,6 +3414,34 @@ avenues for further improvement are architectural rewrites, not micro-optimizati
    per lookup vs current L2/L3 = 12-40 cycles. Potential ~0.5-1.0s improvement.
 2. **Segment-first AC**: Threads own segment ranges instead of parallel over
    b-values, eliminating the 4× concurrent penalty from L3/DRAM bandwidth sharing.
-3. **P/E core pinning**: Replace rayon with hand-tuned thread pool that pins
-   latency-sensitive AC threads to P-cores and throughput-oriented D threads to
-   E-cores.
+3. ~~**P/E core pinning**~~: Tested and FAILED (Opt 90). AC needs all 24 cores;
+   restricting to 8 P-cores causes 2.2× regression.
+
+## V8 Session 5: Further Optimization Attempts
+
+### P-core Affinity (Opt 90) — CATASTROPHIC
+Pinned AC's 8-thread dedicated pool to P-cores (5.7GHz, 2MB L2). Result: 18.8s
+AC (2.2× regression). AC is parallelism-limited, not L2-limited. The 44K wide
+b-values need all 24 cores. Restricting to 8 threads reduces throughput 3×.
+
+### Per-b-value Streaming SegPiTable (Opt 91) — CATASTROPHIC
+Built a 12KB local sieve per thread (131072-number segments, 1024 u64 words).
+Each rayon thread rebuilds the sieve when xpq crosses a segment boundary. The
+approach is correct for correctness but catastrophically slow: each of 44K wide
+b-values independently traverses ~23K segments, rebuilding at each boundary.
+Total sieve rebuilds: 44K × 23K = 1.01B (at 50μs each = enormous).
+
+**The fundamental insight**: SegPiTable only works with **segment-first**
+iteration (primecount's approach) where the sieve is built ONCE per segment
+and ALL b-values are processed within it. With our b-first architecture, each
+thread independently rebuilds the same segments, multiplying cost by O(threads).
+
+### mimalloc Large Pages (Opt 92) — NO EFFECT
+`mi_option_large_os_pages` silently fails without `SeLockMemoryPrivilege`.
+Would reduce TLB misses (140K → 143 entries for 285MB BigPiTable) but requires
+admin Group Policy grant.
+
+### Session 5 Conclusion
+The b-first architecture is exhaustively optimized at 92 experiments. The only
+remaining avenue is a segment-first rewrite (~1000 lines) to enable SegPiTable.
+Even then, B (7.0s) would become the new bottleneck, capping total at ~7.0s.

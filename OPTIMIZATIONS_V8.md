@@ -763,3 +763,71 @@ idle) with full turbo boost. Median reflects thermal ramp — the CPU heats from
 V8 wins **9/10 runs**. V8 median: 8.63s, primecount median: 8.70s (−0.07s gap).
 primecount's published 8.49s is a cold-CPU best; under sustained load both tools
 show similar thermal ramp, with V8 consistently ahead.
+
+---
+
+## Session 5: Further Optimization Analysis
+
+### Opt 90: P-core Affinity for AC (CATASTROPHIC REGRESSION)
+
+**What**: Created a dedicated 8-thread rayon pool for AC, pinned to P-cores (cores
+0-7, 2MB L2, 5.7GHz) using `SetThreadAffinityMask`. Hypothesis: AC segments
+(~2.4MB) fit in P-core L2 but overflow E-core L2 (1MB per core).
+
+**Result**: 18.8s (AC), 2.2× regression.
+
+**Root cause**: AC needs all 24 cores for parallelism (44K b-values). Restricting to
+8 P-cores cuts throughput by 3×. The L2 cache benefit of P-cores is completely
+overwhelmed by having 1/3 the threads. AC is L3/DRAM bandwidth-bound, not L2-bound.
+
+### Opt 91: Per-b-value Streaming SegPiTable (CATASTROPHIC REGRESSION)
+
+**What**: Implemented a streaming SegmentedPiTable (12KB per segment, fits L1 cache)
+for wide b-values. Each rayon thread maintains a local sieve covering 131072
+numbers (1024 u64 words + 1024 u32 prefix). When xpq crosses a segment boundary,
+the thread rebuilds the sieve using precomputed small primes (~5660 primes up to
+sqrt(sqrt(x)) ≈ 55K). Narrow b-values kept using BigPiTable (already L2-friendly).
+
+**Result**: 12.8s at 100 Quadrillion (was 0.61s), >20× regression. Killed at Max i64.
+
+**Root cause**: Each of 44K wide b-values independently traverses ~23K segments,
+rebuilding the sieve at each crossing. Total rebuilds per core: ~42M, at ~50μs each
+= 2100 seconds. The approach fails because threads DON'T SHARE sieves — each thread
+redundantly rebuilds the same segment's sieve independently.
+
+**Why primecount avoids this**: primecount uses a **segment-first** architecture:
+iterate segments (build sieve ONCE per segment), then process ALL b-values within
+that segment. Total rebuilds: 23K (one per segment), not 23K × 44K (one per b-value
+per segment). This requires fundamentally different parallelism: par_iter over
+segments (or b-value chunks within segments), not over b-values across segments.
+
+### Opt 92: mimalloc Large Pages (NO EFFECT)
+
+**What**: Enabled mimalloc's `mi_option_large_os_pages` (2MB huge pages) to reduce
+TLB misses for BigPiTable (285MB = 140K TLB entries at 4KB, vs 143 at 2MB).
+
+**Result**: No change (same 8.5-8.6s). Silently fails without `SeLockMemoryPrivilege`
+(requires admin Group Policy grant on Windows).
+
+### Analysis: Why the B-First Architecture Is Near-Optimal
+
+The current b-first architecture (iterate b-values, lookup BigPiTable) has been
+exhaustively optimized through 92 experiments. The remaining gap to primecount
+(~0.07s median) is explained by:
+
+1. **L3 bandwidth contention** (the real bottleneck): AC, B, and D all run
+   concurrently, competing for 36MB L3 + ~90 GB/s DRAM bandwidth. AC alone = 2.2s;
+   concurrent = 8.5s (4× penalty). No micro-optimization can eliminate this.
+
+2. **SegPiTable requires segment-first architecture**: primecount's SegmentedPiTable
+   works because they iterate segments (build sieve once), then process all b-values.
+   Our b-first architecture iterates b-values, then looks up BigPiTable. Converting
+   to segment-first requires:
+   - Replacing the AC outer segment loop with a sub-segment loop
+   - Building an inverted index mapping segments → applicable b-values
+   - Restructuring parallelism from par_iter-over-b to par_iter-over-segments
+   - This is a ~1000-line rewrite of the most complex function in the codebase
+
+3. **Diminishing returns**: Even with segment-first SegPiTable, the estimated
+   improvement is ~1.5-3s on AC, making total = max(~5s AC, 7s B) = 7s. B then
+   becomes the new bottleneck, requiring its own optimization cycle.
