@@ -10,7 +10,7 @@ How fast can you count the primes below 2⁶³? Kim Walisch's *primecount* — t
 
 Our Rust implementation of Gourdon's algorithm computes π(2⁶³ − 1) = 216,289,611,853,439,384 in **8.39 seconds** on an Intel Core Ultra 9 285K. But the journey matters more than the destination: over **107 controlled experiments**, we systematically explored every optimization axis — and discovered that **106 of them failed**. The only improvement came from recompiling the Rust standard library (+1.3%). Every other change — software prefetch, profile-guided optimization, cache tiling, loop restructuring, data structure compaction, thread pool isolation — made things worse, often dramatically.
 
-Why? The hot inner loop sits at the intersection of four hardware constraints that form a **stable equilibrium**: L2 miss-handling capacity (saturated by 4× unrolling), x86-64's 16-register file (nearly full), DRAM bandwidth (89.6 GB/s shared across 24 cores), and L3 cache pressure (285 MB table vs 36 MB cache). Any optimization that improves one constraint necessarily degrades another.
+Why? The hot inner loop sits at the intersection of four hardware constraints that form a **stable equilibrium**: L2 miss-handling capacity (saturated by 4× unrolling), x86-64's 16-register file (nearly full), DRAM bandwidth (105.6 GB/s shared across 24 cores), and L3 cache pressure (285 MB table vs 36 MB cache). Any optimization that improves one constraint necessarily degrades another.
 
 Along the way, we discovered that improving cache hit rate can *slow things down* by 80%, that making one component faster can paradoxically slow the *total* computation, and that every textbook HPC optimization technique fails near the hardware floor. These findings — detailed across 22 lessons in §7 — apply broadly to any memory-bound computation on modern out-of-order processors.
 
@@ -54,7 +54,7 @@ All experiments were conducted on:
 | P-cores | 8 × Lion Cove, 5.7 GHz, 2 MB L2 each |
 | E-cores | 16 × Skymont, 4.6 GHz, 4 MB L2 per 4-core cluster |
 | L3 cache | 36 MB shared |
-| Memory | 96 GB DDR5-5600 dual channel (~89.6 GB/s) |
+| Memory | 96 GB DDR5-6600 dual channel (~105.6 GB/s) |
 | Hyperthreading | None (24 total hardware threads) |
 | OS | Windows 11 |
 | Compiler | Rust 1.95.0-nightly, LLVM 19 |
@@ -272,7 +272,7 @@ The AC inner loop's performance is governed by three coupled hardware constraint
 
 3. **L3 cache pressure** (36 MB vs 285 MB table): The BigPiTable's 285 MB footprint guarantees that the vast majority of random lookups miss L3 when D is running concurrently (D's sieve operations continuously evict BigPiTable entries). The L3 hit rate for AC is approximately 36/285 ≈ 12.6% in isolation, dropping further under concurrent load.
 
-4. **DRAM bandwidth ceiling** (89.6 GB/s): Each `pi_fast` lookup that misses L3 requires fetching 2 cache lines (128 bytes) from DRAM. With ~87% of lookups missing L3, the effective DRAM demand per lookup is ~111 bytes. The system's DDR5-5600 dual-channel memory provides ~89.6 GB/s peak bandwidth, shared across all 24 cores. This limits system-wide throughput to approximately 800M lookups/second — the true upper bound on AC throughput regardless of per-core MLP. The 4× concurrent penalty (2.10s solo → 8.42s) is consistent with D's streaming sieve operations consuming ~75% of available DRAM bandwidth, leaving AC with only ~22 GB/s effective bandwidth.
+4. **DRAM bandwidth ceiling** (105.6 GB/s): Each `pi_fast` lookup that misses L3 requires fetching 2 cache lines (128 bytes) from DRAM. With ~87% of lookups missing L3, the effective DRAM demand per lookup is ~111 bytes. The system's DDR5-6600 dual-channel memory provides ~105.6 GB/s peak bandwidth, shared across all 24 cores. This limits system-wide throughput to approximately 950M lookups/second — the true upper bound on AC throughput regardless of per-core MLP. The 4× concurrent penalty (2.10s solo → 8.42s) is consistent with D's streaming sieve operations consuming ~75% of available DRAM bandwidth, leaving AC with only ~26 GB/s effective bandwidth.
 
 ### 4.2 The Equilibrium
 
@@ -686,7 +686,7 @@ Beyond the specific result, this study yields generalizable findings across four
 **Hardware constraints:**
 1. **MLP over cache hit rate**: Memory-level parallelism governs performance for random-access workloads; optimizations that improve locality at the cost of MLP are counterproductive (§7.1).
 2. **The 16-GPR wall**: x86-64's register file is the hard limit on unroll factor for MLP-generating loops; only wider ISAs (ARM, RISC-V with 32 GPRs) can push further (§7.8).
-3. **DRAM bandwidth is the true ceiling**: The system's 89.6 GB/s bandwidth, shared across all cores, is the ultimate limiter regardless of per-core optimizations (§4.1).
+3. **DRAM bandwidth is the true ceiling**: The system's 105.6 GB/s bandwidth, shared across all cores, is the ultimate limiter regardless of per-core optimizations (§4.1).
 
 **Anti-patterns near the optimum:**
 4. **Software prefetch is harmful** on processors with deep OoO windows (§7.2).
