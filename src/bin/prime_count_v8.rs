@@ -62,6 +62,71 @@ impl Drop for PrimesieveIterator {
     }
 }
 
+// ── Large Page support (2MB pages via mimalloc + SeLockMemoryPrivilege) ──────
+#[cfg(target_os = "windows")]
+mod large_page_alloc {
+    use std::ptr;
+    use std::sync::Once;
+
+    type HANDLE = *mut std::ffi::c_void;
+    type BOOL = i32;
+    type DWORD = u32;
+
+    #[repr(C)]
+    struct LUID { low_part: u32, high_part: i32 }
+
+    #[repr(C)]
+    struct LUID_AND_ATTRIBUTES { luid: LUID, attributes: u32 }
+
+    #[repr(C)]
+    struct TOKEN_PRIVILEGES {
+        privilege_count: u32,
+        privileges: [LUID_AND_ATTRIBUTES; 1],
+    }
+
+    #[allow(non_snake_case)]
+    extern "system" {
+        fn GetCurrentProcess() -> HANDLE;
+        fn OpenProcessToken(ProcessHandle: HANDLE, DesiredAccess: DWORD, TokenHandle: *mut HANDLE) -> BOOL;
+        fn LookupPrivilegeValueW(lpSystemName: *const u16, lpName: *const u16, lpLuid: *mut LUID) -> BOOL;
+        fn AdjustTokenPrivileges(TokenHandle: HANDLE, DisableAll: BOOL, NewState: *const TOKEN_PRIVILEGES, BufferLength: DWORD, PreviousState: *mut TOKEN_PRIVILEGES, ReturnLength: *mut DWORD) -> BOOL;
+        fn CloseHandle(hObject: HANDLE) -> BOOL;
+    }
+
+    const TOKEN_ADJUST_PRIVILEGES: u32 = 0x0020;
+    const TOKEN_QUERY: u32 = 0x0008;
+    const SE_PRIVILEGE_ENABLED: u32 = 0x00000002;
+
+    static INIT: Once = Once::new();
+
+    /// Enable SeLockMemoryPrivilege and configure mimalloc for 2MB large pages.
+    pub fn enable_large_pages() {
+        INIT.call_once(|| {
+            // Enable SeLockMemoryPrivilege in process token
+            unsafe {
+                let process = GetCurrentProcess();
+                let mut token: HANDLE = ptr::null_mut();
+                if OpenProcessToken(process, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) != 0 {
+                    let priv_name: Vec<u16> = "SeLockMemoryPrivilege\0".encode_utf16().collect();
+                    let mut luid = LUID { low_part: 0, high_part: 0 };
+                    if LookupPrivilegeValueW(ptr::null(), priv_name.as_ptr(), &mut luid) != 0 {
+                        let tp = TOKEN_PRIVILEGES {
+                            privilege_count: 1,
+                            privileges: [LUID_AND_ATTRIBUTES { luid, attributes: SE_PRIVILEGE_ENABLED }],
+                        };
+                        AdjustTokenPrivileges(token, 0, &tp, 0, ptr::null_mut(), ptr::null_mut());
+                    }
+                    CloseHandle(token);
+                }
+            }
+            // Tell mimalloc to use large OS pages for all future allocations
+            extern "C" { fn mi_option_set(option: i32, value: i64); }
+            const MI_OPTION_ALLOW_LARGE_OS_PAGES: i32 = 6;
+            unsafe { mi_option_set(MI_OPTION_ALLOW_LARGE_OS_PAGES, 1); }
+        });
+    }
+}
+
 // ── Gourdon's Algorithm ──────────────────────────────────────────────────────
 //
 // Formula: π(x) = A - B + C + D + Φ₀ + Σ
@@ -2135,6 +2200,12 @@ fn main() {
         }
         const HIGH_PRIORITY_CLASS: u32 = 0x00000080;
         SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    }
+
+    // Enable large pages: activate SeLockMemoryPrivilege and tell mimalloc to use 2MB pages
+    #[cfg(target_os = "windows")]
+    {
+        large_page_alloc::enable_large_pages();
     }
 
     // Oversubscribe rayon thread pool for better work-stealing across B/AC/D
