@@ -1260,3 +1260,105 @@ gives max(8.46, 8.47) = 8.72s — worse. There is no thread configuration that i
 **Key insight**: The system is at its optimization limit for the current architecture. The AC inner loop is memory-bandwidth-bound with the hardware's out-of-order engine already maximizing MLP. Any change that adds instructions or memory accesses to the inner loop causes a regression. The only path to significant improvement is a segment-first architectural rewrite that eliminates AC's 4× concurrent penalty.
 
 V8 remains faster than primecount: 8.74s vs 8.90s (1.9% advantage, 5/5 wins).
+
+---
+
+## Session 11: Deep Optimization Search (Opts 121-130)
+
+Baseline: 8.57s median (AC=8.47, D=5.7, B=7.0). V8 beats primecount by 2.6% (8.57 vs 8.80).
+
+### Opt 121: LLVM flags — post-misched, enable-misched, inline-threshold (NOISE)
+**What**: Tested LLVM backend flags: `-enable-post-misched`, `-machine-sink-split-probability-threshold=100`, `-enable-misched`, `-inline-threshold=1000`.
+**Result**: All within noise (8.53-8.69s). Compiler already generating near-optimal code for the hot loop.
+
+### Opt 122: Wheel-30 BigPiTable (REGRESSION — 13%)
+**What**: Replace odd-only sieve (8 bits per 16 numbers) with wheel-30 encoding (8 bits per 30 numbers). Reduces BigPiTable from 285MB → 152MB (47% smaller). L3 hit rate doubles: 12.6% → 23.7%.
+**Result**: AC = 9.56s (was 8.47s) — **13% regression**.
+- Build: odd sieve → wheel-30 conversion, +80% build time (0.17s vs 0.095s)
+- pi_fast decode: n/30 division + n%30 modulo + table lookup = ~7 extra µops per call
+- ROOT CAUSE: Extra µops reduce ROB-limited MLP. With 128 µops per 4× group (was 92), the ROB holds fewer in-flight loads (16 vs 22). Memory throughput drops despite better hit rate.
+- **Confirms the MLP bottleneck principle**: ANY instruction added to pi_fast reduces MLP and hurts, even with 47% smaller table.
+- **Reverted completely**
+
+### Opt 125: Interleaved BigPiTable — bits+prefix in same cache line (REGRESSION)
+**What**: Combine bits[word] (u64) and prefix[word] (u32) into a single 16-byte struct per word. Reduces cache line accesses from 2→1 per pi_fast call.
+**Result**: AC = 8.68s, Wall = 8.80s (was 8.57s) — **regression**.
+- Total size: 362MB (was 285MB, +27% from padding)
+- MLP already hides the second load (8 loads in flight from 4× unroll)
+- Larger working set → worse LLC utilization → more DRAM misses
+- **Reverted completely**
+
+### Opt 124: P-core/E-core thread affinity via SetThreadAffinityMask (REGRESSION)
+**What**: Pin 8 AC rayon threads to P-cores (5.7GHz, 2MB L2) and 16 D threads to E-cores (4.6GHz). Uses Windows SetThreadAffinityMask FFI.
+**Result**: AC = 14.8s, D = 10.0s, Wall = 15.0s — **catastrophic regression**.
+- 8 AC threads can't saturate DRAM bandwidth (need ~24 threads for full bandwidth)
+- D on E-cores alone: 75% slower (lost P-core frequency + fewer threads)
+- **Fundamental**: AC is bandwidth-limited, not core-frequency-limited. Needs ALL 24 cores.
+- **Reverted completely**
+
+### Opt 126: Rayon with_min_len tuning (REGRESSION at large values)
+**What**: Control rayon's par_iter chunk size via `with_min_len(N)` to reduce scheduling overhead.
+| AC_MIN_LEN | Wall (s) | Note |
+|------------|----------|------|
+| 1 (default)| 8.55    | baseline |
+| 64         | 8.57    | noise |
+| 256        | 8.92    | load imbalance |
+| 1024       | 11.3    | severe imbalance |
+| 4096       | 17.5    | catastrophic |
+- Default fine-grained scheduling is already optimal. Larger chunks cause load imbalance because b-values have wildly different l-range sizes.
+
+### Opt 127: Process priority HIGH/REALTIME (NOISE)
+**What**: Set process priority class to High or RealTime via Start-Process.
+**Result**: Both within noise of baseline (8.55-8.68s). System is already dedicated to the process.
+
+### Opt 128: B thread throttling — reducing B_THREADS (INSIGHT but no wall improvement)
+**What**: Reduce B's thread count to reduce memory bandwidth contention, giving AC more bandwidth.
+| B_THREADS | AC (s) | B (s) | Wall (s) |
+|-----------|--------|-------|----------|
+| 24        | 8.42   | 7.41  | 8.53     |
+| 22        | 8.61   | 8.57  | 8.73     |
+| 20        | 8.43   | 8.76  | 8.87     |
+| 16        | 7.96   | 8.80  | 8.91     |
+| 12        | 7.72   | 9.26  | 9.37     |
+| 8         | 7.44   | 10.44 | 10.57    |
+| 4         | 7.21   | 14.36 | 14.49    |
+**Insight**: AC improves 14% (8.42→7.21s) as B uses fewer threads. Confirms bandwidth contention is real. But B becomes the bottleneck before AC gains enough. Optimal is B_THREADS=24 (default).
+
+### Opt 129: 1GB huge pages via MIMALLOC_RESERVE_HUGE_OS_PAGES (NOISE)
+**What**: Reserve 2-4GB of 1GB huge pages instead of 2MB large pages.
+**Result**: Median 8.55s vs 8.59s baseline — within noise (~0.5%). TLB is not a meaningful bottleneck with 2MB pages (BigPiTable = 143 pages, L2 TLB has 1536 entries).
+
+### Opt 130: LTO variations — off, thin, fat (NOISE)
+**What**: Test different LTO modes (none, thin, fat).
+**Result**: All within noise (8.54-8.64s). LTO provides no measurable benefit for this single-binary, single-crate code.
+
+### Confirmation experiments
+
+**D_THREADS=8 (AC isolation)**: AC=2.80s, D=23.9s, B=4.9s, Wall=24.2s
+- Confirms: when D has its own pool, AC is 3× faster (rayon scheduling contention eliminated)
+- But D becomes catastrophically slow (oversubscription: 8+24=32 threads on 24 cores)
+
+**PHASE_DB_AC (D+B first, then AC alone)**: D=5.6s, B=6.6s, AC=2.17s, Wall=9.25s
+- AC alone takes only 2.17s — **confirms 4× concurrent penalty** (8.47/2.17 = 3.9×)
+- Wall = max(D,B) + AC_alone = 6.6 + 2.17 = 8.77s (+ setup) > concurrent 8.57s
+
+### Session 11 Summary
+
+| Experiment | Wall (s) | vs Baseline | Status |
+|------------|----------|-------------|--------|
+| Opt 121 LLVM flags | 8.56 | -0.1% | ≈ noise |
+| Opt 122 Wheel-30 BPT | 9.67 | +12.8% | ✗ regression |
+| Opt 124 Core pinning | 15.0 | +75% | ✗ catastrophic |
+| Opt 125 Interleaved BPT | 8.80 | +2.7% | ✗ regression |
+| Opt 126 min_len=256 | 8.92 | +4.1% | ✗ regression |
+| Opt 127 REALTIME priority | 8.63 | +0.7% | ≈ noise |
+| Opt 128 B_THREADS=16 | 8.89 | +3.7% | ✗ B bottleneck |
+| Opt 129 1GB huge pages | 8.55 | -0.2% | ≈ noise |
+| Opt 130 thin LTO | 8.60 | +0.4% | ≈ noise |
+
+**Critical discovery — ROB-limited MLP principle**: The AC inner loop is limited by how many memory loads fit in the CPU's reorder buffer (ROB=512 entries). With ~92 µops per 4× unrolled group, the ROB holds ~5.6 groups = 22 outstanding BigPiTable loads. Adding ANY instructions (wheel-30: +36 µops, interleaved: +0 but +27% memory) reduces effective MLP and causes regression. This is the FUNDAMENTAL reason no BigPiTable optimization works.
+
+**The remaining viable path**: A streaming AC rewrite that eliminates BigPiTable entirely, converting random DRAM access to sequential L1 streaming. Estimated: AC from 8.47s → 2-3s concurrent (eliminating the 4× penalty). Wall time from 8.57s → ~7.0s. But requires ~500-1000 lines of new code.
+
+Current performance: **V8 beats primecount 8.57s vs 8.80s (2.6% faster)**, verified 5/5 wins.
+Total experiments: **145+** across 11 sessions.

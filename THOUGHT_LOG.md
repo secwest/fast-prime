@@ -3704,3 +3704,81 @@ This is a ~500-1000 line rewrite with high risk but transformative potential.
 - AC segment tuning → noise
 - D_THREADS isolation → reveals scheduling contention
 - AC prefetch-ahead → regression
+
+## V8 Session 11 — Exhaustive Optimization Search (Opts 121-130)
+
+**Date**: 2026-02-27
+**Goal**: Exhaustive search of remaining optimization avenues after 119 experiments
+
+### The ROB-Limited MLP Principle
+
+This session's most important discovery is a precise model for WHY nothing works in the AC inner loop:
+
+**The AC bottleneck is fundamentally limited by the CPU's Reorder Buffer (ROB) capacity.**
+
+On Arrow Lake P-cores (Golden Cove microarchitecture), ROB = 512 entries. The 4× unrolled inner loop uses ~92 µops per iteration. This means the ROB can hold ~5.6 iterations ahead, keeping ~22 BigPiTable loads in flight. Each load takes ~80ns (L3 miss to DRAM), so achieving ~22 loads in flight × 64 bytes = 17.6 GB/s effective bandwidth per P-core.
+
+Any instruction added to pi_fast or fast_div reduces the number of iterations the ROB can "see ahead", reducing the number of in-flight loads, reducing effective memory bandwidth:
+- Wheel-30 adds ~36 µops (n/30 + n%30 + lookup) → ~128 µops/group → 4 iterations ahead → ~16 loads → -27% MLP → +13% regression
+- Two-level prefix adds ~8 µops → ~100 µops/group → 5.1 iterations ahead → ~20 loads → -9% MLP → +3.5% regression
+- Interleaved layout adds 0 µops but +27% working set → more LLC misses → net regression
+
+This is a **hard architectural limit**. No software change that touches the hot path can improve things.
+
+### Experiments
+
+1. **Opt 121: LLVM flags** — `-enable-misched`, `-inline-threshold=1000`, etc. All within noise. Compiler already generates near-optimal code.
+
+2. **Opt 122: Wheel-30 BigPiTable** — Table 47% smaller (152MB vs 285MB), L3 hit rate doubled. But +36 µops in pi_fast kill MLP → 13% regression. Most illustrative failure of the ROB principle.
+
+3. **Opt 125: Interleaved BigPiTable** — Bits+prefix in same cache line (halves accesses). But 27% larger working set → 2.7% regression. MLP already hides the second access.
+
+4. **Opt 124: P-core/E-core affinity** — Pin 8 AC threads to P-cores, 16 D to E-cores. 75% regression — 8 threads can't saturate DRAM bandwidth.
+
+5. **Opt 126: Rayon with_min_len** — Values 1→4096. Default (1) is optimal; larger values cause load imbalance due to variable l-range sizes.
+
+6. **Opt 127: Process priority** — HIGH/REALTIME. No effect (system already dedicated).
+
+7. **Opt 128: B thread throttling** — Reducing B_THREADS from 24 to 4 improves AC by 14% (8.42→7.21s) but B becomes bottleneck (7.41→14.36s). Confirms bandwidth contention but no net improvement.
+
+8. **Opt 129: 1GB huge pages** — vs 2MB large pages. Within noise. TLB not a bottleneck.
+
+9. **Opt 130: LTO variants** — off, thin, fat all within noise.
+
+### B Thread Throttling: Precise Bandwidth Contention Data
+
+This is the most actionable data from the session:
+
+| B_THREADS | AC (s) | B (s) | Wall (s) | AC improvement |
+|-----------|--------|-------|----------|---------------|
+| 24        | 8.42   | 7.41  | 8.53     | baseline      |
+| 16        | 7.96   | 8.80  | 8.89     | -5.5%         |
+| 8         | 7.44   | 10.44 | 10.57    | -11.6%        |
+| 4         | 7.21   | 14.36 | 14.49    | -14.4%        |
+
+The slope is clear: each B thread removed gives AC ~0.06s, but costs B ~0.35s. The crossover happens around B_THREADS=22-24 where B just finishes before AC. No tuning helps because the tradeoff ratio is ~6:1 against.
+
+### Dead Optimization Paths (Final Summary)
+
+After 145+ experiments, these are CONFIRMED DEAD:
+- Any instruction added to AC inner loop (kills ROB-limited MLP)
+- Any BigPiTable layout change (interleaved, two-level, wheel-30: all fail)
+- Software prefetching (6+ attempts across sessions)
+- Separate thread pools / phase scheduling (20+ attempts)
+- Core affinity (can't overcome bandwidth needs)
+- PGO, LTO variants, LLVM flags (no signal)
+- Process priority, huge pages (no signal)
+- Rayon scheduling tuning (default optimal)
+
+### Only Remaining Path
+
+The streaming AC rewrite (segment-first processing) is the only avenue with >5% potential. It would:
+- Eliminate BigPiTable (285MB) entirely
+- Convert random DRAM access to sequential L1 streaming
+- Let AC and D share sieve segments (no contention)
+- Estimated: AC from 8.47s → 2-3s, Wall from 8.57s → ~7.0s
+- Risk: ~500-1000 lines of new code, complex correctness testing
+
+### Final Standing
+
+V8 beats primecount 8.57s vs 8.80s (**2.6% faster**), verified 5/5 head-to-head wins. Total experiments: 145+.
