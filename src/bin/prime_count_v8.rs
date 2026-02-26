@@ -770,7 +770,9 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
     let range_start = sqrt_x as u64 + 1;
 
     let nthreads = rayon::current_num_threads();
-    let nchunks = (nthreads * 8).max(1);
+    let b_chunks_mult: usize = std::env::var("B_CHUNKS").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(8);
+    let nchunks = (nthreads * b_chunks_mult).max(1);
     let range = max_xp - range_start + 1;
     let chunk_size = (range + nchunks as u64 - 1) / nchunks as u64;
 
@@ -976,7 +978,13 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 wide_indices.push(i as u32);
             }
         }
-        narrow_seg_assign.sort_unstable_by_key(|&(_, seg)| seg);
+        // Sort narrow by (segment, xpq midpoint) for BigPiTable cache locality
+        narrow_seg_assign.sort_unstable_by_key(|&(i, seg)| {
+            let info = &b_lookups[i as usize];
+            let mid_l = (info.l_cur + info.l_max) / 2;
+            let xpq_mid = info.xp / primes[std::cmp::min(mid_l, primes_len - 1)] as u64;
+            (seg, xpq_mid)
+        });
 
         let t_ac_loops = std::time::Instant::now();
 
@@ -1555,6 +1563,22 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             pi[std::cmp::min(isqrt(x / low) as usize, pi_limit)] as usize,
             pi_x_star);
         work += cur_max_b * 10; // base cross-off cost
+        // Estimate Type 2 work: for sampled b in [pi_sqrtz+1, pi_x_star], count l-range
+        let t2_samples = [pi_sqrtz + 1, (pi_sqrtz + pi_x_star) / 2, pi_x_star];
+        for &b in &t2_samples {
+            if b >= primes.len() || b > pi_x_star || b <= pi_sqrtz { continue; }
+            let prime = primes[b] as u64;
+            let x_div_prime = x / prime;
+            let xp_low = std::cmp::min((x_div_prime / low) as usize, y);
+            let xp_high = std::cmp::min((x_div_prime / high) as usize, y);
+            let min_m = std::cmp::max(xp_high, prime as usize);
+            let max_m = std::cmp::min((x_div_prime / (prime * prime)) as usize, xp_low);
+            if max_m > min_m {
+                let l_top = pi[std::cmp::min(max_m, pi_limit)] as usize;
+                let l_bot = pi[std::cmp::min(min_m, pi_limit)] as usize;
+                if l_top > l_bot { work += (l_top - l_bot) * 3; }
+            }
+        }
         std::cmp::max(work, 1)
     }).collect();
     let total_work: usize = work_per_seg.iter().sum();
