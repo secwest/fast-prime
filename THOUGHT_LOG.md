@@ -3663,3 +3663,44 @@ The TLB benefit is distributed across ALL allocations (thread stacks, rayon work
 queues, sieve buffers), not just the largest one. This is counterintuitive — the 285MB
 BigPiTable dominates TLB pressure, but reducing TLB misses on smaller structures also
 matters because they're accessed during the concurrent phase when cores compete for TLB.
+
+## V8 Session 10 — Deep Optimization Sprint
+
+**Date**: 2026-02-26
+**Goal**: Systematically explore 11 optimization avenues after 108 experiments
+
+### Key Discovery: Rayon Scheduling Contention
+The D_THREADS isolation experiment revealed that AC's 4× concurrent penalty (2.2s→8.4s) is primarily caused by **rayon work-stealing contention** between AC and D, not just L3 bandwidth. When D runs on a dedicated pool, AC drops to 2.8s — a 3× improvement. However, D's performance degrades catastrophically with pool isolation (5.7s→24s), making the total worse.
+
+This means the AC bottleneck has two components:
+1. L3 bandwidth contention (~40% of penalty) — D/B consuming bandwidth
+2. Rayon scheduling interference (~60% of penalty) — D work items preempting AC at the work-stealing level
+
+### Why Nothing Works at This Level
+After 119 experiments, a clear pattern emerges:
+- **Adding instructions to AC inner loop**: Always regresses (8×, prefetch-ahead)
+- **Adding memory reads to pi_fast**: Always regresses (two-level prefix)
+- **Reducing contention by isolating pools**: Fixes AC but breaks D
+- **Data structure changes**: Either no effect or regression
+- **Thread count tuning**: Marginal at best, risky at worst
+
+The AC inner loop is a carefully balanced equilibrium: 4× fast_div (u128 Barrett) + 4× pi_fast (POPCNT on random BigPiTable word) achieves near-optimal memory-level parallelism on the Arrow Lake backend. Any perturbation to this balance — more instructions, more memory accesses, different unrolling — tips the balance and regresses.
+
+### What's Left
+The only optimization avenue with significant potential (>5%) is the **segment-first AC rewrite** — processing AC via D-style segmented sieving instead of BigPiTable random lookups. This would:
+1. Eliminate the 285MB BigPiTable entirely (replaced by ~4KB SegPiTable per segment)
+2. Convert random access to sequential streaming (L1 hits instead of L3)
+3. Eliminate rayon contention (AC and D can share the same sieve)
+
+This is a ~500-1000 line rewrite with high risk but transformative potential.
+
+### Experiments: 109-119 (2 kept, 9 failed/inconclusive)
+- Opt 109: D prefix-sum → catastrophic (2.3×)
+- Opt 110: B chunks → inconclusive
+- Opt 114: Narrow reorder → noise (kept)
+- Opt 117: Two-level prefix → regression
+- Opt 118: 8× unroll → regression
+- Opt 119: D Type 2 estimator → neutral (kept)
+- AC segment tuning → noise
+- D_THREADS isolation → reveals scheduling contention
+- AC prefetch-ahead → regression

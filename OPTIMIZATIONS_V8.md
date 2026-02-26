@@ -1186,3 +1186,77 @@ gives max(8.46, 8.47) = 8.72s — worse. There is no thread configuration that i
 
 4. **Hardware-specific**: NUMA-aware allocation, P-core/E-core task pinning at the
    OS level (not rayon). Requires custom thread scheduler in ~500 lines of unsafe code.
+
+---
+
+## Session 10: Deep Optimization Sprint (Opts 109-119)
+
+**Goal**: Systematically explore 11 optimization avenues identified after 108 experiments.
+
+### Opt 109: D prefix-sum counter array
+**Hypothesis**: Replace O(words) count()/count_delta() in BitSieve with O(1) lookup via per-word prefix array, rebuilt after each cross_off_sieve.
+**Result**: CATASTROPHIC REGRESSION — 19.3s (2.3× slower). The O(words) rebuild after every cross_off_sieve dominates. cross_off is called ~800 times per segment, each rebuild touching all 3125 words. This is a textbook case of trading O(N/2) per query for O(N) per update — the updates vastly outnumber queries.
+
+### Opt 110: B chunk count reduction
+**Hypothesis**: Reduce B's nchunks from nthreads×8 (192) to nthreads×2 (48), cutting primesieve jump_to() overhead.
+**Result**: Inconclusive. B_CHUNKS=2: B slowed from 7.0→8.4s but AC improved 8.49→8.43s (less L3 contention). Wall time marginally better but B risks becoming bottleneck. Added configurable B_CHUNKS env var, kept default=8.
+
+| B_CHUNKS | B (s) | AC (s) | Wall (s) |
+|----------|-------|--------|----------|
+| 1 (24)   | 8.35-8.69 | 8.33-8.45 | 8.52-8.81 |
+| 2 (48)   | 8.37-8.47 | 8.40-8.45 | 8.52-8.57 |
+| 4 (96)   | 7.43-7.65 | 8.48-8.52 | 8.58-8.63 |
+| 8 (192)  | 6.68-7.43 | 8.42-8.55 | 8.53-8.67 |
+
+### Opt 114: AC narrow b-value locality reorder
+**Hypothesis**: Sort narrow b-values by (segment, xpq midpoint) so rayon work-stealing assigns b-values with similar BigPiTable access patterns to the same thread.
+**Result**: Within noise. Median 8.57s vs 8.59s baseline. Kept the 5-line change (no downside).
+
+### Opt 117: BigPiTable two-level prefix (u16 fine + u32 coarse)
+**Hypothesis**: Replace u32 prefix with u16 fine_prefix (per-word, relative to 256-word block) + u32 coarse_prefix (per-block). Reduces BigPiTable from 285MB→229MB. Per-segment hot data: 2.4MB→2.0MB, potentially fitting in L2.
+**Result**: REGRESSION — 8.89s median (0.30s worse). The extra coarse_prefix memory read adds latency to every pi_fast call in the critical inner loop. The memory reduction doesn't compensate because AC's bottleneck is per-access latency, not total memory size.
+
+### AC segment size tuning (with large pages)
+**Hypothesis**: Large pages change TLB economics; optimal AC_SEG may have shifted from 200K.
+**Result**: No change. Tested 128K, 160K, 256K, 300K, 400K — all within noise of 200K. 400K notably worse (4.8MB working set >> L2 2MB).
+
+### D_THREADS isolation experiment
+**Key finding**: When D runs on a dedicated pool (even with same thread count), AC drops from 8.4s→2.8s! This proves **rayon scheduling contention** (not just L3 bandwidth) is the primary AC penalty. D's par_iter work items interfere with AC's work items at the rayon work-stealing level.
+**Problem**: D on a separate pool takes 10-24s (vs 5.7s shared). Oversubscription (24+8+24=56 threads on 24 cores) kills D performance. Wall time = max(AC, D) = D = 10-24s.
+**Conclusion**: The insight is valuable but unexploitable with current architecture. Would need a segment-first AC rewrite that eliminates the need for concurrent AC+D.
+
+| D_THREADS | AC (s) | D (s) | Wall (s) |
+|-----------|--------|-------|----------|
+| 0 (shared)| 8.42-8.55 | 5.59-5.82 | 8.53-8.67 |
+| 8         | 2.80-2.90 | 24.0-24.5 | 24.3-24.8 |
+| 16        | 3.16-3.31 | 10.8-11.1 | 11.1-11.4 |
+| 24        | 3.65-5.33 | 10.4-11.5 | 10.7-11.8 |
+
+### Opt 118: AC inner loop 8× unroll
+**Hypothesis**: Increase unrolling from 4× to 8× for more independent BigPiTable reads in flight, exploiting CPU memory-level parallelism.
+**Result**: REGRESSION — 8.97s (0.4s worse). The 8× unrolled body exceeds the instruction cache budget and overwhelms the CPU's backend capacity (too many u128 multiplies + memory accesses simultaneously).
+
+### Opt 119: D Type 2 work estimator
+**Hypothesis**: D's work estimator only accounts for Type 1 VM work + cross-off. Adding Type 2 pair-leaf estimation should reduce D's bimodal behavior.
+**Result**: Neutral on wall time. D variance slightly tighter (5.50-5.75 vs 5.59-5.82). Kept the improvement.
+
+### AC prefetch-ahead
+**Hypothesis**: Compute next iteration's xpq addresses (4 extra fast_divs), issue software prefetches, then process current iteration. Prefetches should hide BigPiTable L3 latency.
+**Result**: REGRESSION — 9.7s (1.1s worse). The 4 extra fast_divs per iteration DOUBLE the compute cost. The hardware's out-of-order engine already provides sufficient memory-level parallelism; software prefetches with computed addresses are too expensive to justify.
+
+### Summary
+
+| Experiment | Wall (s) | vs Baseline | Status |
+|------------|----------|-------------|--------|
+| Baseline   | 8.59     | —           | —      |
+| Opt 109 prefix-sum | 19.3 | +125% | ✗ catastrophic |
+| Opt 110 B_CHUNKS=2 | 8.55 | -0.5% | ≈ inconclusive |
+| Opt 114 narrow reorder | 8.57 | -0.2% | ≈ kept |
+| Opt 117 two-level prefix | 8.89 | +3.5% | ✗ regression |
+| Opt 118 8× unroll | 8.97 | +4.4% | ✗ regression |
+| Opt 119 D Type 2 | 8.58 | -0.1% | ≈ kept |
+| AC prefetch-ahead | 9.75 | +13.5% | ✗ regression |
+
+**Key insight**: The system is at its optimization limit for the current architecture. The AC inner loop is memory-bandwidth-bound with the hardware's out-of-order engine already maximizing MLP. Any change that adds instructions or memory accesses to the inner loop causes a regression. The only path to significant improvement is a segment-first architectural rewrite that eliminates AC's 4× concurrent penalty.
+
+V8 remains faster than primecount: 8.74s vs 8.90s (1.9% advantage, 5/5 wins).
