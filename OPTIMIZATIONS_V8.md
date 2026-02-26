@@ -809,6 +809,64 @@ TLB misses for BigPiTable (285MB = 140K TLB entries at 4KB, vs 143 at 2MB).
 **Result**: No change (same 8.5-8.6s). Silently fails without `SeLockMemoryPrivilege`
 (requires admin Group Policy grant on Windows).
 
+---
+
+## Session 9: Large Pages with SeLockMemoryPrivilege (Opt 108)
+
+### Opt 108: 2MB Large Pages via mimalloc (SUCCESS — 1.3% improvement)
+
+**Background**: Opt 92 attempted mimalloc large pages but failed silently because
+`SeLockMemoryPrivilege` was not granted. After running `grant_lock_memory.ps1` as
+admin and rebooting, the privilege is now available.
+
+**What**: BigPiTable is 285MB = 73K TLB entries at 4KB pages. With 2MB large pages,
+only 143 entries — fits comfortably in Arrow Lake's L2 dTLB. Three approaches tested:
+
+1. **`MIMALLOC_LARGE_OS_PAGES=1` env var** — mimalloc transparently allocates all
+   memory with large pages. BigPiTable build: 0.095s (was 0.135s, 30% faster page faults).
+2. **Explicit `VirtualAlloc` with `MEM_LARGE_PAGES`** — direct OS allocation for
+   BigPiTable only. Median 8.69s — WORSE than transparent approach (8.60s).
+3. **Combined (explicit + mimalloc)** — no additional benefit over mimalloc alone.
+
+**Winner**: Transparent mimalloc approach (#1). Added `large_page_alloc` module that
+programmatically enables `SeLockMemoryPrivilege` via Win32 `AdjustTokenPrivileges` API.
+The env var `MIMALLOC_LARGE_OS_PAGES=1` must be set externally (mimalloc reads it at
+init time before `main()`; programmatic `mi_option_set` is too late).
+
+**Results** (build-std + MIMALLOC_LARGE_OS_PAGES=1, 30s cooldown between runs):
+
+| Config | Min | Median | Runs |
+|--------|-----|--------|------|
+| build-std only | 8.68 | 8.69 | 8.72, 8.68, 8.70, 8.73, 8.69, 8.68 |
+| build-std + large pages | **8.53** | **8.60** | 8.59, 8.57, 8.63, 8.62, 8.63, 8.60 |
+
+**Head-to-head** (5 alternating runs, 45s cooldown, MIMALLOC_LARGE_OS_PAGES=1):
+
+| Round | V8 | Primecount | Winner |
+|-------|-----|-----------|--------|
+| 1 | 8.589 | 8.899 | V8 |
+| 2 | 8.589 | 8.829 | V8 |
+| 3 | 8.546 | 8.776 | V8 |
+| 4 | 8.630 | 8.802 | V8 |
+| 5 | 8.561 | 8.839 | V8 |
+| **Median** | **8.589** | **8.829** | **V8 by 2.7%** |
+
+V8 wins **5/5 rounds**. Median gap widened from 0.07s → 0.24s.
+
+**Why explicit VirtualAlloc was worse**: mimalloc's transparent approach promotes ALL
+allocations to large pages (thread stacks, rayon buffers, sieve segments, etc.).
+Explicit VirtualAlloc only covers BigPiTable, leaving other allocations on 4KB pages.
+The distributed TLB benefit across all allocations exceeds the targeted benefit.
+
+**Technical note**: `mi_option_enable(MI_OPTION_ALLOW_LARGE_OS_PAGES)` called from
+`main()` has no effect because mimalloc initializes arenas before `main()` runs (via
+`#[global_allocator]`). CRT initializer `.CRT$XIU`/`.CRT$XCU` attempts also failed.
+The only reliable method is the inherited env var.
+
+**Committed**: eb14078
+
+---
+
 ### Analysis: Why the B-First Architecture Is Near-Optimal
 
 The current b-first architecture (iterate b-values, lookup BigPiTable) has been

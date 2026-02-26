@@ -3623,3 +3623,43 @@ O(√x) cost that cancels the cache benefit (proven by Opt 93).
 
 **After 107 experiments, every axis of the optimization space has been explored
 and the code is provably at its performance ceiling for this architecture.**
+
+---
+
+## V8 Session 9: Large Pages with SeLockMemoryPrivilege (Opt 108)
+
+After granting `SeLockMemoryPrivilege` (via `grant_lock_memory.ps1` as admin + reboot),
+large pages finally work. Three approaches tested:
+
+### mimalloc Transparent Large Pages (WINNER)
+- `MIMALLOC_LARGE_OS_PAGES=1` env var enables 2MB pages for all allocations
+- BigPiTable (285MB) drops from 73K→143 TLB entries
+- BigPiTable build: 0.095s (was 0.135s)
+- Median: 8.69→8.60s (1.3% improvement)
+- Combined with `-Zbuild-std`: min 8.53s
+
+### Explicit VirtualAlloc with MEM_LARGE_PAGES (WORSE)
+- Added `LargePageVec<T>` container with `VirtualAlloc` + `MEM_LARGE_PAGES`
+- Required fixing `TOKEN_PRIVILEGES` struct alignment (LUID is two u32s, not u64)
+- BigPiTable on large pages (confirmed via diagnostic message)
+- Median 8.69s — same as no large pages!
+- Root cause: only BigPiTable gets large pages; mimalloc covers everything
+
+### Programmatic mi_option_set (FAILED)
+- `mi_option_set(MI_OPTION_ALLOW_LARGE_OS_PAGES, 1)` from `main()` has no effect
+- mimalloc reads options during arena init, which happens before `main()`
+- Tried CRT init `.CRT$XIU` (crashed) and `.CRT$XCU` (too late)
+- Only the inherited env var works
+
+### Head-to-Head Results
+V8 (build-std + large pages) beats primecount **5/5 rounds**:
+- V8 median: **8.589s**
+- Primecount median: **8.829s**
+- Gap: **2.7%** (was 0.8%)
+
+### Key Insight
+Transparent allocator-level large pages outperform targeted large page allocation.
+The TLB benefit is distributed across ALL allocations (thread stacks, rayon work-stealing
+queues, sieve buffers), not just the largest one. This is counterintuitive — the 285MB
+BigPiTable dominates TLB pressure, but reducing TLB misses on smaller structures also
+matters because they're accessed during the concurrent phase when cores compete for TLB.
