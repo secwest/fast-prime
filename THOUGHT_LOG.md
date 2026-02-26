@@ -3779,6 +3779,34 @@ The streaming AC rewrite (segment-first processing) is the only avenue with >5% 
 - Estimated: AC from 8.47s → 2-3s, Wall from 8.57s → ~7.0s
 - Risk: ~500-1000 lines of new code, complex correctness testing
 
-### Final Standing
+### Final Standing (Session 11)
 
 V8 beats primecount 8.57s vs 8.80s (**2.6% faster**), verified 5/5 head-to-head wins. Total experiments: 145+.
+
+---
+
+## V8 Session 12: Exhaustive Parameter Sweep + CompactPi Steady State
+
+### Context
+After CompactPi reduced pi[] from 202MB→51MB (Opt 135), the working set dropped to ~441MB and D/B both improved significantly. AC remained the bottleneck at ~8.3s. This session performed an exhaustive sweep of all tunable parameters to find any remaining gains, plus several structural experiments.
+
+### Key Discovery: AC Solo Speed = 3.1s
+D_THREADS isolation (Opt 140) gave D its own rayon pool, revealing AC's true solo performance: **3.1-3.6s** when no other work shares the global pool. The 2.7× concurrent penalty (3.1→8.3s) is entirely from L3 contention with D and B — not thread scheduling, not rayon overhead, not code inefficiency.
+
+This changes the mental model: the global rayon pool's work-stealing is OPTIMAL for total throughput. Isolating D cripples its nested parallelism (24s at 8 threads vs 5.7s shared). The "cost" of sharing is AC's 2.7× slowdown, but the "benefit" is D finishing in 5.7s instead of 24s.
+
+### Split-Loop Disaster (Opt 137)
+Attempted to remove branches from AC's 4× unrolled loop by duplicating the loop body for C2 vs A paths and splitting A at y_boundary_l. This tripled the code in the par_iter closure.
+Result: **-8% regression** (9.29s). The µop cache (DSB) couldn't hold the enlarged function, causing instruction fetch bottlenecks. This confirms that for ROB-limited MLP code, instruction density is just as important as instruction count.
+
+### Parameter Sweep Results (Opts 138-144)
+All tunable parameters confirmed at optimum:
+- AC_SEG=200K, B_CHUNKS=8, B_THREADS=24, D_THREADS=shared, D_SEG_CAP=20
+- ALPHA_Y=18.5, ALPHA_Z=1.3, concurrent execution mode
+
+### Remaining Paths
+The only path to meaningful improvement (>5%) is **streaming AC**: eliminate BigPiTable entirely, replace 285MB random access with a segmented sieve that computes pi values on-the-fly.
+
+### Updated Standing (Session 12)
+
+V8 beats primecount **8.42s vs 8.80s (4.34% faster)**, verified 7/7 head-to-head wins. Total experiments: 155+.

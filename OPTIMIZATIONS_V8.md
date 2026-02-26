@@ -1362,3 +1362,84 @@ Baseline: 8.57s median (AC=8.47, D=5.7, B=7.0). V8 beats primecount by 2.6% (8.5
 
 Current performance: **V8 beats primecount 8.57s vs 8.80s (2.6% faster)**, verified 5/5 wins.
 Total experiments: **145+** across 11 sessions.
+
+---
+
+## Session 12: CompactPi + Exhaustive Parameter Sweep (Opts 131-144)
+
+### Baseline (post-CompactPi commit 3bc8ecb)
+- Median: **8.42s** (AC=8.29, D=5.94, B=6.90)
+- Primecount: 8.80s → **4.34% faster**, 7/7 wins
+
+### Opt 131: Pre-allocate xp_asc in compute_b
+- `Vec::with_capacity(estimated_primes)` using pi(sqrt_x) - pi(y)
+- **Result**: Within noise (~20ms copy saving vs 7s B total). Kept as correct practice.
+
+### Opt 135: CompactPi two-level pi table ✓ KEPT
+- Replaced 202MB `Vec<u32>` pi table with 51MB two-level (coarse u32 + fine u8)
+- Struct: `coarse[n/256]` + `fine[n]`, stride=256, max fine=54 (fits u8)
+- Single-pass builder, no intermediate full pi allocation
+- Fixed correctness: must update count BEFORE storing fine values
+- **D improved ~14%** (7.0→6.0s), **B improved ~18%** (8.2→6.8s), AC improved ~1-2%
+- Net wall: **-1.2%** (8.60→8.50 median at time of commit)
+
+### Opt 136: B_THREADS throttling
+- Tested B_THREADS={16,18,19,20,21,22,24}. Best at 20: AC=8.35, B=8.42, wall=8.53
+- Hypothesis: fewer B threads → less L3 contention → AC faster
+- **Result**: B becomes the bottleneck at ≤20 threads. 5-run test: 8.58 vs 8.58 baseline. **Within noise. Not keeping.**
+
+### Opt 137: Split-loop AC (hoist branches)
+- Separated C2 and A code paths, hoisted (-b+2) correction, split at y_boundary_l
+- Eliminated per-group branches, created 3 specialized loop bodies
+- **Result**: **-8% regression** (9.29s). I-cache/µop-cache bloat from 3× code. Reverted.
+- Confirms: AC is ROB-limited MLP, code size matters as much as µop count.
+
+### Opt 138: AC_SEG tuning
+- Tested AC_SEG={100K, 150K, 200K, 300K, 400K}
+- 200K (current default) remains optimal. ±25% change is within noise.
+
+### Opt 139: B_CHUNKS tuning
+- Tested B_CHUNKS={1, 2, 4, 8, 16}. Controls primesieve parallelism granularity.
+- **Result**: B_CHUNKS=8 (current) is optimal. B_CHUNKS=2 looked promising in 3-run but within noise on 5-run.
+
+### Opt 140: D_THREADS isolation (dedicated pool)
+- Tested D_THREADS={8, 12, 16}. Gives D a separate rayon pool.
+- D_THREADS=8: D=24s, AC=3.1s (AC solo speed!), wall=24s. D too slow.
+- D_THREADS=16: D=11s, AC=3.6s, wall=11s.
+- **Key insight**: AC+D sharing global rayon pool is OPTIMAL. Work-stealing balances load better than separate pools. Isolation cripples D's nested parallelism.
+
+### Opt 141: Phase scheduling (sequential)
+- PHASE_AC_DB: AC first (2.1s solo), then D+B (6.4s). Wall=8.95s.
+- PHASE_D_ACB: D first (4.6s), then AC+B (2.5s+4.0s). Wall=9.03s.
+- **Result**: Concurrent is always better. Overlap saves ~0.4-0.6s vs any sequential order.
+
+### Opt 142: Alpha_y tuning
+- Tested ALPHA_Y={15, 18.5, 22, 25, 30} at ALPHA_Z=1.3
+- 18.5 (current) is optimal. b-value count barely varies (154,754→154,486).
+- Higher alpha_y → B faster but AC slightly slower.
+
+### Opt 143: Alpha_z tuning
+- Tested ALPHA_Z={1.0, 1.3, 1.4, 1.5, 1.6, 1.7, 2.0}
+- 5-run medians: 1.3→8.41, 1.4→8.40, 1.5→8.41. All within noise.
+- **Result**: 1.3 (current) is optimal or tied with 1.4-1.5.
+
+### Opt 144: D_SEG_CAP tuning
+- Tested D_SEG_CAP={18(256KB), 20(1MB), 22(4MB)}
+- 18: D=7.8s, AC=9.2s, wall=9.37. More segment overhead + more L3 traffic.
+- 22: D=6.9s, AC=9.1s, wall=9.25. Larger segments evict AC's BigPiTable data.
+- **Result**: D_SEG_CAP=20 (1MB, current) is optimal.
+
+### Session 12 Summary
+
+9 experiments (Opts 136-144), all confirming current parameters are optimal.
+
+**Dead paths confirmed this session**:
+- Code-size increase in AC inner loop (Opt 137: -8% regression, I-cache)
+- B/D thread throttling or isolation (Opts 136, 140: worse or noise)
+- Phase scheduling / sequential execution (Opt 141: overlap is always better)
+- All tuning parameters (Opts 138-139, 142-144: at optimum already)
+
+**Key insight**: With CompactPi reducing pi[] from 202→51MB, the AC+D concurrent execution on a shared rayon pool is the optimal configuration. D_THREADS isolation revealed AC's solo speed is 3.1s — the 2.7× concurrent penalty is dominated by L3 contention from D+B, not thread scheduling.
+
+Current performance: **V8 beats primecount 8.42s vs 8.80s (4.34% faster)**, verified 7/7 wins.
+Total experiments: **155+** across 12 sessions.
