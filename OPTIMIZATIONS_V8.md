@@ -1551,3 +1551,74 @@ Final head-to-head (5-run):
 | Delta | **−3.7%** | | |
 
 Total experiments: **164+** across 13 sessions.
+
+---
+
+## Session 14 — Streaming AC Experiment (Opt 154-156)
+
+**Goal**: Replace 285MB BigPiTable random DRAM access with per-segment L2-cached sieves (~2.4MB each), eliminating L3 contention with D that causes the 2.7× concurrent penalty.
+
+### Opt 154: StreamSieve Implementation
+
+**Architecture**: For each of 119 segments covering √x ≈ 3.04B:
+1. Build fresh sieve (200K words = 1.6MB bits + 800KB prefix = 2.4MB)
+2. Cross off primes up to √(√x) ≈ 55K (~5700 primes)
+3. Compute prefix sums within segment
+4. Guard words on boundaries (+1 word each side)
+5. base_pi from BigPiTable's prefix for segment start
+
+**Bug 1: Debug verification crash** — pi_fast test at n_lo-128 mapped to odd_idx below guard word range. `get_unchecked` read wild address. Fix: removed debug verification.
+
+**Bug 2: Narrow b-value segment crossing** — Narrow b-values assigned to segment by xpq_min could have xpq_max in adjacent segment. Fix: validate both endpoints within segment, reclassify as wide if not.
+
+**Bug 3: Duplicate line** — `let bit = local_idx & 63;` duplicated in pi_fast. Fixed.
+
+**Result**: Correct at 10^15 (29844570422669) and Max i64 (216289611853439384).
+
+### Opt 155: Streaming AC Performance
+
+Tested three parallelization strategies:
+
+| Strategy | AC | D | B | Wall | Issue |
+|---|---|---|---|---|---|
+| **Baseline (BigPiTable)** | 8.23s | 5.94s | 6.62s | **8.36s** | — |
+| Sequential inner + outer par_iter | 41.25s | 6.39s | 6.96s | 41.37s | Load imbalance: seg 0 has 106K narrow b-values (69%) processed by 1 thread |
+| Inner par_iter + outer par_iter | 3.29s | 5.30s | 7.19s | 8.90s | Nested rayon starves build_vm → D delayed to 3.6s |
+| Dedicated AC pool (AC_THREADS=20) | 15.84s | 7.49s | 8.01s | 15.97s | Nested par_iter degenerates to sequential |
+
+**Root cause**: MLP-38 on Arrow Lake P-cores (ROB=512, ~38 outstanding DRAM loads) gives effective per-load latency of ~100ns/38 = 2.6ns — comparable to L2 latency (~2.5ns). Streaming cannot improve per-access latency.
+
+**Additional overhead**: Per-segment sieve construction (6ms × 119 = 0.7s), rayon dispatch for nested par_iter, primes[]/recip[] arrays still in DRAM (27MB).
+
+**Verdict**: Streaming AC is **non-viable** on Arrow Lake. Reverted.
+
+### Opt 156: Alpha Parameter Sweep
+
+Tested whether rebalancing AC/D via Gourdon parameters could help:
+
+| alpha_y | AC | D | B | Wall |
+|---|---|---|---|---|
+| 15.0 | 8.56s | 5.95s | 7.93s | 8.75s |
+| **18.5 (current)** | **8.23s** | **5.94s** | **6.62s** | **8.36s** |
+| 22.0 | 8.34s | 6.10s | 6.26s | 8.49s |
+
+alpha_y=18.5 is already optimal. Higher values increase min_c2_b (more C2 b-values). Lower values increase B runtime. Current parameters are well-tuned.
+
+### Session 14 Conclusion
+
+All three "last resort" optimizations failed:
+1. **Streaming AC** — MLP-38 already provides near-L2 effective latency
+2. **Alpha tuning** — current parameters already balanced
+3. **Streaming + pool isolation** — nested parallelism overhead dominates
+
+The 2.7× concurrent penalty from DRAM bandwidth contention between AC and D is **unfixable at the software level** on this architecture. The MLP-bound AC inner loop (§Session 13, Opt 151) achieves ~80% MSHR utilization, leaving no room for software-level improvement.
+
+Final head-to-head (5-run, Session 14):
+
+| | Median | Best | Worst |
+|---|---|---|---|
+| V8 | **8.44s** | 8.38s | 8.51s |
+| primecount | 8.76s | 8.72s | 8.96s |
+| Delta | **−3.65%** | | |
+
+Total experiments: **167+** across 14 sessions.

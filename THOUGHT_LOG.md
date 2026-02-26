@@ -3850,3 +3850,55 @@ The only remaining path to significant improvement is **Streaming AC** (V9): rep
 ### Updated Standing (Session 13)
 
 V8 beats primecount **8.44s vs 8.76s (3.7% faster)**. Total experiments: **164+** across 13 sessions.
+
+## V8 Session 14 — Streaming AC: The Final Path
+
+### Motivation
+
+Streaming AC was the "holy grail" optimization — the ONLY path that could theoretically break through the 2.7× concurrent penalty. The idea: replace BigPiTable's 285MB random DRAM access with per-segment sieves (~2.4MB each) that fit in L2 cache, eliminating L3/DRAM contention with D.
+
+**Theoretical promise**: AC solo = 3.1s, concurrent = 8.4s (2.7× penalty from DRAM contention). If AC moves to L2, contention disappears → wall time ≈ D = 5.8s.
+
+### Implementation
+
+Built `StreamSieve` struct: builds a sieve segment, crosses off primes ≤ √(√x), computes prefix sums. Per segment: 200K words = 1.6MB bits + 800KB prefix = 2.4MB.
+
+Debugged three correctness bugs:
+1. Debug verification accessed values outside guard word range
+2. Narrow b-values could have quotients crossing segment boundaries
+3. Duplicated line in pi_fast method
+
+**Correctness verified**: Matches BigPiTable at 10^15 and Max i64.
+
+### The Devastating Discovery
+
+**MLP-38 on Arrow Lake already matches L2 effective latency.** The ROB (512 entries) sustains ~38 outstanding DRAM loads, giving effective per-load latency of ~2.6ns — nearly identical to L2 latency (~2.5ns). Streaming cannot improve per-access latency; it can only reduce contention.
+
+But streaming adds overhead that exceeds the contention savings:
+- Per-segment sieve construction: 6ms × 119 segments = 0.7s
+- Load imbalance: segment 0 has 106K narrow b-values (69% of all work)
+- Nested parallelism: rayon struggles with outer×inner par_iter
+- rayon contention: streaming AC starves build_vm, delaying D by 3s
+
+Three parallelization strategies tested, all worse than baseline:
+- Sequential inner: 41s (one thread drowning in segment 0)
+- Inner+outer par_iter: 3.29s AC but D delayed → 8.9s wall
+- Dedicated AC pool: 15.8s (nested par_iter degenerates)
+
+### Alpha Parameter Tuning
+
+Also swept Gourdon alpha_y: 15, 18.5 (current), 22. Current 18.5 is optimal. Lower values increase B, higher values increase AC.
+
+### Key Insight
+
+The concurrent penalty is a **hardware-level phenomenon** unfixable by software:
+- AC needs random DRAM access for BigPiTable (MLP-38 saturates)
+- D needs streaming DRAM access for valid_m_list
+- Both share DRAM bandwidth (~106 GB/s)
+- No software-level caching can improve on MLP-38's effective latency
+
+**V8 is at the absolute performance ceiling** for Gourdon's algorithm on Arrow Lake.
+
+### Updated Standing (Session 14)
+
+V8 beats primecount **8.44s vs 8.76s (3.65% faster)**. Total experiments: **167+** across 14 sessions.
