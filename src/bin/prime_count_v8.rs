@@ -259,28 +259,56 @@ fn generate_tables(limit: usize, y: usize) -> (Vec<i8>, Vec<u16>, Vec<bool>) {
 
 // Fast pi table generation from a raw bit sieve (avoids primal::Sieve per-call overhead).
 // sieve_bits: odd-only sieve where bit i represents number 2*i+3.
-fn generate_pi_from_bits(limit: usize, sieve_bits: &[u64]) -> Vec<u32> {
-    let mut pi = vec![0u32; limit + 1];
-    if limit < 2 { return pi; }
-    let mut count = 1u32; // count 2
-    pi[2] = 1;
+// Two-level compact pi table: coarse (u32 per STRIDE) + fine (u8 per entry).
+// Size: ~51MB instead of ~200MB for pi_table_limit ≈ 50M entries.
+// Reduces D's L3 footprint, leaving more cache for AC's BigPiTable.
+const PI_STRIDE: usize = 256;
 
-    let mut n = 3usize;
-    let mut wi = 0usize;
-    let mut bi = 0u32;
-    while n <= limit {
-        pi[n - 1] = count;
-        count += ((sieve_bits[wi] >> bi) & 1) as u32;
-        pi[n] = count;
-        n += 2;
-        bi += 1;
-        if bi == 64 { bi = 0; wi += 1; }
+struct CompactPi {
+    coarse: Vec<u32>,  // coarse[i] = pi(i * PI_STRIDE)
+    fine: Vec<u8>,     // fine[n] = pi(n) - coarse[n / PI_STRIDE]
+    limit: usize,
+}
+
+impl CompactPi {
+    #[inline(always)]
+    fn get(&self, n: usize) -> u32 {
+        debug_assert!(n <= self.limit);
+        unsafe {
+            *self.coarse.get_unchecked(n / PI_STRIDE) + *self.fine.get_unchecked(n) as u32
+        }
     }
-    // If limit is even, the last even entry wasn't filled
-    if limit >= 4 && limit % 2 == 0 {
-        pi[limit] = count;
+
+    fn len(&self) -> usize { self.limit + 1 }
+}
+
+fn generate_compact_pi(limit: usize, sieve_bits: &[u64]) -> CompactPi {
+    let coarse_len = limit / PI_STRIDE + 2;
+    let mut coarse = vec![0u32; coarse_len];
+    let mut fine = vec![0u8; limit + 1];
+    if limit < 2 {
+        return CompactPi { coarse, fine, limit };
     }
-    pi
+
+    // Single-pass: compute pi running sum while filling coarse+fine
+    let mut count = 0u32;
+    for n in 0..=limit {
+        // Check if n is prime and update count
+        if n == 2 {
+            count += 1;
+        } else if n >= 3 && n % 2 == 1 {
+            let idx = (n - 3) / 2;
+            count += ((sieve_bits[idx / 64] >> (idx % 64)) & 1) as u32;
+        }
+        // Set coarse at stride boundaries (before computing fine)
+        let ci = n / PI_STRIDE;
+        if n % PI_STRIDE == 0 && ci < coarse_len {
+            coarse[ci] = count;
+        }
+        // Store fine = pi(n) - coarse[n/STRIDE]
+        fine[n] = (count - coarse[ci]) as u8;
+    }
+    CompactPi { coarse, fine, limit }
 }
 
 // Fast odd-only sieve of Eratosthenes returning raw bit array.
@@ -537,7 +565,7 @@ impl BigPiTable {
         all_bits.truncate(nwords);
 
         let mut prefix = vec![0u32; nwords];
-        let mut running = 0u32;
+        let mut running = 1u32; // +1 accounts for prime 2 (not in odd sieve), saves 1 ADD in pi_fast
         for i in 0..nwords {
             prefix[i] = running;
             running += all_bits[i].count_ones();
@@ -565,7 +593,7 @@ impl BigPiTable {
         let bit = odd_idx & 63;
         let prefix = *self.prefix.get_unchecked(word) as u64;
         let mask = u64::MAX >> (63 - bit);
-        1 + prefix + (*self.bits.get_unchecked(word) & mask).count_ones() as u64
+        prefix + (*self.bits.get_unchecked(word) & mask).count_ones() as u64
     }
 
     #[inline]
@@ -625,14 +653,14 @@ impl BigPiTable {
 // ── Sigma: 7 correction formulas ─────────────────────────────────────────────
 
 fn compute_sigma(x: u64, y: usize, x_star: usize,
-                 _primes: &[u32], pi: &[u32], big_pi: &BigPiTable) -> i64 {
+                 _primes: &[u32], pi: &CompactPi, big_pi: &BigPiTable) -> i64 {
     let pi_limit = pi.len() - 1;
-    let a = pi[y] as i64;
+    let a = pi.get(y) as i64;
     let x13 = icbrt(x) as usize;
-    let b = pi[std::cmp::min(x13, pi_limit)] as i64;
+    let b = pi.get(std::cmp::min(x13, pi_limit)) as i64;
     let sqrt_xy = isqrt(x / y as u64) as usize;
-    let c = pi[std::cmp::min(sqrt_xy, pi_limit)] as i64;
-    let d = pi[std::cmp::min(x_star, pi_limit)] as i64;
+    let c = pi.get(std::cmp::min(sqrt_xy, pi_limit)) as i64;
+    let d = pi.get(std::cmp::min(x_star, pi_limit)) as i64;
     let sqrt_x = isqrt(x) as usize;
     let pi_sx = big_pi.pi(sqrt_x) as i64;
 
@@ -662,16 +690,16 @@ fn compute_sigma(x: u64, y: usize, x_star: usize,
         if p <= sqrt_xy {
             // Σ₄: x* < p ≤ √(x/y)
             let xpy = (x / (p64 * y as u64)) as usize;
-            sigma4 += pi[std::cmp::min(xpy, pi_table_limit)] as i64;
+            sigma4 += pi.get(std::cmp::min(xpy, pi_table_limit)) as i64;
         } else {
             // Σ₅: √(x/y) < p ≤ x^{1/3}
             let xpp = (x / (p64 * p64)) as usize;
-            sigma5 += pi[std::cmp::min(xpp, pi_table_limit)] as i64;
+            sigma5 += pi.get(std::cmp::min(xpp, pi_table_limit)) as i64;
         }
 
         // Σ₆: x* < p ≤ x^{1/3}
         let sqrt_xp = isqrt(x / p64) as usize;
-        let pi_sqrt_xp = pi[std::cmp::min(sqrt_xp, pi_table_limit)] as i64;
+        let pi_sqrt_xp = pi.get(std::cmp::min(sqrt_xp, pi_table_limit)) as i64;
         sigma6 += pi_sqrt_xp * pi_sqrt_xp;
     }
 
@@ -734,7 +762,9 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
     let bp_sw = bp_start / 64;
     let bp_ew = bp_end / 64;
 
-    let mut xp_asc: Vec<u64> = Vec::new();
+    // Pre-allocate: avoids repeated doubling/copying for ~140M entries at max i64
+    let estimated_primes = (big_pi.pi(sqrt_x) - big_pi.pi(y)) as usize;
+    let mut xp_asc: Vec<u64> = Vec::with_capacity(estimated_primes);
     for word_idx in (bp_sw..=bp_ew).rev() {
         let mut w = big_pi.bits_word(word_idx);
         if word_idx == bp_sw {
@@ -839,7 +869,7 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
 
 fn c1_recursive(xp: u64, b: usize, i: usize, pi_y: usize,
                 m: u64, min_m: usize, max_m: usize,
-                mu_sign: i64, primes: &[u32], pi: &[u32]) -> i64 {
+                mu_sign: i64, primes: &[u32], pi: &CompactPi) -> i64 {
     let mut sum = 0i64;
     let y_limit = pi.len() - 1;
     for j in (i + 1)..=pi_y {
@@ -849,7 +879,7 @@ fn c1_recursive(xp: u64, b: usize, i: usize, pi_y: usize,
 
         if next as usize > min_m {
             let xpm = (xp / next) as usize;
-            let phi_xpm = pi[std::cmp::min(xpm, y_limit)] as i64 - b as i64 + 2;
+            let phi_xpm = pi.get(std::cmp::min(xpm, y_limit)) as i64 - b as i64 + 2;
             sum += phi_xpm * mu_sign;
         }
 
@@ -866,12 +896,12 @@ fn fast_div(n: u64, d: u64, recip_d: u64) -> u64 {
 }
 
 fn compute_c1(x: u64, y: usize, z: usize, k: usize,
-              primes: &[u32], pi: &[u32]) -> i64 {
+              primes: &[u32], pi: &CompactPi) -> i64 {
     let pi_limit = pi.len() - 1;
     let sqrt_z = isqrt(z as u64) as usize;
-    let pi_y = pi[y] as usize;
-    let pi_sqrtz = pi[std::cmp::min(sqrt_z, pi_limit)] as usize;
-    let pi_root3_xz = pi[std::cmp::min(icbrt(x / z as u64) as usize, pi_limit)] as usize;
+    let pi_y = pi.get(y) as usize;
+    let pi_sqrtz = pi.get(std::cmp::min(sqrt_z, pi_limit)) as usize;
+    let pi_root3_xz = pi.get(std::cmp::min(icbrt(x / z as u64) as usize, pi_limit)) as usize;
     let min_c1_b = std::cmp::max(k, pi_root3_xz) + 1;
 
     let c1_range: Vec<usize> = (min_c1_b..=pi_sqrtz)
@@ -896,16 +926,16 @@ fn compute_c1(x: u64, y: usize, z: usize, k: usize,
 // A:  simplest easy leaves (π(x*) < b ≤ π(x^{1/3}))
 
 fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
-              primes: &[u32], pi: &[u32], big_pi: &BigPiTable,
+              primes: &[u32], pi: &CompactPi, big_pi: &BigPiTable,
               recip: &[u64]) -> i64 {
     let pi_limit = pi.len() - 1;
     let x13 = icbrt(x) as usize;
     let sqrt_x = isqrt(x) as usize;
     let sqrt_z = isqrt(z as u64) as usize;
-    let pi_sqrtz = pi[std::cmp::min(sqrt_z, pi_limit)] as usize;
-    let pi_x_star = pi[std::cmp::min(x_star, pi_limit)] as usize;
-    let pi_x13 = pi[std::cmp::min(x13, pi_limit)] as usize;
-    let pi_root3_xy = pi[std::cmp::min(icbrt(x / y as u64) as usize, pi_limit)] as usize;
+    let pi_sqrtz = pi.get(std::cmp::min(sqrt_z, pi_limit)) as usize;
+    let pi_x_star = pi.get(std::cmp::min(x_star, pi_limit)) as usize;
+    let pi_x13 = pi.get(std::cmp::min(x13, pi_limit)) as usize;
+    let pi_root3_xy = pi.get(std::cmp::min(icbrt(x / y as u64) as usize, pi_limit)) as usize;
 
     let min_c2_b = std::cmp::max(k, std::cmp::max(pi_root3_xy, pi_sqrtz)) + 1;
 
@@ -932,8 +962,8 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             std::cmp::max((xp / (prime * prime)) as usize, prime as usize), 1);
         let min_m_val = std::cmp::min(min_m_val, max_m);
         if max_m <= min_m_val { continue; }
-        let l_max = pi[std::cmp::min(max_m, pi_limit)] as usize;
-        let l_min = pi[std::cmp::min(min_m_val, pi_limit)] as usize + 1;
+        let l_max = pi.get(std::cmp::min(max_m, pi_limit)) as usize;
+        let l_min = pi.get(std::cmp::min(min_m_val, pi_limit)) as usize + 1;
         if l_min > l_max { continue; }
         b_lookups.push(BLookup { b, xp, l_cur: l_min, l_max, y_boundary_l: usize::MAX, is_c2: true });
     }
@@ -947,11 +977,11 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         let max_2nd = std::cmp::min(sqrt_xp, y);
         let min_2nd = std::cmp::max(prime as usize, 1);
         if max_2nd <= min_2nd { continue; }
-        let max_i = pi[std::cmp::min(max_2nd, pi_limit)] as usize;
-        let min_i = pi[std::cmp::min(min_2nd, pi_limit)] as usize + 1;
+        let max_i = pi.get(std::cmp::min(max_2nd, pi_limit)) as usize;
+        let min_i = pi.get(std::cmp::min(min_2nd, pi_limit)) as usize + 1;
         if min_i > max_i { continue; }
         let xp_over_y = (xp / y as u64) as usize;
-        let y_boundary_l = pi[std::cmp::min(std::cmp::min(xp_over_y, max_2nd), pi_limit)] as usize;
+        let y_boundary_l = pi.get(std::cmp::min(std::cmp::min(xp_over_y, max_2nd), pi_limit)) as usize;
         b_lookups.push(BLookup { b, xp, l_cur: min_i, l_max: max_i, y_boundary_l, is_c2: false });
     }
 
@@ -1018,7 +1048,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                     } else {
                         let thresh = std::cmp::min(
                             (info.xp / (n_hi as u64 + 1)) as usize, pi_limit);
-                        let l_candidate = pi[thresh] as usize + 1;
+                        let l_candidate = pi.get(thresh) as usize + 1;
                         std::cmp::max(l_candidate, info.l_cur)
                     };
 
@@ -1028,7 +1058,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                         let thresh_raw = info.xp / n_lo as u64;
                         if thresh_raw == 0 { return 0; }
                         let thresh = std::cmp::min(thresh_raw as usize, pi_limit);
-                        let l_candidate = pi[thresh] as usize;
+                        let l_candidate = pi.get(thresh) as usize;
                         std::cmp::min(l_candidate, info.l_max)
                     };
 
@@ -1456,11 +1486,11 @@ struct ValidM {
 
 const VM_STRIDE: usize = 64;
 
-fn build_valid_m(z: usize, k: usize, primes: &[u32], pi: &[u32],
+fn build_valid_m(z: usize, k: usize, primes: &[u32], pi: &CompactPi,
                  mu: &[i8], lpf: &[u16], y_smooth: &[bool]) -> (Vec<ValidM>, Vec<u32>) {
     let pi_limit = pi.len() - 1;
     let sqrt_z = isqrt(z as u64) as usize;
-    let pi_sqrtz = pi[std::cmp::min(sqrt_z, pi_limit)] as usize;
+    let pi_sqrtz = pi.get(std::cmp::min(sqrt_z, pi_limit)) as usize;
     let c = k;
     let min_lpf_threshold = if c + 1 < primes.len() { primes[c + 1] as u16 } else { u16::MAX };
     let valid_m_list: Vec<ValidM> = if pi_sqrtz > c {
@@ -1497,7 +1527,7 @@ fn build_valid_m(z: usize, k: usize, primes: &[u32], pi: &[u32],
 }
 
 fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
-             primes: &[u32], pi: &[u32],
+             primes: &[u32], pi: &CompactPi,
              valid_m_list: &[ValidM], vm_index: &[u32],
              prime_recip: &[u64]) -> i64 {
     if z == 0 { return 0; }
@@ -1505,8 +1535,8 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let xz = (x / z as u64) as usize;
     let sqrt_z = isqrt(z as u64) as usize;
     let pi_limit = pi.len() - 1;
-    let pi_sqrtz = pi[std::cmp::min(sqrt_z, pi_limit)] as usize;
-    let pi_x_star = pi[std::cmp::min(x_star, pi_limit)] as usize;
+    let pi_sqrtz = pi.get(std::cmp::min(sqrt_z, pi_limit)) as usize;
+    let pi_x_star = pi.get(std::cmp::min(x_star, pi_limit)) as usize;
     let nprimes = primes.len();
     let c = k;
 
@@ -1560,7 +1590,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         }
         // Also add base cost for cross-offs (proportional to number of b values)
         let cur_max_b = std::cmp::min(
-            pi[std::cmp::min(isqrt(x / low) as usize, pi_limit)] as usize,
+            pi.get(std::cmp::min(isqrt(x / low) as usize, pi_limit)) as usize,
             pi_x_star);
         work += cur_max_b * 10; // base cross-off cost
         // Estimate Type 2 work: for sampled b in [pi_sqrtz+1, pi_x_star], count l-range
@@ -1574,8 +1604,8 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             let min_m = std::cmp::max(xp_high, prime as usize);
             let max_m = std::cmp::min((x_div_prime / (prime * prime)) as usize, xp_low);
             if max_m > min_m {
-                let l_top = pi[std::cmp::min(max_m, pi_limit)] as usize;
-                let l_bot = pi[std::cmp::min(min_m, pi_limit)] as usize;
+                let l_top = pi.get(std::cmp::min(max_m, pi_limit)) as usize;
+                let l_bot = pi.get(std::cmp::min(min_m, pi_limit)) as usize;
                 if l_top > l_bot { work += (l_top - l_bot) * 3; }
             }
         }
@@ -1605,7 +1635,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             let low = std::cmp::max(seg_idx * segment_size, 1);
             if low > xz { return 0; }
             std::cmp::min(
-                pi[std::cmp::min(isqrt(x / low as u64) as usize, pi_limit)] as usize,
+                pi.get(std::cmp::min(isqrt(x / low as u64) as usize, pi_limit)) as usize,
                 pi_x_star)
         }).max().unwrap_or(0);
         let vec_size = std::cmp::min(chunk_max_b + 1, nprimes);
@@ -1632,7 +1662,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             // No adjustment needed.
 
             let cur_max_b = std::cmp::min(
-                pi[std::cmp::min(isqrt(x / low1 as u64) as usize, pi_limit)] as usize,
+                pi.get(std::cmp::min(isqrt(x / low1 as u64) as usize, pi_limit)) as usize,
                 pi_x_star);
             if cur_max_b > max_b_seen { max_b_seen = cur_max_b; }
 
@@ -1709,7 +1739,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 let xp_high = std::cmp::min((x_div_prime / high as u64) as usize, y);
                 let min_m = std::cmp::max(xp_high, prime as usize);
                 let max_m = std::cmp::min((x_div_prime / (prime * prime)) as usize, xp_low);
-                let mut l = pi[std::cmp::min(max_m, pi_limit)] as usize;
+                let mut l = pi.get(std::cmp::min(max_m, pi_limit)) as usize;
 
                 if l < nprimes && prime as usize >= primes[l] as usize { break; }
 
@@ -1769,7 +1799,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 }
 
 fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: usize,
-                    primes: &[u32], pi: &[u32],
+                    primes: &[u32], pi: &CompactPi,
                     pi_sqrtz: usize, pi_x_star: usize,
                     segment_size: usize, template: &PreSieveTemplate,
                     prime_recip: &[u64], valid_m_list: &[ValidM]) -> i64 {
@@ -1792,7 +1822,7 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
         template.init_sieve(&mut sieve, low, wheel_seg_bits);
 
         let cur_max_b = std::cmp::min(
-            pi[std::cmp::min(isqrt(x / low1 as u64) as usize, pi_limit)] as usize,
+            pi.get(std::cmp::min(isqrt(x / low1 as u64) as usize, pi_limit)) as usize,
             pi_x_star);
 
         let mut b = c + 1;
@@ -1848,7 +1878,7 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
             let xp_high = std::cmp::min((x_div_prime / high as u64) as usize, y);
             let min_m = std::cmp::max(xp_high, prime as usize);
             let max_m = std::cmp::min((x_div_prime / (prime * prime)) as usize, xp_low);
-            let mut l = pi[std::cmp::min(max_m, pi_limit)] as usize;
+            let mut l = pi.get(std::cmp::min(max_m, pi_limit)) as usize;
 
             if l < nprimes && prime as usize >= primes[l] as usize { break; }
 
@@ -1955,7 +1985,7 @@ fn count_primes(x: u64) -> u64 {
             let pi_y = primes.len() - 1;
             let k = std::cmp::min(7, pi_y);
             let phi_cache = PhiTinyCache::new(k);
-            let pi = generate_pi_from_bits(pi_table_limit, &sieve_bits);
+            let pi = generate_compact_pi(pi_table_limit, &sieve_bits);
             drop(sieve_bits);
             let recip: Vec<u64> = primes.iter().map(|&p| {
                 if p == 0 { 0 } else { ((1u128 << 64) / p as u128) as u64 }
@@ -2050,7 +2080,7 @@ fn count_primes(x: u64) -> u64 {
         let pi_y = primes.len() - 1;
         let k = std::cmp::min(7, pi_y);
         let phi_cache = PhiTinyCache::new(k);
-        let pi = generate_pi_from_bits(pi_table_limit, &sieve_bits);
+        let pi = generate_compact_pi(pi_table_limit, &sieve_bits);
         drop(sieve_bits);
         if show_timing { eprintln!("    main_setup: {:.3}s", t_main.elapsed().as_secs_f64()); }
 
