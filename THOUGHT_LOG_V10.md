@@ -23,7 +23,24 @@
 - V10 shows tiny median improvements vs V8/V9 in some run sets.
 - But V10 repeatedly shows heavier slow outliers, harming mean consistency.
 
+## 2026-02-27 (continued)
+
+### Additional redesign pass
+
+- Added adaptive D chunking policy driven by estimated segment-work skew.
+- Kept D-start delay mechanism but defaulted `D_WAIT_MS=0` after repeated regressions.
+
+### What worked
+
+- `D_ADAPT_CHUNKS=1` improved V10 median vs fixed chunking in alternating tests.
+- Base `D_CHUNKS` tuned down to 16 under adaptive policy.
+
+### Comparative outcome
+
+- V10 now beats V9 median and mean in 11-pair alternating validation.
+- V10 also beats V8 median and mean in 11-pair alternating validation.
+
 ### Current interpretation
 
-- This V10 scheduler change is experimentally interesting but not a reliable production improvement.
-- Practical path from this design is exhausted without introducing a deeper algorithmic change.
+- V10 is now a small but credible step beyond V9 on this hardware.
+- Remaining headroom still appears limited without deeper algorithmic/dataflow redesign.

@@ -1621,13 +1621,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                                 valid_m_list);
     }
 
-    // Work-balanced chunk assignment based on estimated Type 1 VM iterations per segment
-    // The key insight: for each segment at position `low`, Type 1 work depends on
-    // how many ValidM entries fall in the m-range for each b value.
-    // We estimate by sampling a few representative b values.
-    let d_chunk_mult: usize = std::env::var("D_CHUNKS").ok()
-        .and_then(|s| s.parse().ok()).unwrap_or(24);
-    let nchunks = std::cmp::min(num_segments, rayon::current_num_threads() * d_chunk_mult);
+    // Work-balanced chunk assignment based on estimated Type 1 VM iterations per segment.
     let work_per_seg: Vec<usize> = (0..num_segments).map(|seg_idx| {
         let low = std::cmp::max(seg_idx * segment_size, 1) as u64;
         let high = std::cmp::min(low + segment_size as u64, xz as u64 + 1);
@@ -1669,6 +1663,25 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         }
         std::cmp::max(work, 1)
     }).collect();
+
+    let d_chunk_mult: usize = std::env::var("D_CHUNKS").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(16);
+    let adapt_chunks = std::env::var("D_ADAPT_CHUNKS").ok()
+        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(1) != 0;
+    let nthreads = rayon::current_num_threads();
+    let eff_chunk_mult: usize = if adapt_chunks {
+        let total_work: usize = work_per_seg.iter().sum();
+        let avg_work = (total_work as f64) / (num_segments as f64);
+        let max_work = *work_per_seg.iter().max().unwrap_or(&1) as f64;
+        let skew = if avg_work > 0.0 { max_work / avg_work } else { 1.0 };
+        if skew >= 6.0 { 40 }
+        else if skew >= 4.0 { 32 }
+        else if skew <= 1.6 { 16 }
+        else { d_chunk_mult }
+    } else {
+        d_chunk_mult
+    };
+    let nchunks = std::cmp::min(num_segments, nthreads * eff_chunk_mult);
     let total_work: usize = work_per_seg.iter().sum();
     let target_work = total_work / nchunks;
 
