@@ -2272,7 +2272,7 @@ fn main() {
         .ok();
 
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  Prime Counter V7 — Gourdon's Algorithm                    ║");
+    println!("║  Prime Counter V8 — Gourdon's Algorithm                    ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
 
