@@ -3,12 +3,50 @@ use primal::Sieve;
 use rayon::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+#[derive(Copy, Clone)]
+struct RuntimeTuning {
+    ac_seg: usize,
+    b_chunks: usize,
+    d_chunks: usize,
+    d_adapt_chunks: bool,
+}
+
+static RUNTIME_TUNING: OnceLock<Mutex<Option<RuntimeTuning>>> = OnceLock::new();
+
+fn tuning_slot() -> &'static Mutex<Option<RuntimeTuning>> {
+    RUNTIME_TUNING.get_or_init(|| Mutex::new(None))
+}
+
+fn get_runtime_tuning() -> Option<RuntimeTuning> {
+    tuning_slot().lock().ok().and_then(|g| *g)
+}
+
+fn set_runtime_tuning(tuning: Option<RuntimeTuning>) {
+    if let Ok(mut g) = tuning_slot().lock() {
+        *g = tuning;
+    }
+}
+
+fn choose_runtime_tuning(x: u64) -> RuntimeTuning {
+    // Heuristic runtime controller for V10. Environment overrides still take priority.
+    if x >= 1_000_000_000_000_000_000 {
+        RuntimeTuning { ac_seg: 180_000, b_chunks: 4, d_chunks: 24, d_adapt_chunks: false }
+    } else if x >= 100_000_000_000_000_000 {
+        RuntimeTuning { ac_seg: 190_000, b_chunks: 4, d_chunks: 24, d_adapt_chunks: false }
+    } else if x >= 1_000_000_000_000_000 {
+        RuntimeTuning { ac_seg: 200_000, b_chunks: 6, d_chunks: 20, d_adapt_chunks: false }
+    } else {
+        RuntimeTuning { ac_seg: 200_000, b_chunks: 8, d_chunks: 24, d_adapt_chunks: false }
+    }
+}
 
 // ── Primesieve FFI bindings ──────────────────────────────────────────────────
 #[repr(C)]
@@ -803,7 +841,9 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
 
     let nthreads = rayon::current_num_threads();
     let b_chunks_mult: usize = std::env::var("B_CHUNKS").ok()
-        .and_then(|s| s.parse().ok()).unwrap_or(4);
+        .and_then(|s| s.parse().ok())
+        .or_else(|| get_runtime_tuning().map(|t| t.b_chunks))
+        .unwrap_or(4);
     let nchunks = (nthreads * b_chunks_mult).max(1);
     let range = max_xp - range_start + 1;
     let chunk_size = (range + nchunks as u64 - 1) / nchunks as u64;
@@ -1001,7 +1041,9 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
         // Segmented AC: process BigPiTable in L2-cache-sized segments.
         let seg_pairs: usize = std::env::var("AC_SEG").ok()
-            .and_then(|s| s.parse().ok()).unwrap_or(180_000);
+            .and_then(|s| s.parse().ok())
+            .or_else(|| get_runtime_tuning().map(|t| t.ac_seg))
+            .unwrap_or(180_000);
         let total_pairs = big_pi.bits.len();
         let num_segs = (total_pairs + seg_pairs - 1) / seg_pairs;
         let numbers_per_seg = seg_pairs * 128;
@@ -1665,24 +1707,42 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     }).collect();
 
     let d_chunk_mult: usize = std::env::var("D_CHUNKS").ok()
-        .and_then(|s| s.parse().ok()).unwrap_or(16);
+        .and_then(|s| s.parse().ok())
+        .or_else(|| get_runtime_tuning().map(|t| t.d_chunks))
+        .unwrap_or(24);
     let adapt_chunks = std::env::var("D_ADAPT_CHUNKS").ok()
-        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(1) != 0;
+        .and_then(|s| s.parse::<u32>().ok())
+        .map(|v| v != 0)
+        .or_else(|| get_runtime_tuning().map(|t| t.d_adapt_chunks))
+        .unwrap_or(false);
+    let show_timing = std::env::var("SHOW_TIMING").is_ok();
+    let total_work: usize = work_per_seg.iter().sum();
+    let avg_work = (total_work as f64) / (num_segments as f64);
+    let max_work = *work_per_seg.iter().max().unwrap_or(&1) as f64;
+    // Estimate p95 from a fixed-size sample to reduce scheduler overhead/noise.
+    let sample_target = 4096usize;
+    let stride = std::cmp::max(1, work_per_seg.len() / sample_target);
+    let mut work_sample: Vec<usize> = work_per_seg.iter().step_by(stride).copied().collect();
+    work_sample.sort_unstable();
+    let p95_idx = ((work_sample.len() as f64) * 0.95) as usize;
+    let p95_work = work_sample[std::cmp::min(p95_idx, work_sample.len() - 1)] as f64;
+    let skew95 = if avg_work > 0.0 { p95_work / avg_work } else { 1.0 };
+    let skew_max = if avg_work > 0.0 { max_work / avg_work } else { 1.0 };
     let nthreads = rayon::current_num_threads();
     let eff_chunk_mult: usize = if adapt_chunks {
-        let total_work: usize = work_per_seg.iter().sum();
-        let avg_work = (total_work as f64) / (num_segments as f64);
-        let max_work = *work_per_seg.iter().max().unwrap_or(&1) as f64;
-        let skew = if avg_work > 0.0 { max_work / avg_work } else { 1.0 };
-        if skew >= 6.0 { 40 }
-        else if skew >= 4.0 { 32 }
-        else if skew <= 1.6 { 16 }
+        if skew95 >= 3.5 { 24 }
+        else if skew95 <= 1.4 { 12 }
         else { d_chunk_mult }
     } else {
         d_chunk_mult
     };
+    if show_timing {
+        eprintln!(
+            "    D chunking: base={} adapt={} eff={} skew95={:.2} skewMax={:.2} segs={}",
+            d_chunk_mult, adapt_chunks as u8, eff_chunk_mult, skew95, skew_max, num_segments
+        );
+    }
     let nchunks = std::cmp::min(num_segments, nthreads * eff_chunk_mult);
-    let total_work: usize = work_per_seg.iter().sum();
     let target_work = total_work / nchunks;
 
     let mut chunk_bounds: Vec<usize> = Vec::with_capacity(nchunks + 1);
@@ -1995,6 +2055,15 @@ fn count_primes(x: u64) -> u64 {
     if x < 2 { return 0; }
     if x <= 10_000 {
         return Sieve::new(x as usize).prime_pi(x as usize) as u64;
+    }
+
+    let auto_tune_enabled = std::env::var("AUTO_TUNE").ok()
+        .map(|v| v != "0")
+        .unwrap_or(false);
+    if auto_tune_enabled {
+        set_runtime_tuning(Some(choose_runtime_tuning(x)));
+    } else {
+        set_runtime_tuning(None);
     }
 
     let (alpha_y, alpha_z) = get_alpha_gourdon(x);

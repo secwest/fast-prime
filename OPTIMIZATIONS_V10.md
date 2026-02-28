@@ -98,3 +98,108 @@ D chunk count should react to actual predicted segment-work skew instead of a fi
 ## Conclusion
 
 V10 now shows a modest but repeatable improvement over both V8 and V9 on this platform after adaptive D chunking. The D-start delay itself remains non-robust and stays disabled by default.
+
+## Follow-up: Runtime Auto-Tuning Controller + Conservative Adaptation
+
+### Added
+
+- Runtime tuning controller (`AUTO_TUNE`) that can set:
+  - `AC_SEG`, `B_CHUNKS`, `D_CHUNKS`, `D_ADAPT_CHUNKS`
+  - still with env-var override priority
+- Adaptive D chunking changed from max-skew driven to **p95-skew** driven to avoid overreacting to outlier segments.
+
+### Observations
+
+- `AUTO_TUNE=1` did not consistently beat fixed tuned defaults at Max i64.
+- Conservative p95-based chunking produced cleaner decision signals (`eff` not forced high by extreme outliers), but end-to-end median gains were still inconsistent run-to-run.
+
+### Latest checks
+
+- V9 vs V10 (7 alternating, p95 adaptation):
+  - V9 median: `8.41241s`
+  - V10 median: `8.43442s`
+  - Delta: `+0.262%` (V10 slower in this sample)
+
+### Current practical stance
+
+- Keep V10 adaptive features as experimental knobs.
+- V9 remains the safer production baseline until V10 shows stable wins across larger controlled runs.
+
+## Additional Attempts (This Pass)
+
+### A. Hand-Tuned AC Microkernel Split (FAILED, reverted)
+
+- Implemented separate branch-hoisted C2/A kernels with 4x unrolled loops.
+- Result (7 alternating V9 vs V10): catastrophic regression.
+  - V9 median `8.44453s`
+  - V10 median `9.04992s`
+  - `+7.169%` slower
+- Reverted immediately.
+
+### B. B x/p Compression (FAILED, reverted)
+
+- Implemented run-length encoding of repeated `x/p` values with weighted merge.
+- Result (7 alternating V9 vs V10): large regression.
+  - V9 median `8.41872s`
+  - V10 median `8.61123s`
+  - `+2.287%` slower
+- Reverted immediately.
+
+### C. Adaptive D Chunking Robustness Tweaks (INCONCLUSIVE)
+
+- Replaced max-skew trigger with p95-skew trigger for chunk multiplier selection.
+- Reduced overreaction to outlier segments, but alternating benchmarks remained noisy and inconclusive.
+
+## Net After Reverts
+
+- V10 returns to previous adaptive scheduling baseline behavior (no proven stable win over V9 in this pass).
+
+## Counter-Driven Scheduler Follow-up (Heuristic Form)
+
+### What was attempted
+
+- Reworked adaptive D chunking to use sampled `p95` segment-work skew (instead of `max` skew) to avoid overreacting to extreme outliers.
+- Added `SHOW_TIMING` diagnostics for D chunk decisions (`base`, `adapt`, `eff`, `skew95`, `skewMax`).
+
+### Result
+
+- Diagnostics became more interpretable and less erratic.
+- End-to-end gains remained inconsistent across alternating runs.
+
+## Additional Parameter Exploration
+
+### D scheduler grid (single-run signal)
+
+- Swept `D_ADAPT_CHUNKS` x `D_CHUNKS` and validated top candidates.
+- Best practical candidate remained:
+  - `D_ADAPT_CHUNKS=0`
+  - `D_CHUNKS=24`
+
+### Candidate validation
+
+- V9 vs V10 candidate (7 alternating):
+  - V9 median `8.43172s`
+  - V10 median `8.36718s`
+  - Delta `-0.765%`
+- V8 vs V10 candidate (7 alternating):
+  - V8 median `8.43207s`
+  - V10 median `8.38471s`
+  - Delta `-0.562%`
+
+### B thread retune attempt
+
+- `B_THREADS=28` vs `24` in V10 showed only tiny median movement with worse tails.
+- Against V9, net effect was near-noise (`~0.06%` median).
+- Not adopted as default.
+
+## Current V10 Defaults
+
+- `AUTO_TUNE=0` (off by default)
+- `D_WAIT_MS=0` (off)
+- `D_ADAPT_CHUNKS=0` (off by default)
+- `D_CHUNKS=24` default
+
+## Current Assessment
+
+- V10 remains sensitive to thermal/noise conditions, but best fixed scheduler settings can outperform V9 in multiple paired samples.
+- No clear further low-risk incremental path remains without deeper instrumentation or a larger architecture shift.
