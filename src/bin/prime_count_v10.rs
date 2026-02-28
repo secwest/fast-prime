@@ -35,6 +35,39 @@ fn set_runtime_tuning(tuning: Option<RuntimeTuning>) {
     }
 }
 
+fn estimate_chunk_objective(work_per_seg: &[usize], nthreads: usize, chunk_mult: usize) -> f64 {
+    let num_segments = work_per_seg.len();
+    if num_segments == 0 || nthreads == 0 || chunk_mult == 0 { return f64::INFINITY; }
+    let nchunks = std::cmp::min(num_segments, nthreads * chunk_mult);
+    if nchunks == 0 { return f64::INFINITY; }
+    let total_work: usize = work_per_seg.iter().sum();
+    let target_work = std::cmp::max(1, total_work / nchunks);
+
+    let mut chunk_bounds: Vec<usize> = Vec::with_capacity(nchunks + 1);
+    chunk_bounds.push(0);
+    let mut cum_work = 0usize;
+    for (i, &w) in work_per_seg.iter().enumerate() {
+        cum_work += w;
+        if cum_work >= target_work * chunk_bounds.len() && chunk_bounds.len() < nchunks {
+            chunk_bounds.push(i + 1);
+        }
+    }
+    chunk_bounds.push(num_segments);
+
+    let mut max_chunk_work = 0usize;
+    for k in 0..(chunk_bounds.len() - 1) {
+        let lo = chunk_bounds[k];
+        let hi = chunk_bounds[k + 1];
+        let mut cw = 0usize;
+        for &w in &work_per_seg[lo..hi] { cw += w; }
+        if cw > max_chunk_work { max_chunk_work = cw; }
+    }
+
+    let avg_work = (total_work as f64) / (num_segments as f64);
+    let overhead = (chunk_bounds.len() as f64) * avg_work * 0.03;
+    max_chunk_work as f64 + overhead
+}
+
 fn choose_runtime_tuning(x: u64) -> RuntimeTuning {
     // Heuristic runtime controller for V10. Environment overrides still take priority.
     if x >= 1_000_000_000_000_000_000 {
@@ -1710,6 +1743,9 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         .and_then(|s| s.parse().ok())
         .or_else(|| get_runtime_tuning().map(|t| t.d_chunks))
         .unwrap_or(24);
+    let auto_chunk_select = std::env::var("D_AUTO_CHUNK_SELECT").ok()
+        .map(|v| v != "0")
+        .unwrap_or(false);
     let adapt_chunks = std::env::var("D_ADAPT_CHUNKS").ok()
         .and_then(|s| s.parse::<u32>().ok())
         .map(|v| v != 0)
@@ -1729,17 +1765,30 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let skew95 = if avg_work > 0.0 { p95_work / avg_work } else { 1.0 };
     let skew_max = if avg_work > 0.0 { max_work / avg_work } else { 1.0 };
     let nthreads = rayon::current_num_threads();
-    let eff_chunk_mult: usize = if adapt_chunks {
+    let mut eff_chunk_mult: usize = if adapt_chunks {
         if skew95 >= 3.5 { 24 }
         else if skew95 <= 1.4 { 12 }
         else { d_chunk_mult }
     } else {
         d_chunk_mult
     };
+    if auto_chunk_select {
+        let candidates: [usize; 6] = [12, 16, 20, 24, 28, 32];
+        let mut best = eff_chunk_mult;
+        let mut best_obj = estimate_chunk_objective(&work_per_seg, nthreads, best);
+        for &cand in &candidates {
+            let obj = estimate_chunk_objective(&work_per_seg, nthreads, cand);
+            if obj < best_obj {
+                best_obj = obj;
+                best = cand;
+            }
+        }
+        eff_chunk_mult = best;
+    }
     if show_timing {
         eprintln!(
-            "    D chunking: base={} adapt={} eff={} skew95={:.2} skewMax={:.2} segs={}",
-            d_chunk_mult, adapt_chunks as u8, eff_chunk_mult, skew95, skew_max, num_segments
+            "    D chunking: base={} adapt={} auto={} eff={} skew95={:.2} skewMax={:.2} segs={}",
+            d_chunk_mult, adapt_chunks as u8, auto_chunk_select as u8, eff_chunk_mult, skew95, skew_max, num_segments
         );
     }
     let nchunks = std::cmp::min(num_segments, nthreads * eff_chunk_mult);

@@ -203,3 +203,77 @@ V10 now shows a modest but repeatable improvement over both V8 and V9 on this pl
 
 - V10 remains sensitive to thermal/noise conditions, but best fixed scheduler settings can outperform V9 in multiple paired samples.
 - No clear further low-risk incremental path remains without deeper instrumentation or a larger architecture shift.
+
+## Continuation Pass: Additional Scheduler Avenues (Compile-Parity Retest)
+
+Date: 2026-02-28
+
+Build parity (same as V8 docs):
+- `cargo +nightly build --release --bin prime_count_v9 --bin prime_count_v10 -Zbuild-std=std,panic_abort --target x86_64-pc-windows-msvc`
+- Uses `.cargo/config.toml` native/tuning rustflags.
+
+### Attempt: Lightweight D Work Estimator (`D_WORK_MODEL=1`) (FAILED, reverted)
+
+What:
+- Added optional low-overhead D scheduler work model intended to reduce chunk-planning cost.
+- Compared against legacy estimator (`D_WORK_MODEL=0`) in 5 alternating runs.
+
+Result:
+- `model=0` median: `8.40493s`
+- `model=1` median: `9.11775s`
+- Delta: `+8.48%` (severe regression)
+
+Action:
+- Removed the `D_WORK_MODEL` path from V10 code.
+- Kept legacy estimator only.
+
+### Attempt: AC dedicated pool retest (`AC_THREADS`) (FAILED)
+
+Single-run sweep showed catastrophic regressions with dedicated AC pool:
+- `AC_THREADS=6`: `19.65s`
+- `AC_THREADS=8`: `15.22s`
+- `AC_THREADS=10-14`: ~`15.0s`
+
+Conclusion:
+- Confirms oversubscription/contention issue remains.
+- Keep `AC_THREADS` default behavior (`0`, global pool path).
+
+### Attempt: B thread retune revisit (`B_THREADS`) (NO ROBUST WIN)
+
+5 alternating runs, `B_THREADS=24` vs `28`:
+- `24` median: `8.41286s`
+- `28` median: `8.41047s` (tiny)
+- Means: `24` = `8.42077s`, `28` = `8.43319s`
+
+Conclusion:
+- Median difference is noise-level and tails worsen at 28.
+- Keep default unchanged.
+
+### Attempt: D chunk retune revisit (`D_ADAPT_CHUNKS=0`)
+
+5 alternating runs, `D_CHUNKS=24` vs `20` (V10-only):
+- `24` median: `8.47628s`
+- `20` median: `8.41277s`
+- Delta: `-0.749%` (looked promising)
+
+Cross-check vs V9 (7 alternating):
+- V9 median: `8.41438s`
+- V10 (`D_CHUNKS=20`) median: `8.45409s`
+- Delta: `+0.472%` (V10 slower)
+
+Cross-check vs V9 with current `D_CHUNKS=24` (7 alternating):
+- V9 median: `8.43953s`
+- V10 (`D_CHUNKS=24`) median: `8.42184s`
+- Delta: `-0.210%` (V10 slightly faster)
+
+Conclusion:
+- `D_CHUNKS=20` was not robust once validated against V9.
+- Keep default `D_CHUNKS=24`.
+
+## Current V10 Default Stance (unchanged)
+
+- `AUTO_TUNE=0`
+- `D_WAIT_MS=0`
+- `D_ADAPT_CHUNKS=0`
+- `D_CHUNKS=24`
+- `D_AUTO_CHUNK_SELECT=0`

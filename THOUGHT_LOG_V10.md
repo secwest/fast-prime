@@ -110,3 +110,35 @@
 
 - Keep V10 as fixed-scheduler tuned mode (adapt off by default, D_CHUNKS=24, AUTO_TUNE off).
 - Continue only with major new mechanisms if further gains are required.
+
+## 2026-02-28 (continuation)
+
+- Re-validated compile parity requirements from V8 docs:
+  - nightly + `-Zbuild-std=std,panic_abort` + `x86_64-pc-windows-msvc`
+  - `.cargo/config.toml` native/Arrow Lake rustflags active.
+
+### Paths tested this pass
+
+1. Lightweight D scheduler model (`D_WORK_MODEL=1`):
+- Intended to reduce D chunk-planning overhead.
+- Regressed hard (~8.5% median in alternating runs).
+- Fully removed from code.
+
+2. AC dedicated pool retest (`AC_THREADS`):
+- Still catastrophic (15-20s range).
+- Confirms this path is exhausted.
+
+3. B thread retune revisit (`B_THREADS=24` vs `28`):
+- Tiny median movement but worse tails at 28.
+- Not promoted.
+
+4. D chunk revisit (`D_CHUNKS=20` vs `24`):
+- V10-only pairing favored 20 in one sample,
+  but V9 cross-check contradicted it.
+- Kept default at 24.
+
+### Current assessment
+
+- No new robust default win found in this continuation.
+- Best practical V10 defaults remain unchanged (`D_CHUNKS=24`, adapt off, auto-tune off).
+- Remaining plausible gains likely require deeper architecture changes, not further local knob sweeps.
