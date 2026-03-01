@@ -1680,10 +1680,12 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let target_segs = rayon::current_num_threads() * 32;
     let seg_cap = std::env::var("D_SEG_CAP").ok()
         .and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);
+    let seg_min_cap = std::env::var("D_SEG_MIN_CAP").ok()
+        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(17);
     // Round segment_size to multiple of 30 for wheel-30 alignment
     let segment_size_raw = std::cmp::max(
         std::cmp::min(xz / std::cmp::max(target_segs, 1), 1usize << seg_cap),
-        1 << 17
+        1usize << seg_min_cap
     ).next_power_of_two();
     let segment_size = (segment_size_raw / 30) * 30;
     let segment_size = segment_size.max(30);

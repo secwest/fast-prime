@@ -422,3 +422,82 @@ Attempt:
 
 Verdict:
 - Not robust; reverted.
+
+## Continuation Pass: D Segmentation Floor Exploration + Additional Dead Ends
+
+Date: 2026-03-01 (next pass)
+
+### Kept code change (experimental knob only, default unchanged)
+
+Added environment-controlled D minimum segment size floor:
+- New env: `D_SEG_MIN_CAP` (default `17`)
+- Segment-size formula now uses `max(..., 1 << D_SEG_MIN_CAP)` instead of hardcoded `1<<17`.
+- Default behavior is unchanged when env is unset.
+
+### Why this was explored
+
+Timing output showed D using extremely high segment count at Max i64 (`~151k` segments), suggesting scheduler/segment overhead might still be tunable.
+
+### Validation summary
+
+#### 1) `D_SEG_MIN_CAP` sweeps
+
+Single-run sweep (`D_SEG_CAP=20`):
+- `17`: `8.67094s`
+- `18`: `8.35847s`
+- `19`: `8.35658s`
+- `20`: `8.35580s`
+
+5 alternating (`17` vs `20`):
+- `17` median: `8.39155s`
+- `20` median: `8.37483s`
+- Means: `17` = `8.42336s`, `20` = `8.37263s`
+
+11 alternating (`17` vs `20`):
+- `17` median: `8.40966s`
+- `20` median: `8.38189s` (better median)
+- Means: `17` = `8.41504s`, `20` = `8.43839s` (worse tails)
+
+11 alternating (`17` vs `19`):
+- `17` median: `8.40669s`
+- `19` median: `8.39389s`
+- Means: `17` = `8.43183s`, `19` = `8.39440s`
+
+15 alternating (`17` vs `19`):
+- `17` median: `8.41047s`
+- `19` median: `8.39287`
+- Means: `17` = `8.42142s`, `19` = `8.39259s`
+
+Interpretation:
+- Higher min floor (`19`/`20`) can improve V10-vs-V10 medians.
+- Tail behavior and cross-version comparisons are inconsistent; not robust enough to change defaults.
+- Keep as an experimental knob; default remains `17`.
+
+#### 2) Cross-checks vs V9
+
+11 alternating, V10 with `D_SEG_MIN_CAP=19`:
+- V9 median: `8.37376s`
+- V10 median: `8.37547s` (essential tie/slightly slower median)
+- Means: V9 `8.40025s`, V10 `8.37874s` (V10 better mean)
+
+11 alternating, V10 default (`D_SEG_MIN_CAP=17`):
+- V9 median: `8.41529s`
+- V10 median: `8.39601s` (V10 faster)
+- Means: V9 `8.42835s`, V10 `8.40010s`
+
+Current practical stance:
+- Keep default min floor at `17`.
+- Use `D_SEG_MIN_CAP` only for targeted experimentation.
+
+### Additional avenues tested (FAILED / reverted)
+
+1. D uniform chunking (`D_UNIFORM_CHUNKING`) path:
+- Catastrophic regressions (`~18s` to `~43s` depending on chunk count).
+- Fully reverted.
+
+2. D dedicated threads (`D_THREADS`) re-sweep:
+- All tested values slower than default global-pool path.
+
+3. C1 pool tuning (`C1_THREADS`) experiments:
+- No robust, reproducible net gain over existing behavior.
+- Reverted code changes from this path.

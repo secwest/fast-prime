@@ -185,3 +185,25 @@ Current status:
 
 - Tested an additional micro-optimization on top of fused loop (skip `bb<=c`), but it was effectively noise and worsened mean; reverted.
 - Retained only the fused correction/pass update change as net code improvement in this continuation.
+
+## 2026-03-01 (next continuation)
+
+- Investigated D segment floor because timing showed very high D segment count.
+- Added `D_SEG_MIN_CAP` knob only; left default behavior unchanged.
+
+### Findings
+
+- Raising min segment floor can improve V10-vs-V10 medians in some long alternating runs.
+- Cross-checks versus V9 remained mixed at median even when mean improved.
+- Default `D_SEG_MIN_CAP=17` remains safer.
+
+### Paths exhausted this pass
+
+1. Uniform D chunking architecture (`D_UNIFORM_CHUNKING`) was catastrophic and removed.
+2. Dedicated `D_THREADS` retest remained slower than default.
+3. C1 pool configurability experiments produced no robust production gain and were reverted.
+
+### Net
+
+- One small retained code change: D min segment floor is now tunable by env var.
+- No default knob changes from this pass.
