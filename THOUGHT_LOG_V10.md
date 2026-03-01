@@ -142,3 +142,29 @@
 - No new robust default win found in this continuation.
 - Best practical V10 defaults remain unchanged (`D_CHUNKS=24`, adapt off, auto-tune off).
 - Remaining plausible gains likely require deeper architecture changes, not further local knob sweeps.
+
+## 2026-03-01 (continuation)
+
+- Performed long-window validations (11 alternating pairs) to reduce false-positive tuning signals.
+- Re-tested all remaining scheduler knobs not fully exhausted in recent passes.
+
+### What held up
+
+- Current fixed default mode (`D_CHUNKS=24`, `D_ADAPT_CHUNKS=0`) beat V9 by ~0.30% median and also improved mean in the longest run set this pass.
+
+### What did not hold up
+
+- Adaptive candidate (`D_ADAPT_CHUNKS=1`, `D_CHUNKS=28`) looked good in shorter samples but collapsed to near-tie median and worse mean in 11-pair validation.
+- `D_AUTO_CHUNK_SELECT`, tiny D delays, alternative `D_SEG_CAP`, and non-default pool multiplier remained non-robust or worse.
+- Two code edits attempted (AC narrow pre-bucketing and D monotonic VM-hints) both regressed and were reverted.
+
+### External research check
+
+- Scanned current references and emerging literature.
+- Noted a 2024 O(sqrt(n)) prime-counting method (AMS MCOM page), but this implies a major algorithm branch, not an incremental V10 optimization.
+- No direct low-risk internet-sourced speedup found for immediate integration.
+
+### Current conclusion
+
+- For V10 as currently structured, local optimization paths are now close to exhausted.
+- Remaining paths forward are architecture-level rewrites, not parameter or microkernel tuning.

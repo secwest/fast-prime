@@ -277,3 +277,89 @@ Conclusion:
 - `D_ADAPT_CHUNKS=0`
 - `D_CHUNKS=24`
 - `D_AUTO_CHUNK_SELECT=0`
+
+## Continuation Pass: Long-Window Validation + Emerging Research Scan
+
+Date: 2026-03-01
+
+Build parity:
+- `cargo +nightly build --release --bin prime_count_v9 --bin prime_count_v10 -Zbuild-std=std,panic_abort --target x86_64-pc-windows-msvc`
+- Existing `.cargo/config.toml` native/Arrow Lake rustflags.
+
+### Scheduler/knob rechecks (this pass)
+
+1. `D_AUTO_CHUNK_SELECT` (`0` vs `1`, 7 alternating, V10-only):
+- `off` median: `8.37252s`
+- `on` median: `8.38706s`
+- Delta: `+0.174%` (worse)
+
+2. `D_ADAPT_CHUNKS` (`0` vs `1`, 7 alternating, V10-only):
+- `0` median: `8.47601s`
+- `1` median: `8.43571s`
+- Delta: `-0.475%` (looked good in this sample)
+
+3. `D_SEG_CAP` sweep (`17..22`):
+- Best single-run was default `20` (`8.30851s` in that sequence)
+- 5 alternating `19` vs `20`:
+  - `19` median: `8.54742s`
+  - `20` median: `8.38844s`
+  - Delta: `+1.895%` for `19` (much worse)
+
+4. `POOL_MULT` sweep:
+- `3` still best in this pass (`1` and `2` clearly slower; `4/5` slower)
+
+5. `D_WAIT_MS` tiny-delay revisit (`0,25,50,75,100`):
+- 5 alternating `0` vs `75`:
+  - `0` median: `8.39726s`
+  - `75` median: `8.42959s`
+  - Delta: `+0.385%` (worse)
+
+### Code-level attempts in this pass (both FAILED and reverted)
+
+1. AC narrow-by-segment pre-bucketing (to remove per-segment binary searches)
+- Direct A/B vs previous V10 (7 alternating):
+  - old median: `8.40110s`
+  - new median: `8.45910s`
+  - Delta: `+0.690%` (worse)
+
+2. D Type-1 monotonic VM bound hint reuse
+- Direct A/B vs previous V10 (7 alternating):
+  - old median: `8.39001s`
+  - new median: `38.23653s`
+  - Catastrophic regression; reverted immediately.
+
+### Long-window cross-checks against V9 (11 alternating pairs)
+
+A) V10 current default (`D_CHUNKS=24`, `D_ADAPT_CHUNKS=0`):
+- V9 median: `8.40519s`
+- V10 median: `8.37988s`
+- Delta: `-0.301%` (V10 faster)
+- Means: V9 `8.43595s`, V10 `8.37810s` (V10 better)
+
+B) V10 adaptive candidate (`D_CHUNKS=28`, `D_ADAPT_CHUNKS=1`):
+- V9 median: `8.40294s`
+- V10 median: `8.40214s`
+- Delta: `-0.010%` (essentially tie)
+- Means: V9 `8.39851s`, V10 `8.41287s` (V10 worse)
+
+### Emerging research / external scan
+
+Checked for post-classic algorithmic advances likely to beat tuned Gourdon on this platform:
+- Primecount project/docs baseline context: <https://github.com/kimwalisch/primecount>
+- New theoretical direction found: an O(sqrt(n)) counting method in 2024 (AMS paper page):
+  <https://www.ams.org/journals/mcom/2024-93-348/S0025-5718-2024-03986-2/>
+
+Practical assessment for this codebase:
+- The O(sqrt(n)) result is mathematically significant but not yet an obvious drop-in replacement for this highly tuned Max-i64 exact counter on CPU; engineering risk is high and likely requires a new branch/architecture rather than V10 incremental tuning.
+- No low-risk, evidence-backed internet-sourced optimization emerged that can be integrated as a direct V10 speedup right now.
+
+## Current V10 stance after this continuation
+
+Unchanged defaults remain the best production choice in this pass:
+- `AUTO_TUNE=0`
+- `D_WAIT_MS=0`
+- `D_ADAPT_CHUNKS=0`
+- `D_CHUNKS=24`
+- `D_AUTO_CHUNK_SELECT=0`
+- `POOL_MULT=3`
+- `D_SEG_CAP=20`
