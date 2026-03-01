@@ -363,3 +363,62 @@ Unchanged defaults remain the best production choice in this pass:
 - `D_AUTO_CHUNK_SELECT=0`
 - `POOL_MULT=3`
 - `D_SEG_CAP=20`
+
+## Continuation Pass: D Correction-Pass Memory Traffic Reduction
+
+Date: 2026-03-01 (later pass)
+
+### Implemented: Fused correction + prefix update loop in D
+
+What changed:
+- In `compute_d`, correction pass previously did two scans over `0..limit` for each chunk boundary:
+  1) `correction += prefix_phi[bb] * coeff[bb]`
+  2) `prefix_phi[bb] += phi_total[bb]`
+- Fused into a single pass performing both operations together.
+
+Why:
+- Reduces one full memory pass over large vectors per chunk merge.
+- Expected to lower memory traffic/cache pressure in D post-processing.
+
+Validation (old vs new V10, 11 alternating pairs, Max i64):
+- old median: `8.40562s`
+- new median: `8.38362s`
+- Delta: `-0.262%` (new faster)
+- Means: old `8.41170s`, new `8.41404s` (essentially flat/noisy)
+
+Short-run check (7 alternating) also favored the fused loop:
+- old median: `8.39782s`
+- new median: `8.37109s`
+- Delta: `-0.318%`
+
+### Follow-up attempt: manual 4x unroll of fused loop (FAILED, reverted)
+
+- Unrolled fused loop regressed in paired test:
+  - old median: `8.40413s`
+  - unrolled median: `8.42415s`
+  - Delta: `+0.238%`
+- Reverted to the simple fused loop.
+
+### Cross-check versus V9 (7 alternating, new V10 code)
+
+- V9 median: `8.37507s`
+- V10 median: `8.39322s`
+- Delta: `+0.217%` (V10 slower in that sample)
+- Means: V9 `8.40837s`, V10 `8.38237s` (V10 better mean)
+
+Interpretation:
+- Fused correction pass is a real micro-improvement vs prior V10 build.
+- V9/V10 ordering remains noise-sensitive; use longer alternating windows for claims.
+
+### Extra follow-up (same pass): skip low-b correction indices (FAILED to show robust gain)
+
+Attempt:
+- In fused correction loop, skipped `bb <= c` (since D loops start at `b=c+1`).
+
+7-pair A/B (fused baseline vs skip-low-b):
+- baseline median: `8.38386s`
+- skip-low-b median: `8.37972s` (tiny)
+- means: baseline `8.38770s`, skip-low-b `8.40912s` (worse tails)
+
+Verdict:
+- Not robust; reverted.

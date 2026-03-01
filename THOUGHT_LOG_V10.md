@@ -168,3 +168,20 @@
 
 - For V10 as currently structured, local optimization paths are now close to exhausted.
 - Remaining paths forward are architecture-level rewrites, not parameter or microkernel tuning.
+
+## 2026-03-01 (later continuation)
+
+- Added and retained one concrete V10 code optimization:
+  - fused D correction pass and prefix update into one loop.
+- A/B against previous V10 favored this change on median in both 7-pair and 11-pair tests.
+- Tried additional manual unrolling on top of fused loop; it regressed and was reverted.
+
+Current retained code delta from previous checkpoint:
+- D correction pass now performs one combined pass instead of two passes.
+
+Current status:
+- V10 still highly noise-sensitive versus V9 at this margin, but this is a defensible local win versus prior V10 implementation.
+- Further improvements likely require larger algorithmic restructuring rather than additional loop-shape micro-tuning.
+
+- Tested an additional micro-optimization on top of fused loop (skip `bb<=c`), but it was effectively noise and worsened mean; reverted.
+- Retained only the fused correction/pass update change as net code improvement in this continuation.

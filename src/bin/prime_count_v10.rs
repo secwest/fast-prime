@@ -1968,11 +1968,9 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         let mut correction = 0i64;
         for bb in 0..limit {
             correction += prefix_phi[bb] * coeff[bb];
-        }
-        d += d_local + correction;
-        for bb in 0..limit {
             prefix_phi[bb] += phi_total[bb];
         }
+        d += d_local + correction;
     }
 
     d
