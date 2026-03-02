@@ -635,3 +635,49 @@ Default changed:
 
 4. Phase-mode re-sweep and expanded D grid:
 - No robust default improvement.
+
+## Continuation Correction: AC_PAR_MIN Retune After Longer Validation
+
+Date: 2026-03-02 (latest)
+
+### Context
+
+Initial introduction of `AC_PAR_MIN` suggested `256` as a default in one run window.
+A longer follow-up showed this was not robust under extended alternation.
+
+### Additional validation
+
+1. `AC_PAR_MIN=192` vs `256` (7 alternating):
+- `192` median better by ~`0.76%`
+
+2. `AC_PAR_MIN=192` vs `0` (11 alternating):
+- `192` slightly worse median/mean than `0`
+
+3. `AC_PAR_MIN=256` vs `0` (11 alternating):
+- `256` worse median (`+0.249%`) and worse mean.
+
+### Key cross-check
+
+Compared current AC_PAR_MIN code (forcing `AC_PAR_MIN=0`) against pre-AC_PAR_MIN V10 from commit `c188bb3`:
+- 11 alternating:
+  - pre median: `8.46201s`
+  - new (`AC_PAR_MIN=0`) median: `8.41724s`
+  - Delta: `-0.529%`
+  - Means also improved (`8.45810s` -> `8.41765s`)
+
+Interpretation:
+- The AC path refactor itself remains beneficial.
+- Nonzero default thresholds were not stable enough.
+
+### Final default decision
+
+- Set `AC_PAR_MIN` default fallback to **0**.
+- Keep `AC_PAR_MIN` knob for optional experimentation only.
+
+### Latest V9 vs V10 (with new default)
+
+11 alternating pairs:
+- V9 median: `8.46338s`
+- V10 median: `8.37627s`
+- Delta: `-1.029%` (V10 faster)
+- Means: V9 `8.46616s`, V10 `8.36693s`

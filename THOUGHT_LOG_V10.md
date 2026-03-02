@@ -254,3 +254,19 @@ Current status:
 
 - AC_PAR_MIN=256 is now the primary retained improvement from this continuation.
 - Other defaults unchanged unless documented previously.
+
+## 2026-03-02 (latest correction pass)
+
+- Re-audited `AC_PAR_MIN` tuning with longer alternation windows.
+- Found that nonzero defaults (192/256) are not robust enough despite earlier promising samples.
+- Kept AC_PAR_MIN feature, but defaulted it back to `0`.
+
+### Important net result
+
+- Even with `AC_PAR_MIN=0`, post-refactor AC path still outperforms pre-refactor V10 in long A/B.
+- Latest 11-pair run versus V9 showed a strong margin for current V10 (~1.0% median in that window).
+
+### Current state
+
+- AC_PAR_MIN remains available as an experimental knob.
+- Production default uses full parallel AC segment processing (`AC_PAR_MIN=0`).

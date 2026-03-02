@@ -1126,7 +1126,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         let t_ac_loops = std::time::Instant::now();
         let ac_par_min: usize = std::env::var("AC_PAR_MIN").ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(256);
+            .unwrap_or(0);
 
         let mut combined_sum: i64 = 0;
         for seg in (0..num_segs).rev() {
