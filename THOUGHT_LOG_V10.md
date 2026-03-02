@@ -231,3 +231,26 @@ Current status:
 
 - V10 is near a local optimum under current architecture; remaining deltas are highly noise-sensitive.
 - Further gains likely require deeper algorithmic/dataflow changes, not more local scheduler micro-tuning.
+
+## 2026-03-02 (breakthrough continuation)
+
+- Identified and retained a new code-level optimization in AC:
+  - segment-level serial fallback threshold (`AC_PAR_MIN`) to reduce rayon overhead on small per-segment work.
+- Tuned default threshold to `256` after sweep + alternating checks.
+
+### Evidence summary
+
+- New V10 beats prior V10 in 11-pair alternating validation (median and mean).
+- New V10 also shows a strong 11-pair win vs V9 in this run window (~0.8% median).
+
+### Rejected in same pass
+
+- D lazy vector growth (regression).
+- D estimator sample reduction (no robust gain).
+- D skew-stat gating (regression).
+- Phase-mode and broader D-grid rechecks (no robust default change).
+
+### Current state
+
+- AC_PAR_MIN=256 is now the primary retained improvement from this continuation.
+- Other defaults unchanged unless documented previously.

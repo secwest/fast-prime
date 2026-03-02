@@ -1124,6 +1124,9 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         }).collect();
 
         let t_ac_loops = std::time::Instant::now();
+        let ac_par_min: usize = std::env::var("AC_PAR_MIN").ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256);
 
         let mut combined_sum: i64 = 0;
         for seg in (0..num_segs).rev() {
@@ -1148,7 +1151,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             let n_total = n_wide + n_narrow;
             if n_total == 0 { continue; }
 
-            let seg_sum: i64 = (0..n_total).into_par_iter().map(|idx| {
+            let process_idx = |idx: usize| -> i64 {
                 let bi = if idx < n_wide {
                     unsafe { *active_wide.get_unchecked(idx) }
                 } else {
@@ -1233,9 +1236,18 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 }
 
                 local
-                }).sum();
+            };
+            let seg_sum: i64 = if n_total < ac_par_min {
+                let mut s = 0i64;
+                for idx in 0..n_total {
+                    s += process_idx(idx);
+                }
+                s
+            } else {
+                (0..n_total).into_par_iter().map(process_idx).sum()
+            };
 
-                combined_sum += seg_sum;
+            combined_sum += seg_sum;
 
                 // Next iteration is seg-1, so entries with seg_lo == seg expire now.
                 for &bi in &wide_retire_by_lo[seg] {

@@ -572,3 +572,66 @@ Best single-run candidate observed:
   - `D_AUTO_CHUNK_SELECT=0`
   - `D_SEG_CAP=20`
   - `D_SEG_MIN_CAP=17` (new knob from prior pass; default unchanged)
+
+## Breakthrough Continuation: AC Segment-Level Parallelism Gating
+
+Date: 2026-03-02 (later)
+
+### Implemented and Kept
+
+Added AC segment-level serial fallback threshold:
+- New env: `AC_PAR_MIN`
+- In `compute_ac`, per-segment work now runs:
+  - serial loop when `n_total < AC_PAR_MIN`
+  - rayon parallel loop otherwise
+
+Rationale:
+- Avoid rayon dispatch overhead for small segment workloads while preserving full parallelism for larger segments.
+
+### Tuning outcome
+
+Initial sweep (single-run signal) over `AC_PAR_MIN`:
+- `0`: `8.40103s`
+- `128`: `8.42673s`
+- `256`: `8.35825s` (best in sweep)
+- `384`: `8.41536s`
+- `512`: `8.40759s`
+- `768`: `8.45688s`
+- `1024`: `8.42710s`
+
+Alternating checks:
+- `256` vs `0` (5 pairs): tiny median edge to `256` (`-0.072%`), better mean.
+- `256` vs `384` (5 pairs): clear win for `256`.
+
+Default changed:
+- `AC_PAR_MIN` fallback set to `256`.
+
+### Validation vs previous V10 (before AC_PAR_MIN change)
+
+11 alternating pairs, Max i64:
+- old median: `8.41920s`
+- new median: `8.38224s`
+- Delta: `-0.439%`
+- Means: old `8.45574s`, new `8.38826s`
+
+### Cross-check vs V9 with new default
+
+11 alternating pairs, Max i64:
+- V9 median: `8.45668s`
+- V10 median: `8.38859s`
+- Delta: `-0.805%`
+- Means: V9 `8.48238s`, V10 `8.39302s`
+
+## Additional paths attempted in this continuation and rejected
+
+1. D chunk pre-scan removal via lazy vector growth:
+- Regressed (~`+0.64%` median), reverted.
+
+2. D work-model sample-point reduction:
+- Inconclusive/no robust gain, not kept.
+
+3. D skew-stat gating when adapt/auto off:
+- Regressed in balanced A/B, reverted.
+
+4. Phase-mode re-sweep and expanded D grid:
+- No robust default improvement.
