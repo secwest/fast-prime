@@ -501,3 +501,74 @@ Current practical stance:
 3. C1 pool tuning (`C1_THREADS`) experiments:
 - No robust, reproducible net gain over existing behavior.
 - Reverted code changes from this path.
+
+## Continuation Pass: Additional D/Phase Paths (No New Robust Default Win)
+
+Date: 2026-03-02
+
+### Attempt A: D chunk skew-stat gating (FAILED, reverted)
+
+Hypothesis:
+- When `D_ADAPT_CHUNKS=0`, `D_AUTO_CHUNK_SELECT=0`, and `SHOW_TIMING` is off,
+  skip p95/max-skew sampling/sort overhead in D setup.
+
+Result:
+- Balanced A/B showed regression (combined 14-run view):
+  - old median `8.42708s`
+  - gated median `8.49168s`
+  - delta `+0.767%`
+- Reverted.
+
+### Attempt B: D chunk pre-scan removal via lazy phi/coeff growth (FAILED, reverted)
+
+Hypothesis:
+- Remove per-chunk `chunk_max_b` pre-scan and grow vectors lazily during segment loop.
+
+Result (7 alternating old vs new):
+- old median `8.38853s`
+- new median `8.44245s`
+- delta `+0.643%`
+- Reverted.
+
+### Attempt C: Scheduler phase modes re-sweep (all slower)
+
+Single-run checks (Max i64):
+- `DEFAULT`: `8.38453s`
+- `SEQ_MODE`: `9.24162s`
+- `PHASE_DB_AC`: `9.16773s`
+- `PHASE_AC_DB`: `8.90709s`
+- `PHASE_D_ACB`: `8.99463s`
+- `PHASE_D_ACB2`: `9.01771s`
+- `PHASE_D_ACB3`: `15.75224s`
+- `PHASE_B_ACD`: `9.33036s`
+
+Conclusion:
+- Keep default concurrent schedule.
+
+### Attempt D: Expanded D grid around current defaults (inconclusive)
+
+Grid sampled over:
+- `D_SEG_MIN_CAP` in `{17, 19}`
+- `D_ADAPT_CHUNKS` in `{0, 1}`
+- `D_CHUNKS` in `{20, 24, 28}`
+
+Best single-run candidate observed:
+- `D_SEG_MIN_CAP=17`, `D_ADAPT_CHUNKS=1`, `D_CHUNKS=28` (`8.32698s` in one run)
+
+11 alternating candidate vs base (`17/0/24`):
+- base median `8.40270s`
+- candidate median `8.40509s`
+- delta `+0.028%` (no real median win)
+- means slightly favor candidate, but too small/noisy for default change.
+
+### Net after this pass
+
+- No new robust default improvement beyond the current retained V10 baseline.
+- Existing defaults remain:
+  - `AUTO_TUNE=0`
+  - `D_WAIT_MS=0`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_CHUNKS=24`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=17` (new knob from prior pass; default unchanged)

@@ -207,3 +207,27 @@ Current status:
 
 - One small retained code change: D min segment floor is now tunable by env var.
 - No default knob changes from this pass.
+
+## 2026-03-02 (continuation)
+
+- Ran another broad pass focused on D setup/modeling and scheduler phase variants.
+- No new path produced a robust median win suitable for changing defaults.
+
+### What was tried
+
+1. Gating skew-stat computation when adapt/auto are off:
+- Regressed in balanced A/B; reverted.
+
+2. Removing D per-chunk max_b pre-scan (lazy vector growth):
+- Regressed; reverted.
+
+3. Re-sweep of all built-in `PHASE_*` modes:
+- All slower than default schedule.
+
+4. Wider grid near current defaults (`D_SEG_MIN_CAP`, `D_ADAPT_CHUNKS`, `D_CHUNKS`):
+- Found fast single runs, but long alternation did not confirm a median improvement.
+
+### Current interpretation
+
+- V10 is near a local optimum under current architecture; remaining deltas are highly noise-sensitive.
+- Further gains likely require deeper algorithmic/dataflow changes, not more local scheduler micro-tuning.
