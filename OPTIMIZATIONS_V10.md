@@ -681,3 +681,72 @@ Interpretation:
 - V10 median: `8.37627s`
 - Delta: `-1.029%` (V10 faster)
 - Means: V9 `8.46616s`, V10 `8.36693s`
+
+## Continuation Pass: AC_PAR_MIN Stability Audit + AC_SEG/D_CHUNKS Retests
+
+Date: 2026-03-03
+
+### 1) AC_PAR_MIN follow-up (important correction)
+
+Extended alternation showed prior `AC_PAR_MIN=256` default was not stable:
+- `256` vs `0` (11 alternating):
+  - `256` median slower by `+0.249%`
+  - mean also worse.
+- `192` vs `0` (11 alternating):
+  - `192` also slightly worse.
+
+Result:
+- Keep feature, but default remains `AC_PAR_MIN=0` (already set in code).
+
+Cross-check:
+- Current code with `AC_PAR_MIN=0` still beats pre-AC_PAR_MIN V10 (`c188bb3`) in 11-pair A/B:
+  - pre median `8.46201s`
+  - new median `8.41724s`
+  - delta `-0.529%`.
+
+### 2) D skew-sample selection experiment (FAILED, reverted)
+
+Tried replacing p95 sample full sort with `select_nth_unstable`.
+- 11 alternating old vs new regressed strongly:
+  - old median `8.37909s`
+  - new median `8.43419s`
+  - delta `+0.658%`.
+- Reverted.
+
+### 3) D work-sample size retune (`D_SKEW_SAMPLE`) (FAILED to hold up)
+
+- Single runs hinted possible gains at some sample sizes.
+- 7 and 11 alternating checks showed default-equivalent behavior was safer; candidate sizes regressed.
+- No code change kept from this path.
+
+### 4) Runtime retunes with current code
+
+#### POOL_MULT
+- 11 alternating `2` vs `3` confirmed `3` is decisively better.
+
+#### D_SEG_CAP
+- 11 alternating `19` vs `20` confirmed `20` decisively better.
+
+#### D_CHUNKS
+- 11 alternating `20` vs `24`: mixed/noisy signal.
+- 15 alternating `20` vs `24`: tiny edge to `24` (median and mean).
+- Keep default `24`.
+
+#### AC_SEG
+- Several runs showed `160k` competitive and sometimes faster than `180k`.
+- 11 alternating `160k` vs `180k`: very small median edge to `160k`, tiny mean edge to `180k` (inconclusive).
+- Vs V9, both `160k` and `180k` produced solid wins in different windows; no stable reason yet to change default.
+- Keep default `180000`.
+
+## Net after this pass
+
+- No new retained code changes.
+- This pass mainly hardened defaults by rejecting non-robust alternates.
+- Current practical defaults unchanged:
+  - `AC_PAR_MIN=0`
+  - `AC_SEG=180000`
+  - `D_SEG_CAP=20`
+  - `D_CHUNKS=24`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`

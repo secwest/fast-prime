@@ -270,3 +270,23 @@ Current status:
 
 - AC_PAR_MIN remains available as an experimental knob.
 - Production default uses full parallel AC segment processing (`AC_PAR_MIN=0`).
+
+## 2026-03-03 (stability continuation)
+
+- Re-ran long-window validations specifically to test if recent apparent wins were robust.
+
+### Confirmed
+
+- The AC_PAR_MIN feature is useful, but nonzero defaults (`192/256`) were not stable.
+- Default `AC_PAR_MIN=0` is the safer production stance and still improves over pre-feature V10.
+
+### Rejected
+
+- D p95 selection via `select_nth_unstable` (regression).
+- D skew sample-size retuning (no robust gain).
+- Additional knob shifts (`D_CHUNKS`, `AC_SEG`) remained too noise-sensitive for default changes.
+
+### Outcome
+
+- No code delta retained in this pass.
+- Defaults remain as previously documented.
