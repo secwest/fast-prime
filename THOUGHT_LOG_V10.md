@@ -290,3 +290,19 @@ Current status:
 
 - No code delta retained in this pass.
 - Defaults remain as previously documented.
+
+## 2026-03-03 (later continuation)
+
+- Explored additional deeper code paths in B and D; all code modifications regressed and were reverted.
+- After long revalidation sweeps, one small but defensible default retune remained:
+  - `B_CHUNKS` default moved from 4 to 2.
+
+### Why this was kept
+
+- It repeatedly produced a small median advantage in long alternating tests, with no mean penalty in the longest run.
+- The change is low-risk and fully overrideable via env.
+
+### Current state
+
+- V10 continues to gain mostly through robust scheduling defaults and avoiding unstable micro-optimizations.
+- Remaining possible wins likely require larger algorithmic changes rather than local loop rewrites.

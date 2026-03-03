@@ -750,3 +750,58 @@ Tried replacing p95 sample full sort with `select_nth_unstable`.
   - `D_ADAPT_CHUNKS=0`
   - `D_AUTO_CHUNK_SELECT=0`
   - `POOL_MULT=3`
+
+## Continuation Pass: Deep B/D Retest + B_CHUNKS Default Retune
+
+Date: 2026-03-03 (later)
+
+### Failed code-path attempts (reverted)
+
+1. `compute_b` chunk-boundary linear sweep (replace partition_point loop):
+- 11 alternating old vs new:
+  - old median `8.38425s`
+  - new median `8.42425s`
+  - Delta `+0.477%` (worse)
+- Reverted.
+
+2. D Type-2 monotonic `l` cap carryover (with and without improved init):
+- Both variants regressed severely (one catastrophic ~13s).
+- Reverted.
+
+3. `D_SKEW_SAMPLE` tunable sample-size path:
+- Single-run signals were inconsistent.
+- 7/11 alternating checks did not support non-default sample sizes.
+- No retained code/default change from this knob.
+
+### Runtime retest highlights
+
+- `POOL_MULT=3` reaffirmed strongly over `2`.
+- `D_SEG_CAP=20` reaffirmed strongly over `19`.
+- `D_CHUNKS`: long comparisons remained close/noisy (`20` vs `24` tiny).
+- `AC_SEG`: `160k` looked competitive but not robust enough to replace `180k`.
+
+### Retained default retune: `B_CHUNKS` 4 -> 2
+
+Evidence:
+- 11 alternating (`B_CHUNKS=2` vs `4`):
+  - median improvement for `2`: about `-0.566%`
+  - mean also improved.
+- 15 alternating (`2` vs `4`):
+  - median still better for `2` (`-0.129%`)
+  - means essentially equal.
+
+Decision:
+- Change V10 default `B_CHUNKS` fallback from `4` to `2`.
+- Keep env override behavior unchanged.
+
+### Net
+
+Current V10 defaults after this pass:
+- `AC_PAR_MIN=0`
+- `AC_SEG=180000`
+- `B_CHUNKS=2`  (updated)
+- `D_SEG_CAP=20`
+- `D_CHUNKS=24`
+- `D_ADAPT_CHUNKS=0`
+- `D_AUTO_CHUNK_SELECT=0`
+- `POOL_MULT=3`

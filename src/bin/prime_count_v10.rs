@@ -876,7 +876,7 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
     let b_chunks_mult: usize = std::env::var("B_CHUNKS").ok()
         .and_then(|s| s.parse().ok())
         .or_else(|| get_runtime_tuning().map(|t| t.b_chunks))
-        .unwrap_or(4);
+        .unwrap_or(2);
     let nchunks = (nthreads * b_chunks_mult).max(1);
     let range = max_xp - range_start + 1;
     let chunk_size = (range + nchunks as u64 - 1) / nchunks as u64;
