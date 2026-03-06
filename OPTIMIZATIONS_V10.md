@@ -805,3 +805,61 @@ Current V10 defaults after this pass:
 - `D_ADAPT_CHUNKS=0`
 - `D_AUTO_CHUNK_SELECT=0`
 - `POOL_MULT=3`
+
+## Continuation Pass: AC_SEG Re-Tune (Robust Long-Window Win)
+
+Date: 2026-03-03 (latest)
+
+### Key finding
+
+A longer controlled alternation finally produced a robust AC segment-size winner:
+- `AC_SEG=160000` vs `180000` over **21 alternating pairs**:
+  - median: `8.34402s` vs `8.38652s`
+  - delta: `-0.507%`
+  - means: `8.35640s` vs `8.39867s`
+
+This is the first long-window result clearly favoring `160000` on both median and mean.
+
+### Cross-check vs V9 (with AC_SEG=160000)
+
+11 alternating pairs:
+- V9 median: `8.42402s`
+- V10 median: `8.38537s`
+- delta: `-0.459%`
+- means: V9 `8.44755s`, V10 `8.37008s`
+
+### Retained default change
+
+- Updated V10 default `AC_SEG` fallback:
+  - `180000 -> 160000`
+
+### Runtime auto-tuning sync
+
+- Updated top runtime-tuning tier (`x >= 1e18`) to match current best defaults:
+  - `ac_seg: 160000`
+  - `b_chunks: 2`
+
+### Additional attempts in this pass (not kept)
+
+1. `compute_b` chunk-bound linear sweep:
+- Regressed on median in 11-pair A/B; reverted.
+
+2. D Type-2 monotonic l-cap variants:
+- Regressed (one catastrophic); reverted.
+
+3. D skew-sample/tuning experiments:
+- No stable win; not retained.
+
+4. AC_PAR_MIN fast-path branch removal for default 0:
+- Near-noise and slightly worse median; reverted.
+
+## Current practical defaults after this pass
+
+- `AC_SEG=160000`  (updated)
+- `AC_PAR_MIN=0`
+- `B_CHUNKS=2`
+- `D_SEG_CAP=20`
+- `D_CHUNKS=24`
+- `D_ADAPT_CHUNKS=0`
+- `D_AUTO_CHUNK_SELECT=0`
+- `POOL_MULT=3`

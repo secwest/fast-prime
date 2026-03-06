@@ -306,3 +306,25 @@ Current status:
 
 - V10 continues to gain mostly through robust scheduling defaults and avoiding unstable micro-optimizations.
 - Remaining possible wins likely require larger algorithmic changes rather than local loop rewrites.
+
+## 2026-03-03 (latest continuation)
+
+- Pushed through multiple failed deep-path attempts and focused on long-window validation quality.
+- Landed one robust default improvement this pass:
+  - `AC_SEG` default moved from `180000` to `160000`.
+
+### Why kept
+
+- 21-pair alternating validation favored `160000` on both median and mean.
+- V9 cross-check with `160000` also remained favorable.
+
+### Also synced
+
+- Runtime top-tier auto-tune values now reflect current best defaults (`ac_seg=160000`, `b_chunks=2`).
+
+### Rejected in this pass
+
+- compute_b boundary sweep rewrite.
+- D Type-2 monotonic l-cap rewrites.
+- Additional D sample/tuning tweaks.
+- AC fast-path branch micro-edit (no robust gain).

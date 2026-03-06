@@ -71,7 +71,7 @@ fn estimate_chunk_objective(work_per_seg: &[usize], nthreads: usize, chunk_mult:
 fn choose_runtime_tuning(x: u64) -> RuntimeTuning {
     // Heuristic runtime controller for V10. Environment overrides still take priority.
     if x >= 1_000_000_000_000_000_000 {
-        RuntimeTuning { ac_seg: 180_000, b_chunks: 4, d_chunks: 24, d_adapt_chunks: false }
+        RuntimeTuning { ac_seg: 160_000, b_chunks: 2, d_chunks: 24, d_adapt_chunks: false }
     } else if x >= 100_000_000_000_000_000 {
         RuntimeTuning { ac_seg: 190_000, b_chunks: 4, d_chunks: 24, d_adapt_chunks: false }
     } else if x >= 1_000_000_000_000_000 {
@@ -1076,7 +1076,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         let seg_pairs: usize = std::env::var("AC_SEG").ok()
             .and_then(|s| s.parse().ok())
             .or_else(|| get_runtime_tuning().map(|t| t.ac_seg))
-            .unwrap_or(180_000);
+            .unwrap_or(160_000);
         let total_pairs = big_pi.bits.len();
         let num_segs = (total_pairs + seg_pairs - 1) / seg_pairs;
         let numbers_per_seg = seg_pairs * 128;
