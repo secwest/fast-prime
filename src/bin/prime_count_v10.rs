@@ -91,7 +91,7 @@ fn estimate_chunk_objective(work_per_seg: &[usize], nthreads: usize, chunk_mult:
 fn choose_runtime_tuning(x: u64) -> RuntimeTuning {
     // Heuristic runtime controller for V10. Environment overrides still take priority.
     if x >= 1_000_000_000_000_000_000 {
-        RuntimeTuning { ac_seg: 170_000, b_chunks: 2, d_chunks: 24, d_adapt_chunks: false }
+        RuntimeTuning { ac_seg: 170_000, b_chunks: 4, d_chunks: 24, d_adapt_chunks: false }
     } else if x >= 100_000_000_000_000_000 {
         RuntimeTuning { ac_seg: 190_000, b_chunks: 4, d_chunks: 24, d_adapt_chunks: false }
     } else if x >= 1_000_000_000_000_000 {
@@ -896,7 +896,7 @@ fn compute_b(x: u64, y: usize, _pi_y: usize, big_pi: &BigPiTable) -> i64 {
     let b_chunks_mult: usize = std::env::var("B_CHUNKS").ok()
         .and_then(|s| s.parse().ok())
         .or_else(|| get_runtime_tuning().map(|t| t.b_chunks))
-        .unwrap_or(2);
+        .unwrap_or(4);
     let nchunks = (nthreads * b_chunks_mult).max(1);
     let range = max_xp - range_start + 1;
     let chunk_size = (range + nchunks as u64 - 1) / nchunks as u64;
@@ -1207,7 +1207,6 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
                 let mut local = 0i64;
                 let mut l = eff_lo;
-
                 while l + 3 <= eff_hi {
                     unsafe {
                     let xpq0 = fast_div(info.xp, *primes.get_unchecked(l) as u64, *recip.get_unchecked(l)) as usize;

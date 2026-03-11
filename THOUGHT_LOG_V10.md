@@ -651,3 +651,46 @@ This check-in closes a coherent D-focused optimization wave. The important story
 - The most credible future gains are now either:
   - better-guided cross-bucket/leaf-loop work using the retained instrumentation, or
   - a larger structural rethink of D iteration, not another cosmetic rewrite of the current sparse-index boundary logic.
+
+## 2026-03-11 (post-push continuation)
+
+- Continued from the pushed leaf-loop-hoisted baseline instead of stacking work on an unpushed branch.
+- The first goal in this continuation was to see whether the new baseline had shifted any previously settled local optima before opening another big code path.
+
+### What was tried and rejected
+
+1. Type 2 local `primes[l]` / `prime_recip[l]` hoist
+- Looked like a natural extension of the D leaf-loop win.
+- Failed order reversal, so it was reverted.
+
+2. Cross-bucket sparse-index de-duplication
+- Fixed a real source-level duplication, but the measured gain was effectively zero.
+- Reverted instead of keeping a complexity-neutral tie.
+
+3. AC C2/A inner-loop split
+- This was the only AC-side structural try in the continuation.
+- It regressed immediately and badly on the first Max-i64 run, so it was dropped without further spending.
+
+4. `D_SEG_MIN_CAP` recheck
+- The single-run sweep suggested `16` might have displaced `14`.
+- Balanced A/B said no; kept `14`.
+
+### Retained change
+
+- Re-opened `B_CHUNKS` on the new baseline and found the old `2` default was no longer best.
+- `B_CHUNKS=4` won on median in both orderings and held up on a longer 30-run alternating window.
+- This is a default/runtime-tuning change, not a code-structure rewrite.
+
+### Why that choice was acceptable despite one mixed short window
+
+- The first two 22-run windows gave:
+  - consistent median improvement for `4`
+  - one tiny mean loss in reversed order (`+0.021%`), which was too small to trust by itself
+- The longer 30-run window resolved that ambiguity and restored both median and mean advantage for `4`.
+- That made the retune stronger than the earlier rejected micro-edits in this same continuation.
+
+### Current state
+
+- The pushed baseline has now moved again, this time by a retuned `B_CHUNKS` default from `2` to `4`.
+- The D-side code win from the previous continuation still stands unchanged.
+- The most obvious cheap post-hoist D and AC source rewrites from this continuation have now been tested and rejected.

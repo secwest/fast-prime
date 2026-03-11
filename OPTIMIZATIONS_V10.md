@@ -1766,3 +1766,139 @@ Decision:
   - `D_ADAPT_CHUNKS=0`
   - `D_AUTO_CHUNK_SELECT=0`
   - `POOL_MULT=3`
+
+## Continuation Pass: Post-Push B Retune + Cleanup Sweep
+
+Date: 2026-03-11 (post-push continuation)
+
+### Rejected code experiments
+
+#### 1) Type 2 `primes[l]` / `prime_recip[l]` local hoist
+
+Hypothesis:
+- Mirror the successful D leaf-loop hoist pattern inside Type 2 by loading
+  `primes[l]` and `prime_recip[l]` once per iteration and turning the
+  loop-condition boundary check into an in-loop break.
+
+Result:
+- 22 alternating vs pushed baseline:
+  - candidate median `8.34966s`, mean `8.36464s`
+  - baseline median `8.37725s`, mean `8.36474s`
+  - delta `-0.038%` median, `-0.001%` mean
+- Reversed order:
+  - candidate median `8.35194s`, mean `8.35291s`
+  - baseline median `8.33250s`, mean `8.33455s`
+  - delta `+0.233%` median, `+0.220%` mean
+
+Decision:
+- Reverted.
+
+#### 2) Cross-bucket sparse-index de-duplication
+
+Hypothesis:
+- Remove duplicated recomputation of the cross-bucket start/end sparse-index
+  bounds that remained after landing `D_VM_STATS`.
+
+Result:
+- 22 alternating vs pushed baseline:
+  - candidate median `8.38810s`, mean `8.36789s`
+  - baseline median `8.39126s`, mean `8.36984s`
+  - delta `-0.038%` median, `-0.023%` mean
+
+Decision:
+- Reverted as noise.
+
+#### 3) AC C2/A loop specialization split
+
+Hypothesis:
+- Split the AC hot loop into separate `C2` and `A` inner loops so the unrolled
+  path stops checking `info.is_c2` and recasting `b_term` on every batch.
+
+Result:
+- First Max-i64 validation run regressed catastrophically to `8.94187s`.
+
+Decision:
+- Reverted immediately.
+
+### Knob rechecks on the pushed leaf-loop baseline
+
+#### `D_CHUNKS`
+
+Single-run sweep:
+- `12`: `8.43595s`
+- `16`: `8.31428s`
+- `20`: `8.31859s`
+- `24`: `8.29819s`
+- `28`: `8.33694s`
+- `32`: `8.42242s`
+
+Decision:
+- Keep `D_CHUNKS=24`.
+
+#### `D_SEG_MIN_CAP`
+
+Single-run sweep:
+- `12`: `8.33185s`
+- `13`: `8.31676s`
+- `14`: `8.33067s`
+- `15`: `8.33349s`
+- `16`: `8.30284s`
+
+22 alternating (`16` vs default `14`):
+- candidate median `8.36279s`, mean `8.35904s`
+- baseline median `8.34922s`, mean `8.34893s`
+- delta `+0.163%` median, `+0.121%` mean
+
+Decision:
+- Keep `D_SEG_MIN_CAP=14`.
+
+### Retained default retune: `B_CHUNKS` 2 -> 4
+
+Single-run sweep:
+- `1`: `8.33108s`
+- `2`: `8.46658s`
+- `3`: `8.37540s`
+- `4`: `8.31649s`
+
+22 alternating (`4` vs `2`), candidate first:
+- candidate median `8.35652s`, mean `8.35615s`
+- baseline median `8.37272s`, mean `8.37168s`
+- delta `-0.193%` median, `-0.186%` mean
+
+22 alternating, reversed order:
+- candidate median `8.36472s`, mean `8.37107s`
+- baseline median `8.37772s`, mean `8.36929s`
+- delta `-0.155%` median, `+0.021%` mean
+
+30 alternating, candidate first:
+- candidate median `8.38674s`, mean `8.37154s`
+- baseline median `8.39851s`, mean `8.40481s`
+- delta `-0.140%` median, `-0.396%` mean
+
+### V9 cross-check
+
+22 alternating:
+- V10 median `8.39108s`, mean `8.37955s`
+- V9 median `8.43632s`, mean `8.42580s`
+- delta `-0.536%` median, `-0.549%` mean
+
+Decision:
+- Update V10 default `B_CHUNKS` fallback from `2` to `4`.
+- Sync the top auto-tune tier (`x >= 1e18`) to `b_chunks=4`.
+
+### Net
+
+- Retained one new default change from this continuation:
+  - `B_CHUNKS: 2 -> 4`
+- Current retained defaults are now:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=4`  (updated)
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=24`
+  - `VM_LOOKAHEAD=1`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
