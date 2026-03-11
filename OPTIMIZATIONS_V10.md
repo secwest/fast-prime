@@ -863,3 +863,906 @@ This is the first long-window result clearly favoring `160000` on both median an
 - `D_ADAPT_CHUNKS=0`
 - `D_AUTO_CHUNK_SELECT=0`
 - `POOL_MULT=3`
+
+## Continuation Pass: D_SEG_MIN_CAP Retune (Robust Win)
+
+Date: 2026-03-06
+
+Compile/runtime setup used:
+- nightly release build with `-Zbuild-std=std,panic_abort` on `x86_64-pc-windows-msvc`
+- `.cargo/config.toml` rustflags unchanged (`target-cpu=native`, `--unroll-threshold=800`, `-Zmir-opt-level=4`, `-Ztune-cpu=arrowlake`)
+- large pages enabled (`MIMALLOC_LARGE_OS_PAGES=1`)
+
+### Revalidation around current baseline (no retained change)
+
+1. `B_CHUNKS=4` vs `2` (22 alternating):
+- `2` median `8.41552s`, mean `8.42074s`
+- `4` median `8.42384s`, mean `8.42603s`
+- `2` still slightly better; keep default `B_CHUNKS=2`.
+
+2. `D_CHUNKS=20` vs `24` (22 alternating):
+- `20` median `8.42866s`, mean `8.42937s`
+- `24` median `8.41654s`, mean `8.44099s`
+- split signal (median vs mean), no default change.
+
+3. `D_AUTO_CHUNK_SELECT=1` vs `0` (22 alternating):
+- `1` median `8.40148s`, mean `8.39201s`
+- `0` median `8.39491s`, mean `8.41472s`
+- mixed signal; keep default `0`.
+
+### New retained default improvement
+
+`D_SEG_MIN_CAP` sweep showed a new strong candidate at `14`.
+
+22 alternating (`D_SEG_MIN_CAP=14` vs `17`) with current defaults:
+- `14` median `8.37065s`, mean `8.37096s`
+- `17` median `8.42967s`, mean `8.43422s`
+- improvement for `14`:
+  - median `-0.700%`
+  - mean `-0.750%`
+
+### V9 cross-check
+
+22 alternating (`V10@cap14` vs `V9`):
+- V10 median `8.43259s`, mean `8.41989s`
+- V9 median `8.48835s`, mean `8.49885s`
+- V10 deltas:
+  - median `-0.657%`
+  - mean `-0.929%`
+
+### Retained change
+
+- Updated V10 default `D_SEG_MIN_CAP` fallback:
+  - `17 -> 14`
+
+### Current practical defaults after this pass
+
+- `AC_SEG=160000`
+- `AC_PAR_MIN=0`
+- `B_CHUNKS=2`
+- `D_SEG_CAP=20`
+- `D_SEG_MIN_CAP=14`  (updated)
+- `D_CHUNKS=24`
+- `D_ADAPT_CHUNKS=0`
+- `D_AUTO_CHUNK_SELECT=0`
+- `POOL_MULT=3`
+
+## Continuation Pass: AC_SEG Re-Tune After D_SEG_MIN_CAP Update
+
+Date: 2026-03-06 (later)
+
+Compile/runtime setup unchanged:
+- nightly + `-Zbuild-std=std,panic_abort`
+- same rustflags and large-page setup as above
+
+### D_SEG_MIN_CAP neighborhood check
+
+Additional checks after promoting `D_SEG_MIN_CAP=14`:
+- `14` vs `13` (22 alternating): `14` better on median/mean.
+- `14` vs `15`:
+  - one 22-run showed `15` better,
+  - one 30-run reversed-order showed near-tie with tiny split signal.
+- `15` vs `17` (22 alternating): `15` did not hold a win.
+
+Decision:
+- Keep `D_SEG_MIN_CAP=14` as the retained default.
+
+### AC re-tune with `D_SEG_MIN_CAP=14`
+
+22 alternating (`AC_SEG=170000` vs `160000`):
+- `170000` median `8.42881s`, mean `8.40599s`
+- `160000` median `8.43594s`, mean `8.44978s`
+- delta: median `-0.085%`, mean `-0.518%`
+
+30 alternating reversed-order (`160000` vs `170000`):
+- `160000` median `8.44012s`, mean `8.45750s`
+- `170000` median `8.42545s`, mean `8.42223s`
+- delta (`170000` vs `160000`): median `-0.174%`, mean `-0.417%`
+
+### V9 cross-check (fully tuned V10)
+
+22 alternating (`V10 tuned` vs `V9`):
+- V10 median `8.42553s`, mean `8.41991s`
+- V9 median `8.48092s`, mean `8.49638s`
+- V10 deltas:
+  - median `-0.653%`
+  - mean `-0.900%`
+
+### Retained changes
+
+1. `D_SEG_MIN_CAP` default fallback:
+- `17 -> 14`
+
+2. `AC_SEG` default fallback:
+- `160000 -> 170000`
+
+3. Runtime top-tier tuning sync (`x >= 1e18`):
+- `ac_seg: 170000`
+
+### Current practical defaults after this pass
+
+- `AC_SEG=170000`  (updated)
+- `AC_PAR_MIN=0`
+- `B_CHUNKS=2`
+- `D_SEG_CAP=20`
+- `D_SEG_MIN_CAP=14`
+- `D_CHUNKS=24`
+- `D_ADAPT_CHUNKS=0`
+- `D_AUTO_CHUNK_SELECT=0`
+- `POOL_MULT=3`
+
+## Continuation Pass: Post-Retune Exhaustion Sweep
+
+Date: 2026-03-06 (latest)
+
+Setup: same nightly build + large-page runtime conditions.
+
+### Knob rechecks (no retained default changes)
+
+1. `B_CHUNKS=1` vs `2` (22 alternating, with `AC_SEG=170000`, `D_SEG_MIN_CAP=14`):
+- `1` median `8.41581s`, mean `8.40010s`
+- `2` median `8.41579s`, mean `8.38957s`
+- essentially tied on median; mean favors `2` slightly. Keep `B_CHUNKS=2`.
+
+2. `AC_PAR_MIN=192` vs `0` (22 alternating):
+- `192` median `8.42398s`, mean `8.40171s`
+- `0` median `8.40899s`, mean `8.36616s`
+- nonzero threshold regressed; keep `AC_PAR_MIN=0`.
+
+3. Single-run sweeps under current defaults:
+- `D_SEG_CAP`: `20` remained clear optimum (18/19/21/22 slower).
+- `D_CHUNKS`: `24` remained best among 16/20/24/28/32.
+- `POOL_MULT`: `3` remained best vs `2` and `4`.
+
+### Code-path experiments (FAILED, reverted)
+
+1. `compute_b` pre-sum fast path (`pi_fast` + unchecked for `x/p <= sqrt(x)`):
+- A/B via env toggle over 22 alternating runs:
+  - fast variant median/mean worse (`+0.168%` / `+0.050%`).
+- Reverted.
+
+2. AC crossover scalarization in unrolled mixed-boundary case:
+- A/B via env toggle over 22 alternating runs:
+  - scalar variant median/mean worse (`+0.123%` / `+0.166%`).
+- Reverted.
+
+### Net
+
+- No additional retained wins in this continuation.
+- Current tuned defaults remain:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=2`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
+
+## Continuation Pass: ValidM Sparse-Index Retune
+
+Date: 2026-03-06 (latest later)
+
+Setup unchanged:
+- nightly + `-Zbuild-std=std,panic_abort`
+- large pages enabled
+- tuned baseline before this pass:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=2`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `POOL_MULT=3`
+
+### New knob under test
+
+- Exposed `VM_STRIDE` for the sparse `ValidM` index used by D Type 1 range lookup.
+- Prior default behavior corresponded to `VM_STRIDE=64`.
+
+### Sweep
+
+Single-run sweep:
+- `16`: `8.36899s`
+- `32`: `8.32493s`
+- `48`: `8.38073s`
+- `64`: `8.34255s`
+- `96`: `8.37201s`
+- `128`: `8.44104s`
+- `192`: `8.43260s`
+
+Neighbor check:
+- `24`: `8.33934s`
+- `32`: `8.40705s`
+- `40`: `8.59236s`
+
+### Alternating validation
+
+1. `32` vs `64` (22 alternating):
+- `32` median `8.38560s`, mean `8.38923s`
+- `64` median `8.42876s`, mean `8.43115s`
+- delta (`32` vs `64`):
+  - median `-0.512%`
+  - mean `-0.497%`
+
+2. `24` vs `64` (22 alternating):
+- `24` median `8.39720s`, mean `8.38703s`
+- `64` median `8.46429s`, mean `8.44584s`
+- delta (`24` vs `64`):
+  - median `-0.793%`
+  - mean `-0.696%`
+
+3. `24` vs `32`:
+- 22 alternating gave mixed signal.
+- 30 alternating, reversed order:
+  - `32` median `8.39972s`, mean `8.38068s`
+  - `24` median `8.40756s`, mean `8.40000s`
+  - delta (`32` vs `24`):
+    - median `-0.093%`
+    - mean `-0.230%`
+
+Decision:
+- Keep `VM_STRIDE=32` as the new default.
+- `24` is competitive, but `32` won the longer direct comparison and already had a clean win over the prior default.
+
+### V9 cross-check
+
+22 alternating (`V10 tuned + VM_STRIDE=32` vs `V9`):
+- V10 median `8.36997s`, mean `8.35495s`
+- V9 median `8.48300s`, mean `8.49954s`
+- V10 deltas:
+  - median `-1.332%`
+  - mean `-1.701%`
+
+### Retained change
+
+- Updated default sparse index stride:
+  - `VM_STRIDE: 64 -> 32`
+
+### Current practical defaults after this pass
+
+- `AC_SEG=170000`
+- `AC_PAR_MIN=0`
+- `B_CHUNKS=2`
+- `D_SEG_CAP=20`
+- `D_SEG_MIN_CAP=14`
+- `D_CHUNKS=24`
+- `VM_STRIDE=32`  (updated)
+- `D_ADAPT_CHUNKS=0`
+- `D_AUTO_CHUNK_SELECT=0`
+- `POOL_MULT=3`
+
+### Follow-up on sparse-index search window (not retained)
+
+After promoting `VM_STRIDE=32`, exposed `VM_LOOKAHEAD` to test the search window width used with `vm_index`.
+
+Single-run sweep at `VM_STRIDE=32`:
+- `1`: `8.37509s`
+- `2`: `8.33833s`
+- `3`: `8.47378s`
+- `4`: `8.44703s`
+
+22 alternating (`VM_LOOKAHEAD=1` vs `2`):
+- `1` median `8.41379s`, mean `8.39595s`
+- `2` median `8.43287s`, mean `8.38816s`
+- mixed signal (median favors `1`, mean favors `2`)
+
+Decision:
+- Keep default `VM_LOOKAHEAD=2`.
+- Leave knob available for future experiments, but do not promote a default change.
+
+## Continuation Pass: Post-VM_STRIDE Revalidation
+
+Date: 2026-03-06 (latest final)
+
+### VM_STRIDE neighborhood check
+
+Single-run neighborhood sweep:
+- `20`: `8.32340s`
+- `24`: `8.36907s`
+- `28`: `8.36175s`
+- `32`: `8.26248s`
+- `36`: `8.37108s`
+
+This reaffirmed that the retained `32` default is still the best local point.
+
+### AC_SEG retune after VM_STRIDE update (not retained)
+
+Single-run sweep:
+- `150000`: `8.34775s`
+- `160000`: `8.48355s`
+- `170000`: `8.38220s`
+- `180000`: `8.30022s`
+- `190000`: `8.44112s`
+
+Long checks:
+
+1. `180000` vs `170000` (22 alternating):
+- `180000` median `8.41265s`, mean `8.43212s`
+- `170000` median `8.38373s`, mean `8.38214s`
+- `180000` regressed on both median and mean.
+
+2. `150000` vs `170000` (22 alternating):
+- `150000` median `8.40437s`, mean `8.38331s`
+- `170000` median `8.40029s`, mean `8.37788s`
+- essentially flat, with a slight edge to `170000`.
+
+Decision:
+- Keep `AC_SEG=170000`.
+
+### CompactPi stride probe (compile-time, not retained)
+
+Quick compile-time checks:
+- `PI_STRIDE=128`: `8.41046s` single run (worse)
+- `PI_STRIDE=512`: `8.30897s` single run
+
+Interpretation:
+- `128` is clearly worse.
+- `512` looked interesting in a single run, but there was not enough evidence to justify changing a core compile-time layout that was previously retained at `256`.
+- Reverted to `PI_STRIDE=256`.
+
+### Net
+
+- No additional retained default/code change in this continuation beyond the earlier `VM_STRIDE=32`.
+- Current retained defaults remain:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=2`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=32`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
+
+## Continuation Pass: VM_LOOKAHEAD Long-Window Resolution
+
+Date: 2026-03-07
+
+After the earlier mixed 22-run result for `VM_LOOKAHEAD=1` vs `2`, reran the comparison with reversed order and a longer window.
+
+30 alternating, reversed order (`2` vs `1`) with `VM_STRIDE=32`:
+- `2` median `8.39837s`, mean `8.39464s`
+- `1` median `8.38776s`, mean `8.37180s`
+- delta (`1` vs `2`):
+  - median `-0.126%`
+  - mean `-0.272%`
+
+### V9 cross-check
+
+22 alternating (`V10 tuned + VM_LOOKAHEAD=1` vs `V9`):
+- V10 median `8.38692s`, mean `8.36678s`
+- V9 median `8.44541s`, mean `8.46209s`
+- V10 deltas:
+  - median `-0.693%`
+  - mean `-1.126%`
+
+### Retained change
+
+- Updated default sparse-index search lookahead:
+  - `VM_LOOKAHEAD: 2 -> 1`
+
+### Current practical defaults after this pass
+
+- `AC_SEG=170000`
+- `AC_PAR_MIN=0`
+- `B_CHUNKS=2`
+- `D_SEG_CAP=20`
+- `D_SEG_MIN_CAP=14`
+- `D_CHUNKS=24`
+- `VM_STRIDE=32`
+- `VM_LOOKAHEAD=1`  (updated)
+- `D_ADAPT_CHUNKS=0`
+- `D_AUTO_CHUNK_SELECT=0`
+- `POOL_MULT=3`
+
+## Continuation Pass: VM_STRIDE Re-Tune Under VM_LOOKAHEAD=1
+
+Date: 2026-03-07 (later)
+
+With `VM_LOOKAHEAD=1` retained, reran the stride search because the optimum could shift.
+
+### Sweep
+
+Single-run neighborhood sweep:
+- `20`: `8.48676s`
+- `24`: `8.50167s`
+- `28`: `8.49505s`
+- `32`: `8.71885s`
+- `36`: `8.52388s`
+
+This sweep was noisy, so it was not used for the decision.
+
+### Direct comparisons
+
+1. `24` vs `32` (22 alternating):
+- `24` median `8.43394s`, mean `8.41505s`
+- `32` median `8.44779s`, mean `8.41484s`
+- small median edge for `24`, means effectively tied.
+
+2. `32` vs `24` (30 alternating, reversed order):
+- `32` median `8.42132s`, mean `8.40215s`
+- `24` median `8.38373s`, mean `8.37190s`
+- delta (`24` vs `32`):
+  - median `-0.446%`
+  - mean `-0.360%`
+
+### V9 cross-check
+
+22 alternating (`V10 tuned + VM_STRIDE=24 + VM_LOOKAHEAD=1` vs `V9`):
+- V10 median `8.41515s`, mean `8.39574s`
+- V9 median `8.48044s`, mean `8.46294s`
+- V10 deltas:
+  - median `-0.770%`
+  - mean `-0.794%`
+
+### Retained change
+
+- Updated default sparse index stride:
+  - `VM_STRIDE: 32 -> 24`
+
+### Current practical defaults after this pass
+
+- `AC_SEG=170000`
+- `AC_PAR_MIN=0`
+- `B_CHUNKS=2`
+- `D_SEG_CAP=20`
+- `D_SEG_MIN_CAP=14`
+- `D_CHUNKS=24`
+- `VM_STRIDE=24`  (updated)
+- `VM_LOOKAHEAD=1`
+- `D_ADAPT_CHUNKS=0`
+- `D_AUTO_CHUNK_SELECT=0`
+- `POOL_MULT=3`
+
+## Continuation Pass: Post-VM_STRIDE24 Exhaustion Sweep
+
+Date: 2026-03-07 (latest)
+
+Baseline for this pass:
+- `AC_SEG=170000`
+- `AC_PAR_MIN=0`
+- `B_CHUNKS=2`
+- `D_SEG_CAP=20`
+- `D_SEG_MIN_CAP=14`
+- `D_CHUNKS=24`
+- `VM_STRIDE=24`
+- `VM_LOOKAHEAD=1`
+- `POOL_MULT=3`
+
+### Sparse-index follow-ups (no retained change)
+
+1. `VM_LOOKAHEAD` recheck under `VM_STRIDE=24`
+
+Single-run sweep:
+- `1`: `8.33490s`
+- `2`: `8.41273s`
+- `3`: `8.38188s`
+- `4`: `8.29308s`
+
+22 alternating (`4` vs `1`):
+- `4` median `8.38796s`, mean `8.39807s`
+- `1` median `8.38414s`, mean `8.41183s`
+- mixed signal; keep `VM_LOOKAHEAD=1`.
+
+2. Joint `(VM_STRIDE, VM_LOOKAHEAD)` candidates
+
+22 alternating (`32,2` vs current `24,1`):
+- `32,2` median `8.39765s`, mean `8.39204s`
+- `24,1` median `8.42470s`, mean `8.40996s`
+- short-window signal favored `32,2`.
+
+30 alternating, reversed order (`24,1` vs `32,2`):
+- `24,1` median `8.37864s`, mean `8.37609s`
+- `32,2` median `8.39466s`, mean `8.38760s`
+- longer-window result favored `24,1`.
+
+22 alternating (`16,2` vs current `24,1`):
+- `16,2` median `8.39087s`, mean `8.39059s`
+- `24,1` median `8.40930s`, mean `8.37984s`
+- mixed signal; not enough to replace current defaults.
+
+Decision:
+- Keep `VM_STRIDE=24`, `VM_LOOKAHEAD=1`.
+
+### D scheduler rechecks (no retained change)
+
+1. `D_SEG_MIN_CAP`
+- Single-run sweep favored `10` and `16`, but long checks did not support changing the default:
+  - `16` vs `14` (22 alternating): `16` worse on median and mean.
+  - `10` vs `14` (22 alternating): median favored `14`, mean favored `10` slightly; mixed.
+
+2. `D_SEG_CAP` single-run recheck:
+- `19`: `8.37827s`
+- `20`: `8.30812s`
+- `21`: `8.80946s`
+- keep `20`.
+
+3. `D_CHUNKS` single-run recheck:
+- `20`: `8.41830s`
+- `24`: `8.36003s`
+- `28`: `8.44006s`
+- keep `24`.
+
+4. `B_CHUNKS` single-run recheck:
+- `1`: `8.55555s`
+- `2`: `8.31342s`
+- `3`: `8.45971s`
+- `4`: `8.51729s`
+- keep `2`.
+
+### Net
+
+- No additional retained default/code change in this continuation.
+- Current retained defaults remain:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=2`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=24`
+  - `VM_LOOKAHEAD=1`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
+
+## Continuation Pass: Joint Sparse-Index Surface + Search-Array Probe
+
+Date: 2026-03-07 (latest later)
+
+### Joint sparse-index retune (no retained change)
+
+Rechecked the combined `(VM_STRIDE, VM_LOOKAHEAD)` surface from the current `24/1` baseline.
+
+1. `VM_LOOKAHEAD` sweep at `VM_STRIDE=24`:
+- `1`: `8.33490s`
+- `2`: `8.41273s`
+- `3`: `8.38188s`
+- `4`: `8.29308s`
+
+22 alternating (`4` vs `1`):
+- `4` median `8.38796s`, mean `8.39807s`
+- `1` median `8.38414s`, mean `8.41183s`
+- mixed signal; no change.
+
+2. `(32,2)` vs current `(24,1)`:
+- 22 alternating initially favored `(32,2)` on both median and mean.
+- 30 alternating, reversed order, favored `(24,1)`:
+  - `(24,1)` median `8.37864s`, mean `8.37609s`
+  - `(32,2)` median `8.39466s`, mean `8.38760s`
+
+3. `(16,2)` vs current `(24,1)` (22 alternating):
+- `(16,2)` median `8.39087s`, mean `8.39059s`
+- `(24,1)` median `8.40930s`, mean `8.37984s`
+- mixed signal; no change.
+
+Decision:
+- Keep `VM_STRIDE=24`, `VM_LOOKAHEAD=1`.
+
+### Code experiment: split `m` search array (FAILED, reverted)
+
+Hypothesis:
+- Keep `ValidM` AoS layout for the actual Type 1 loop, but search bucket bounds using a separate `Vec<u32>` of `m` values to avoid touching 16-byte records during `partition_point`.
+
+22 alternating (`VM_VALUE_SEARCH=1` vs `0`):
+- `1` median `8.44256s`, mean `8.42447s`
+- `0` median `8.42246s`, mean `8.41628s`
+- regression on both median and mean.
+
+Decision:
+- Reverted the split-search-array change.
+
+### Net
+
+- No retained code/default change from this continuation.
+- Current retained defaults remain:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=2`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=24`
+  - `VM_LOOKAHEAD=1`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
+
+## Continuation Pass: D Same-Bucket Sparse-Index Fast Path
+
+Date: 2026-03-11
+
+### Code experiment: monotone Type 1 bucket window (`VM_MONO_WINDOW`) (FAILED, reverted)
+
+Hypothesis:
+- Exploit the monotonic shrinkage of Type 1 `vm_start` / `vm_end` across increasing `b`
+  by capping the next search window to the previous range.
+
+22 alternating (`VM_MONO_WINDOW=1` vs `0`):
+- `1` median `8.50707s`, mean `8.50628s`
+- `0` median `8.51046s`, mean `8.49632s`
+- mixed and slightly worse on mean.
+
+Decision:
+- Reverted.
+
+### Code experiment: local `phi[b]` / `coeff[b]` accumulators (FAILED, reverted)
+
+Hypothesis:
+- Hoist `phi[b]` into a register-local `phi_b` and accumulate `coeff[b]` deltas locally so
+  the Type 1 / Type 2 leaf loops write back once per `b` instead of on every hit.
+
+Result:
+- Correct in `SEQ_MODE=1`.
+- Correct with dedicated D pools (`D_THREADS=1` and `D_THREADS=2`).
+- Incorrect in the default concurrent/global-pool flow at `Max i64`:
+  - got `39168468951557104`
+  - expected `216289611853439384`
+
+Decision:
+- Reverted immediately. The path is not safe enough to pursue further without deeper race/UB analysis.
+
+### Retained code change: same-bucket sparse-index fast path
+
+Hypothesis:
+- When Type 1 `min_m` and `max_m` land in the same `vm_index` bucket, reuse the same
+  `ValidM` search slice for both `partition_point` calls instead of rebuilding an equivalent
+  search window twice.
+
+Implementation:
+- Added a same-bucket fast path in `compute_d`.
+- If `min_bucket == max_bucket`, the code now computes both `vm_start` and `vm_end`
+  from the same `hint..search_end` slice.
+- Cross-bucket behavior is unchanged.
+
+22 alternating, candidate first:
+- candidate median `8.33582s`, mean `8.33527s`
+- baseline median `8.36631s`, mean `8.36270s`
+- delta `-0.364%` median, `-0.328%` mean
+
+30 alternating, reversed order:
+- candidate median `8.34536s`, mean `8.34760s`
+- baseline median `8.37685s`, mean `8.36912s`
+- delta `-0.376%` median, `-0.257%` mean
+
+### V9 cross-check
+
+22 alternating:
+- V10 median `8.33711s`, mean `8.33456s`
+- V9 median `8.45212s`, mean `8.44869s`
+- delta `-1.361%` median, `-1.351%` mean
+
+Decision:
+- Keep the same-bucket fast path.
+
+### Net
+
+- Retained one new code-level D improvement in this continuation.
+- Current retained defaults remain:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=2`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=24`
+  - `VM_LOOKAHEAD=1`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
+
+## Continuation Pass: Post Same-Bucket Refinement Sweep
+
+Date: 2026-03-11 (later)
+
+### Compile/profile parity recheck
+
+Revalidated that V10 is already using the documented V8/V9 compile-time platform settings:
+- nightly release build with `-Zbuild-std=std,panic_abort`
+- `.cargo/config.toml` rustflags:
+  - `-C target-cpu=native`
+  - `-C llvm-args=--unroll-threshold=800`
+  - `-Zmir-opt-level=4`
+  - `-Ztune-cpu=arrowlake`
+- `Cargo.toml` release profile still uses `lto="fat"` and `codegen-units=1`
+
+Conclusion:
+- No new compile-time lever remains locally unexhausted in the repo configuration.
+
+### Code experiment: same-bucket tail search refinement (FAILED, reverted)
+
+Hypothesis:
+- In the retained same-bucket path, compute `vm_end` by starting the second `partition_point`
+  from `vm_start_rel` instead of rescanning the full bucket slice.
+
+22 alternating (`tail-search` vs retained same-bucket baseline):
+- candidate median `8.38658s`, mean `8.38811s`
+- baseline median `8.35835s`, mean `8.36344s`
+- delta `+0.338%` median, `+0.295%` mean
+
+Decision:
+- Reverted.
+
+### Code experiment: unchecked bucket-slice helper (FAILED, reverted)
+
+Hypothesis:
+- `vm_index` entries are already guaranteed in-bounds, so remove the redundant
+  clamp logic and use a small helper with unchecked bucket access / slice creation.
+
+22 alternating:
+- candidate median `8.38352s`, mean `8.40733s`
+- baseline median `8.34043s`, mean `8.33614s`
+- delta `+0.517%` median, `+0.854%` mean
+
+Decision:
+- Reverted.
+
+### Code experiment: manual reverse `ValidM` walk (FAILED, reverted)
+
+Hypothesis:
+- Replace `iter().rev()` in Type 1 with a manual reverse index walk over the
+  `ValidM` slice to reduce iterator overhead in the leaf loop.
+
+22 alternating:
+- candidate median `8.48688s`, mean `8.47236s`
+- baseline median `8.36883s`, mean `8.36710s`
+- delta `+1.411%` median, `+1.258%` mean
+
+Decision:
+- Reverted.
+
+### Net
+
+- No additional retained code/default change from this continuation.
+- The retained same-bucket sparse-index fast path stands.
+- Current retained defaults remain:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=2`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=24`
+  - `VM_LOOKAHEAD=1`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
+
+## Continuation Pass: D Sparse-Index Instrumentation
+
+Date: 2026-03-11 (instrumented continuation)
+
+### Retained diagnostic change
+
+- Added env-gated `D_VM_STATS=1` instrumentation inside `compute_d()`.
+- The instrumentation prints:
+  - total Type 1 sparse-index query count
+  - same-bucket vs cross-bucket share
+  - empty-result share
+  - bucket-delta histogram
+  - average searched-item and result-item counts for same-bucket and cross-bucket lookups
+- Default behavior is unchanged when `D_VM_STATS` is unset.
+
+### Measurement: Max i64
+
+Single instrumentation run (`D_VM_STATS=1`, `SHOW_TIMING=1`):
+- queries `89,722,933`
+- same-bucket `64,066,756` (`71.4%`)
+- cross-bucket `25,656,177` (`28.6%`)
+- empty-result queries `44,983,257` (`50.1%`)
+- avg bucket delta `23.28`
+- bucket delta hist:
+  - `[0]=64,066,756`
+  - `[1]=14,069,291`
+  - `[2]=2,733,784`
+  - `[3-4]=2,319,473`
+  - `[5-8]=1,829,465`
+  - `[9+]=4,704,164`
+- same-bucket avg search items `4.1`, avg result items `0.4`
+- cross-bucket avg start items `4.1`, avg end items `4.1`, avg result items `297.5`
+
+Interpretation:
+- The retained same-bucket path is already operating on very small search windows.
+- Further same-bucket lookup surgery is unlikely to pay unless it changes more than a few comparisons.
+- The only plausible remaining sparse-index specialization space is near-cross-bucket handling, but it needs data-backed validation because the actual leaf span can still be large.
+
+### Code experiment: combined near-cross-bucket search window (FAILED, reverted)
+
+Hypothesis:
+- For cross-bucket lookups with bucket delta `<= 2`, replace the two separate
+  bucket-slice probes with one contiguous `ValidM` search window.
+
+22 alternating, candidate first:
+- candidate median `8.39787s`, mean `8.39620s`
+- baseline median `8.43345s`, mean `8.41562s`
+- delta `-0.422%` median, `-0.231%` mean
+
+22 alternating, reversed order:
+- candidate median `8.43117s`, mean `8.41043s`
+- baseline median `8.37713s`, mean `8.37719s`
+- delta `+0.645%` median, `+0.397%` mean
+
+Decision:
+- Reverted.
+- The result is too order-sensitive to treat as a production V10 gain.
+
+### Net
+
+- Retained the `D_VM_STATS` diagnostic hook only.
+- No production-path/default change from this continuation.
+- Current best V10 remains the retained same-bucket sparse-index fast path plus existing defaults.
+
+## Continuation Pass: D Leaf-Loop Hoisting
+
+Date: 2026-03-11 (later)
+
+### Quick `VM_STRIDE` recheck under the retained same-bucket fast path
+
+Rationale:
+- The same-bucket fast path changed the lookup cost model, so larger buckets might have become
+  favorable by sending more queries down the retained same-bucket path.
+
+Single-run sweep (`VM_LOOKAHEAD=1` unchanged):
+- `VM_STRIDE=16`: `8.45928s`
+- `VM_STRIDE=24`: `8.36692s`
+- `VM_STRIDE=32`: `8.54630s`
+- `VM_STRIDE=40`: `8.42807s`
+- `VM_STRIDE=48`: `8.38450s`
+- `VM_STRIDE=64`: `8.42479s`
+
+Decision:
+- Keep `VM_STRIDE=24`.
+- The current default still wins even after the same-bucket code-path change.
+
+### Retained code change: hoist stable per-`b` values in D Type 1 / Type 2 loops
+
+Hypothesis:
+- After the new instrumentation showed that cross-bucket leaf spans dominate the remaining D work,
+  reduce repeated hot-loop reloads by hoisting stable per-`b` values:
+  - `phi[b]` into a local `phi_b`
+  - `coeff[b]` into a single mutable slot reference per `b`
+  - repeated `prime as usize` conversions
+  - Type 1 `lpf` comparison to `u16`
+
+Implementation:
+- Hoisted those stable values in both Type 1 and Type 2 inside `compute_d()`.
+- Semantics are unchanged; this is a codegen/locality improvement, not a new algorithm.
+
+22 alternating, candidate first:
+- candidate median `8.34957s`, mean `8.33941s`
+- baseline median `8.41539s`, mean `8.41553s`
+- delta `-0.782%` median, `-0.905%` mean
+
+22 alternating, reversed order:
+- candidate median `8.36884s`, mean `8.35786s`
+- baseline median `8.42099s`, mean `8.40487s`
+- delta `-0.619%` median, `-0.559%` mean
+
+### V9 cross-check
+
+22 alternating:
+- V10 median `8.32575s`, mean `8.32448s`
+- V9 median `8.40398s`, mean `8.40310s`
+- delta `-0.931%` median, `-0.936%` mean
+
+Decision:
+- Keep the leaf-loop hoisting change.
+
+### Net
+
+- Retained one new V10 code-path improvement in D.
+- Current retained defaults remain:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=2`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=24`
+  - `VM_LOOKAHEAD=1`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`

@@ -20,6 +20,8 @@ struct RuntimeTuning {
 }
 
 static RUNTIME_TUNING: OnceLock<Mutex<Option<RuntimeTuning>>> = OnceLock::new();
+static VM_STRIDE_TUNING: OnceLock<usize> = OnceLock::new();
+static VM_LOOKAHEAD_TUNING: OnceLock<usize> = OnceLock::new();
 
 fn tuning_slot() -> &'static Mutex<Option<RuntimeTuning>> {
     RUNTIME_TUNING.get_or_init(|| Mutex::new(None))
@@ -33,6 +35,24 @@ fn set_runtime_tuning(tuning: Option<RuntimeTuning>) {
     if let Ok(mut g) = tuning_slot().lock() {
         *g = tuning;
     }
+}
+
+fn get_vm_stride() -> usize {
+    *VM_STRIDE_TUNING.get_or_init(|| {
+        std::env::var("VM_STRIDE").ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(24)
+    })
+}
+
+fn get_vm_lookahead() -> usize {
+    *VM_LOOKAHEAD_TUNING.get_or_init(|| {
+        std::env::var("VM_LOOKAHEAD").ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(1)
+    })
 }
 
 fn estimate_chunk_objective(work_per_seg: &[usize], nthreads: usize, chunk_mult: usize) -> f64 {
@@ -71,7 +91,7 @@ fn estimate_chunk_objective(work_per_seg: &[usize], nthreads: usize, chunk_mult:
 fn choose_runtime_tuning(x: u64) -> RuntimeTuning {
     // Heuristic runtime controller for V10. Environment overrides still take priority.
     if x >= 1_000_000_000_000_000_000 {
-        RuntimeTuning { ac_seg: 160_000, b_chunks: 2, d_chunks: 24, d_adapt_chunks: false }
+        RuntimeTuning { ac_seg: 170_000, b_chunks: 2, d_chunks: 24, d_adapt_chunks: false }
     } else if x >= 100_000_000_000_000_000 {
         RuntimeTuning { ac_seg: 190_000, b_chunks: 4, d_chunks: 24, d_adapt_chunks: false }
     } else if x >= 1_000_000_000_000_000 {
@@ -1076,7 +1096,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         let seg_pairs: usize = std::env::var("AC_SEG").ok()
             .and_then(|s| s.parse().ok())
             .or_else(|| get_runtime_tuning().map(|t| t.ac_seg))
-            .unwrap_or(160_000);
+            .unwrap_or(170_000);
         let total_pairs = big_pi.bits.len();
         let num_segs = (total_pairs + seg_pairs - 1) / seg_pairs;
         let numbers_per_seg = seg_pairs * 128;
@@ -1144,9 +1164,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
 
             let narrow_start = narrow_seg_assign.partition_point(|&(_, s)| (s as usize) < seg);
             let narrow_end = narrow_seg_assign.partition_point(|&(_, s)| (s as usize) <= seg);
-            let narrow_for_seg = &narrow_seg_assign[narrow_start..narrow_end];
-
-            let n_narrow = narrow_for_seg.len();
+            let n_narrow = narrow_end - narrow_start;
             let n_wide = active_wide.len();
             let n_total = n_wide + n_narrow;
             if n_total == 0 { continue; }
@@ -1155,7 +1173,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                 let bi = if idx < n_wide {
                     unsafe { *active_wide.get_unchecked(idx) }
                 } else {
-                    narrow_for_seg[idx - n_wide].0
+                    unsafe { narrow_seg_assign.get_unchecked(narrow_start + idx - n_wide).0 }
                 };
                 let info = unsafe { *hot_lookups.get_unchecked(bi as usize) };
                 let is_narrow = idx >= n_wide;
@@ -1213,7 +1231,7 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                             } else if l > yb {
                                 local += 2 * (p0 + p1 + p2 + p3);
                             } else {
-                                for (ll, pv) in [(l, p0), (l+1, p1), (l+2, p2), (l+3, p3)] {
+                                for (ll, pv) in [(l, p0), (l + 1, p1), (l + 2, p2), (l + 3, p3)] {
                                     local += if ll <= yb { pv } else { 2 * pv };
                                 }
                             }
@@ -1629,10 +1647,130 @@ struct ValidM {
     recip_m: u64, // precomputed (1 << 64) / m for fast division
 }
 
-const VM_STRIDE: usize = 64;
+#[derive(Clone, Default)]
+struct DVmStats {
+    queries: u64,
+    same_bucket_queries: u64,
+    cross_bucket_queries: u64,
+    empty_queries: u64,
+    bucket_delta_sum: u64,
+    bucket_delta_hist: [u64; 6],
+    same_bucket_search_items: u64,
+    same_bucket_result_items: u64,
+    cross_bucket_start_items: u64,
+    cross_bucket_end_items: u64,
+    cross_bucket_result_items: u64,
+}
+
+impl DVmStats {
+    #[inline(always)]
+    fn bucket_delta_bin(delta: usize) -> usize {
+        match delta {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 | 4 => 3,
+            5..=8 => 4,
+            _ => 5,
+        }
+    }
+
+    #[inline(always)]
+    fn record_same_bucket(&mut self, delta: usize, search_items: usize, result_items: usize) {
+        self.queries += 1;
+        self.same_bucket_queries += 1;
+        self.bucket_delta_sum += delta as u64;
+        self.bucket_delta_hist[Self::bucket_delta_bin(delta)] += 1;
+        self.same_bucket_search_items += search_items as u64;
+        self.same_bucket_result_items += result_items as u64;
+        if result_items == 0 {
+            self.empty_queries += 1;
+        }
+    }
+
+    #[inline(always)]
+    fn record_cross_bucket(
+        &mut self,
+        delta: usize,
+        start_items: usize,
+        end_items: usize,
+        result_items: usize,
+    ) {
+        self.queries += 1;
+        self.cross_bucket_queries += 1;
+        self.bucket_delta_sum += delta as u64;
+        self.bucket_delta_hist[Self::bucket_delta_bin(delta)] += 1;
+        self.cross_bucket_start_items += start_items as u64;
+        self.cross_bucket_end_items += end_items as u64;
+        self.cross_bucket_result_items += result_items as u64;
+        if result_items == 0 {
+            self.empty_queries += 1;
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.queries += other.queries;
+        self.same_bucket_queries += other.same_bucket_queries;
+        self.cross_bucket_queries += other.cross_bucket_queries;
+        self.empty_queries += other.empty_queries;
+        self.bucket_delta_sum += other.bucket_delta_sum;
+        self.same_bucket_search_items += other.same_bucket_search_items;
+        self.same_bucket_result_items += other.same_bucket_result_items;
+        self.cross_bucket_start_items += other.cross_bucket_start_items;
+        self.cross_bucket_end_items += other.cross_bucket_end_items;
+        self.cross_bucket_result_items += other.cross_bucket_result_items;
+        for i in 0..self.bucket_delta_hist.len() {
+            self.bucket_delta_hist[i] += other.bucket_delta_hist[i];
+        }
+    }
+
+    fn print(&self, num_segments: usize) {
+        if self.queries == 0 {
+            eprintln!("    D VM stats: no Type 1 sparse-index queries across {} segments", num_segments);
+            return;
+        }
+
+        let q = self.queries as f64;
+        let same_q = self.same_bucket_queries.max(1) as f64;
+        let cross_q = self.cross_bucket_queries.max(1) as f64;
+
+        eprintln!(
+            "    D VM stats: queries={} same={} ({:.1}%) cross={} ({:.1}%) empty={} ({:.1}%) avg_bucket_delta={:.2}",
+            self.queries,
+            self.same_bucket_queries,
+            100.0 * self.same_bucket_queries as f64 / q,
+            self.cross_bucket_queries,
+            100.0 * self.cross_bucket_queries as f64 / q,
+            self.empty_queries,
+            100.0 * self.empty_queries as f64 / q,
+            self.bucket_delta_sum as f64 / q,
+        );
+        eprintln!(
+            "      bucket delta hist: [0]={} [1]={} [2]={} [3-4]={} [5-8]={} [9+]={}",
+            self.bucket_delta_hist[0],
+            self.bucket_delta_hist[1],
+            self.bucket_delta_hist[2],
+            self.bucket_delta_hist[3],
+            self.bucket_delta_hist[4],
+            self.bucket_delta_hist[5],
+        );
+        eprintln!(
+            "      same-bucket avg search items={:.1} avg result items={:.1}",
+            self.same_bucket_search_items as f64 / same_q,
+            self.same_bucket_result_items as f64 / same_q,
+        );
+        eprintln!(
+            "      cross-bucket avg start items={:.1} avg end items={:.1} avg result items={:.1}",
+            self.cross_bucket_start_items as f64 / cross_q,
+            self.cross_bucket_end_items as f64 / cross_q,
+            self.cross_bucket_result_items as f64 / cross_q,
+        );
+    }
+}
 
 fn build_valid_m(z: usize, k: usize, primes: &[u32], pi: &CompactPi,
                  mu: &[i8], lpf: &[u16], y_smooth: &[bool]) -> (Vec<ValidM>, Vec<u32>) {
+    let vm_stride = get_vm_stride();
     let pi_limit = pi.len() - 1;
     let sqrt_z = isqrt(z as u64) as usize;
     let pi_sqrtz = pi.get(std::cmp::min(sqrt_z, pi_limit)) as usize;
@@ -1655,11 +1793,11 @@ fn build_valid_m(z: usize, k: usize, primes: &[u32], pi: &CompactPi,
 
     let vm_index: Vec<u32> = if !valid_m_list.is_empty() {
         let max_m = valid_m_list.last().unwrap().m as usize;
-        let index_len = max_m / VM_STRIDE + 2;
+        let index_len = max_m / vm_stride + 2;
         let mut idx = vec![valid_m_list.len() as u32; index_len];
         let mut vi = 0usize;
         for bucket in 0..index_len {
-            let bucket_start = bucket * VM_STRIDE;
+            let bucket_start = bucket * vm_stride;
             while vi < valid_m_list.len() && (valid_m_list[vi].m as usize) < bucket_start {
                 vi += 1;
             }
@@ -1676,6 +1814,8 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
              valid_m_list: &[ValidM], vm_index: &[u32],
              prime_recip: &[u64]) -> i64 {
     if z == 0 { return 0; }
+    let vm_stride = get_vm_stride();
+    let vm_lookahead = get_vm_lookahead();
 
     let xz = (x / z as u64) as usize;
     let sqrt_z = isqrt(z as u64) as usize;
@@ -1693,7 +1833,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let seg_cap = std::env::var("D_SEG_CAP").ok()
         .and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);
     let seg_min_cap = std::env::var("D_SEG_MIN_CAP").ok()
-        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(17);
+        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(14);
     // Round segment_size to multiple of 30 for wheel-30 alignment
     let segment_size_raw = std::cmp::max(
         std::cmp::min(xz / std::cmp::max(target_segs, 1), 1usize << seg_cap),
@@ -1765,6 +1905,9 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         .map(|v| v != 0)
         .or_else(|| get_runtime_tuning().map(|t| t.d_adapt_chunks))
         .unwrap_or(false);
+    let collect_vm_stats = std::env::var("D_VM_STATS").ok()
+        .map(|v| v != "0")
+        .unwrap_or(false);
     let show_timing = std::env::var("SHOW_TIMING").is_ok();
     let total_work: usize = work_per_seg.iter().sum();
     let avg_work = (total_work as f64) / (num_segments as f64);
@@ -1820,7 +1963,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     chunk_bounds.push(num_segments);
     let actual_nchunks = chunk_bounds.len() - 1;
 
-    let results: Vec<(i64, Vec<i64>, Vec<i64>, usize)> = (0..actual_nchunks).into_par_iter().map(|tid| {
+    let results: Vec<(i64, Vec<i64>, Vec<i64>, usize, DVmStats)> = (0..actual_nchunks).into_par_iter().map(|tid| {
         let seg_start = chunk_bounds[tid];
         let seg_end = chunk_bounds[tid + 1];
 
@@ -1840,6 +1983,11 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         let mut d_local = 0i64;
         let mut coeff = vec![0i64; vec_size];
         let mut max_b_seen: usize = 0;
+        let mut vm_stats = if collect_vm_stats {
+            Some(DVmStats::default())
+        } else {
+            None
+        };
 
         for seg_idx in seg_start..seg_end {
             let low = seg_idx * segment_size;
@@ -1865,111 +2013,161 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             // Type 1: b ≤ π(√z), squarefree m leaves (using precomputed ValidM list)
             while b <= std::cmp::min(pi_sqrtz, cur_max_b) && b < nprimes {
                 let prime = primes[b] as u64;
+                let prime_usize = prime as usize;
+                let prime_u16 = prime as u16;
                 let x_div_prime = x / prime;
                 let xp_low = std::cmp::min((x_div_prime / low1 as u64) as usize, z);
                 let xp_high = std::cmp::min((x_div_prime / high as u64) as usize, z);
                 let min_m = std::cmp::max(xp_high, z / prime as usize);
                 let max_m = std::cmp::min((x_div_prime / (prime * prime)) as usize, xp_low);
 
-                if prime as usize >= max_m { break; }
+                if prime_usize >= max_m { break; }
 
                 if min_m < max_m {
                     // Use sparse index for fast initial lookup, then short binary search
-                    let vm_start = {
-                        let bucket = std::cmp::min(min_m / VM_STRIDE, vm_index.len() - 1);
-                        let hint = vm_index[bucket] as usize;
-                        let search_end = if bucket + 2 < vm_index.len() {
-                            vm_index[bucket + 2] as usize
+                    let min_bucket = std::cmp::min(min_m / vm_stride, vm_index.len() - 1);
+                    let max_bucket = std::cmp::min(max_m / vm_stride, vm_index.len() - 1);
+                    let bucket_delta = max_bucket - min_bucket;
+                    let (vm_start, vm_end) = if min_bucket == max_bucket {
+                        let hint = vm_index[min_bucket] as usize;
+                        let search_end = if min_bucket + vm_lookahead < vm_index.len() {
+                            vm_index[min_bucket + vm_lookahead] as usize
                         } else { valid_m_list.len() };
                         let search_end = std::cmp::min(search_end, valid_m_list.len());
                         let slice = &valid_m_list[hint..search_end];
-                        hint + slice.partition_point(|v| (v.m as usize) <= min_m)
-                    };
-                    let vm_end = {
-                        let bucket = std::cmp::min(max_m / VM_STRIDE, vm_index.len() - 1);
-                        let hint = vm_index[bucket] as usize;
-                        let search_end = if bucket + 2 < vm_index.len() {
-                            vm_index[bucket + 2] as usize
+                        let vm_start = hint + slice.partition_point(|v| (v.m as usize) <= min_m);
+                        let vm_end = hint + slice.partition_point(|v| (v.m as usize) <= max_m);
+                        if let Some(stats) = vm_stats.as_mut() {
+                            stats.record_same_bucket(
+                                bucket_delta,
+                                search_end.saturating_sub(hint),
+                                vm_end.saturating_sub(vm_start),
+                            );
+                        }
+                        (vm_start, vm_end)
+                    } else {
+                        let vm_start = {
+                            let hint = vm_index[min_bucket] as usize;
+                            let search_end = if min_bucket + vm_lookahead < vm_index.len() {
+                                vm_index[min_bucket + vm_lookahead] as usize
+                            } else { valid_m_list.len() };
+                            let search_end = std::cmp::min(search_end, valid_m_list.len());
+                            let slice = &valid_m_list[hint..search_end];
+                            hint + slice.partition_point(|v| (v.m as usize) <= min_m)
+                        };
+                        let start_hint = vm_index[min_bucket] as usize;
+                        let start_search_end = if min_bucket + vm_lookahead < vm_index.len() {
+                            vm_index[min_bucket + vm_lookahead] as usize
                         } else { valid_m_list.len() };
-                        let search_end = std::cmp::min(search_end, valid_m_list.len());
-                        let slice = &valid_m_list[hint..search_end];
-                        hint + slice.partition_point(|v| (v.m as usize) <= max_m)
+                        let start_search_end = std::cmp::min(start_search_end, valid_m_list.len());
+                        let vm_end = {
+                            let hint = vm_index[max_bucket] as usize;
+                            let search_end = if max_bucket + vm_lookahead < vm_index.len() {
+                                vm_index[max_bucket + vm_lookahead] as usize
+                            } else { valid_m_list.len() };
+                            let search_end = std::cmp::min(search_end, valid_m_list.len());
+                            let slice = &valid_m_list[hint..search_end];
+                            hint + slice.partition_point(|v| (v.m as usize) <= max_m)
+                        };
+                        let end_hint = vm_index[max_bucket] as usize;
+                        let end_search_end = if max_bucket + vm_lookahead < vm_index.len() {
+                            vm_index[max_bucket + vm_lookahead] as usize
+                        } else { valid_m_list.len() };
+                        let end_search_end = std::cmp::min(end_search_end, valid_m_list.len());
+                        if let Some(stats) = vm_stats.as_mut() {
+                            stats.record_cross_bucket(
+                                bucket_delta,
+                                start_search_end.saturating_sub(start_hint),
+                                end_search_end.saturating_sub(end_hint),
+                                vm_end.saturating_sub(vm_start),
+                            );
+                        }
+                        (vm_start, vm_end)
                     };
 
-                    let mut prev_pos: Option<usize> = None;
-                    let mut running_count: i64 = 0;
-                    for v in valid_m_list[vm_start..vm_end].iter().rev() {
-                        if prime < v.lpf as u64 {
-                            let xpm = fast_div(x_div_prime, v.m as u64,
-                                v.recip_m) as usize;
-                            if xpm > low && xpm < high {
-                                let pos = num_to_wheel_pos(xpm, low);
-                                let count = match prev_pos {
-                                    None => { running_count = sieve.count(pos); running_count }
-                                    Some(pp) if pos == pp => running_count,
-                                    Some(pp) => { running_count += sieve.count_delta(pp, pos); running_count }
-                                };
-                                d_local -= v.mu_val as i64 * (phi[b] + count);
-                                coeff[b] -= v.mu_val as i64;
-                                prev_pos = Some(pos);
-                            } else if xpm == low {
-                                d_local -= v.mu_val as i64 * phi[b];
-                                coeff[b] -= v.mu_val as i64;
+                    let phi_b = phi[b];
+                    {
+                        let coeff_b = &mut coeff[b];
+                        let mut prev_pos: Option<usize> = None;
+                        let mut running_count: i64 = 0;
+                        for v in valid_m_list[vm_start..vm_end].iter().rev() {
+                            if prime_u16 < v.lpf {
+                                let xpm = fast_div(x_div_prime, v.m as u64,
+                                    v.recip_m) as usize;
+                                if xpm > low && xpm < high {
+                                    let pos = num_to_wheel_pos(xpm, low);
+                                    let count = match prev_pos {
+                                        None => { running_count = sieve.count(pos); running_count }
+                                        Some(pp) if pos == pp => running_count,
+                                        Some(pp) => { running_count += sieve.count_delta(pp, pos); running_count }
+                                    };
+                                    d_local -= v.mu_val as i64 * (phi_b + count);
+                                    *coeff_b -= v.mu_val as i64;
+                                    prev_pos = Some(pos);
+                                } else if xpm == low {
+                                    d_local -= v.mu_val as i64 * phi_b;
+                                    *coeff_b -= v.mu_val as i64;
+                                }
                             }
                         }
                     }
                 }
 
                 phi[b] += sieve.count_total();
-                cross_off_sieve(&mut sieve, prime as usize, low, high, wheel_seg_bits);
+                cross_off_sieve(&mut sieve, prime_usize, low, high, wheel_seg_bits);
                 b += 1;
             }
 
             // Type 2: π(√z) < b ≤ π(x*), prime pair leaves
             while b <= cur_max_b && b < nprimes {
                 let prime = primes[b] as u64;
+                let prime_usize = prime as usize;
                 let x_div_prime = x / prime;
                 let xp_low = std::cmp::min((x_div_prime / low1 as u64) as usize, y);
                 let xp_high = std::cmp::min((x_div_prime / high as u64) as usize, y);
-                let min_m = std::cmp::max(xp_high, prime as usize);
+                let min_m = std::cmp::max(xp_high, prime_usize);
                 let max_m = std::cmp::min((x_div_prime / (prime * prime)) as usize, xp_low);
                 let mut l = pi.get(std::cmp::min(max_m, pi_limit)) as usize;
 
-                if l < nprimes && prime as usize >= primes[l] as usize { break; }
+                if l < nprimes && prime_usize >= primes[l] as usize { break; }
 
-                let mut prev_pos: Option<usize> = None;
-                let mut running_count: i64 = 0;
-                while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
-                    let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
-                    if xpq > low && xpq < high {
-                        let pos = num_to_wheel_pos(xpq, low);
-                        let count = match prev_pos {
-                            Some(pp) if pos == pp => running_count,
-                            Some(pp) if pos > pp => {
-                                running_count += sieve.count_delta(pp, pos);
-                                running_count
-                            }
-                            _ => { running_count = sieve.count(pos); running_count }
-                        };
-                        d_local += phi[b] + count;
-                        coeff[b] += 1;
-                        prev_pos = Some(pos);
-                    } else if xpq == low {
-                        d_local += phi[b];
-                        coeff[b] += 1;
-                    } else if xpq >= high {
-                        break; // xpq only increases as l decreases
+                let phi_b = phi[b];
+                {
+                    let coeff_b = &mut coeff[b];
+                    let mut prev_pos: Option<usize> = None;
+                    let mut running_count: i64 = 0;
+                    while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
+                        let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
+                        if xpq > low && xpq < high {
+                            let pos = num_to_wheel_pos(xpq, low);
+                            let count = match prev_pos {
+                                Some(pp) if pos == pp => running_count,
+                                Some(pp) if pos > pp => {
+                                    running_count += sieve.count_delta(pp, pos);
+                                    running_count
+                                }
+                                _ => { running_count = sieve.count(pos); running_count }
+                            };
+                            d_local += phi_b + count;
+                            *coeff_b += 1;
+                            prev_pos = Some(pos);
+                        } else if xpq == low {
+                            d_local += phi_b;
+                            *coeff_b += 1;
+                        } else if xpq >= high {
+                            break; // xpq only increases as l decreases
+                        }
+                        l -= 1;
                     }
-                    l -= 1;
                 }
 
                 phi[b] += sieve.count_total();
-                cross_off_sieve(&mut sieve, prime as usize, low, high, wheel_seg_bits);
+                cross_off_sieve(&mut sieve, prime_usize, low, high, wheel_seg_bits);
                 b += 1;
             }
         }
 
-        (d_local, phi, coeff, max_b_seen)
+        (d_local, phi, coeff, max_b_seen, vm_stats.unwrap_or_default())
     }).collect();
 
     // Correction pass for phi offsets across chunk boundaries
@@ -1977,7 +2175,7 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
     let mut prefix_phi = results[0].1.clone();
 
     for kk in 1..results.len() {
-        let (d_local, ref phi_total, ref coeff, max_b_seen) = results[kk];
+        let (d_local, ref phi_total, ref coeff, max_b_seen, _) = results[kk];
         let limit = std::cmp::min(max_b_seen + 1, nprimes);
         let mut correction = 0i64;
         for bb in 0..limit {
@@ -1985,6 +2183,14 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
             prefix_phi[bb] += phi_total[bb];
         }
         d += d_local + correction;
+    }
+
+    if collect_vm_stats {
+        let mut total_vm_stats = DVmStats::default();
+        for (_, _, _, _, stats) in &results {
+            total_vm_stats.merge(stats);
+        }
+        total_vm_stats.print(num_segments);
     }
 
     d
