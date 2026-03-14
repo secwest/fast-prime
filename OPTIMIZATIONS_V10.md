@@ -2859,3 +2859,168 @@ Decision:
   - `x >= 1e15`: `AC_SEG=200000`, `AC_PAR_MIN=32`, `B_CHUNKS=4`, `D_CHUNKS=20`
   - `x >= 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=4`, `D_CHUNKS=12`
   - `x < 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=2`  (updated), `D_CHUNKS=24`
+
+## Continuation Pass: `1e12..1e13` B Recheck After Low-End Split
+
+- Continued from the newly retained `x < 1e12 B_CHUNKS=2` row.
+- Goal: check whether the neighboring `x >= 1e12` row had shifted now that the
+  lower decade was no longer sharing the same B-side default.
+
+### Exploratory sweeps on the current `x >= 1e12` row
+
+Current row before this pass:
+- `AC_SEG=200000`
+- `AC_PAR_MIN=64`
+- `B_CHUNKS=4`
+- `D_CHUNKS=12`
+
+At `1e13` (`10 Trillion`):
+
+`AC_SEG`:
+- `120000`: `0.00960s`
+- `160000`: `0.00958s`
+- `200000`: `0.01028s`
+- `240000`: `0.00960s`
+- `280000`: `0.00920s`
+- `320000`: `0.00917s`
+
+`AC_PAR_MIN`:
+- `0`: `0.00984s`
+- `16`: `0.00904s`
+- `32`: `0.00982s`
+- `48`: `0.00921s`
+- `64`: `0.00955s`
+- `96`: `0.00894s`
+- `128`: `0.00977s`
+
+`B_CHUNKS`:
+- `2`: `0.00929s`
+- `4`: `0.00953s`
+- `6`: `0.00974s`
+- `8`: `0.01119s`
+
+`D_CHUNKS`:
+- `8`: `0.00947s`
+- `12`: `0.00952s`
+- `16`: `0.01026s`
+- `20`: `0.00959s`
+- `24`: `0.01012s`
+
+At `1e12` (`1 Trillion`):
+
+`AC_SEG`:
+- `120000`: `0.00686s`
+- `160000`: `0.00645s`
+- `200000`: `0.00640s`
+- `240000`: `0.00595s`
+- `280000`: `0.00621s`
+- `320000`: `0.00642s`
+
+`AC_PAR_MIN`:
+- `0`: `0.00618s`
+- `16`: `0.00601s`
+- `32`: `0.00655s`
+- `48`: `0.00629s`
+- `64`: `0.00708s`
+- `96`: `0.00686s`
+- `128`: `0.00632s`
+
+`B_CHUNKS`:
+- `2`: `0.00622s`
+- `4`: `0.00635s`
+- `6`: `0.00613s`
+- `8`: `0.00604s`
+
+`D_CHUNKS`:
+- `8`: `0.00618s`
+- `12`: `0.00648s`
+- `16`: `0.00642s`
+- `20`: `0.00619s`
+- `24`: `0.00675s`
+
+### Bidirectional validation
+
+60 runs per side total (30 candidate-first + 30 baseline-first):
+
+At `1e13`:
+- `B_CHUNKS=2` vs current `4`:
+  - candidate median `0.00932s`, mean `0.00936s`
+  - baseline median `0.00968s`, mean `0.00972s`
+  - clear keep signal
+- `AC_SEG=280000` vs current `200000`:
+  - candidate median `0.00959s`, mean `0.00961s`
+  - baseline median `0.00959s`, mean `0.00961s`
+  - no move
+- `AC_SEG=320000` vs current `200000`:
+  - candidate median `0.00971s`, mean `0.00976s`
+  - baseline median `0.00960s`, mean `0.00964s`
+  - rejected
+- `AC_PAR_MIN=96` vs current `64`:
+  - candidate median `0.00972s`, mean `0.00971s`
+  - baseline median `0.00953s`, mean `0.00958s`
+  - rejected
+- `AC_PAR_MIN=16` vs current `64`:
+  - candidate median `0.00965s`, mean `0.00969s`
+  - baseline median `0.00961s`, mean `0.00965s`
+  - rejected
+
+At `1e12`:
+- `B_CHUNKS=8` vs current `4`:
+  - candidate median `0.00643s`, mean `0.00644s`
+  - baseline median `0.00625s`, mean `0.00631s`
+  - rejected despite strong single-run bait
+- `B_CHUNKS=6` vs current `4`:
+  - candidate median `0.00632s`, mean `0.00639s`
+  - baseline median `0.00630s`, mean `0.00635s`
+  - no move
+- `AC_SEG=240000` vs current `200000`:
+  - candidate median `0.00633s`, mean `0.00635s`
+  - baseline median `0.00636s`, mean `0.00636s`
+  - too small to keep
+- `AC_PAR_MIN=16` vs current `64`:
+  - candidate median `0.00631s`, mean `0.00636s`
+  - baseline median `0.00631s`, mean `0.00638s`
+  - effectively flat
+- `D_CHUNKS=8` vs current `12`:
+  - candidate median `0.00628s`, mean `0.00631s`
+  - baseline median `0.00626s`, mean `0.00632s`
+  - split/noisy, not enough to keep
+
+### Final B cross-check for the row
+
+100 runs per side total (50 candidate-first + 50 baseline-first):
+
+- `1e13`, `B_CHUNKS=2` vs current `4`:
+  - candidate median `0.00929s`, mean `0.00934s`
+  - baseline median `0.00972s`, mean `0.00975s`
+- `1e12`, `B_CHUNKS=2` vs current `4`:
+  - candidate median `0.00628s`, mean `0.00630s`
+  - baseline median `0.00634s`, mean `0.00638s`
+- `1e12`, `B_CHUNKS=2` vs `6`:
+  - candidate median `0.00636s`, mean `0.00640s`
+  - baseline median `0.00637s`, mean `0.00642s`
+
+### Retained row retune: `x >= 1e12` `B_CHUNKS` 4 -> 2
+
+Decision:
+- Update the `x >= 1e12` row from:
+  - `B_CHUNKS=4`
+  to:
+  - `B_CHUNKS=2`
+
+Rationale:
+- The B-side win at `1e13` is large and stable.
+- The same direction also holds at `1e12`.
+- None of the accompanying AC or D candidates showed a robust enough gain to
+  justify a broader row rewrite.
+
+### Net
+
+- Retained one new runtime-table change from this continuation:
+  - `x >= 1e12 B_CHUNKS: 4 -> 2`
+- Current retained runtime tiers are now:
+  - `x >= 1e18`: `AC_SEG=170000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e17`: `AC_SEG=180000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e15`: `AC_SEG=200000`, `AC_PAR_MIN=32`, `B_CHUNKS=4`, `D_CHUNKS=20`
+  - `x >= 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=2`  (updated), `D_CHUNKS=12`
+  - `x < 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=2`, `D_CHUNKS=24`

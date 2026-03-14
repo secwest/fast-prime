@@ -1066,3 +1066,36 @@ This check-in closes a coherent D-focused optimization wave. The important story
 - The low end now resolves as:
   - `1e12..1e13`: `B_CHUNKS=4`, `D_CHUNKS=12`
   - `1e11` and below: `B_CHUNKS=2`, `D_CHUNKS=24`
+
+## 2026-03-14 (`1e12..1e13` B continuation)
+
+- After splitting off the bottom row, the next obvious question was whether the
+  neighboring `1e12..1e13` row still wanted `B_CHUNKS=4`.
+- Short sweeps reopened several knobs at once:
+  - `1e13` again pointed hard toward `B_CHUNKS=2`
+  - `1e12` threw off several tempting single-run false positives (`B=8`,
+    `AC_SEG=240000`, `AC_PAR_MIN=16`)
+
+### What held up
+
+- Long bidirectional A/B removed almost all of the extra noise:
+  - the AC segment candidates collapsed back to flat or worse
+  - the AC threshold candidates also collapsed
+  - the D-side nudge (`8` vs `12`) stayed too small and split to keep
+- The only robust move left was the B-side one.
+
+### Why it was kept for the whole row
+
+- `1e13` kept a large, clean win for `B_CHUNKS=2`.
+- A longer `1e12` validation showed the same direction, just smaller.
+- That was enough to move the whole `1e12..1e13` row instead of introducing yet
+  another narrower split.
+
+### Current state
+
+- Retained one more runtime-table change from this continuation:
+  - `x >= 1e12 B_CHUNKS: 4 -> 2`
+- The low/mid-low B story is now:
+  - `1e14`: still on `4`
+  - `1e12..1e13`: now on `2`
+  - `1e11` and below: already on `2`
