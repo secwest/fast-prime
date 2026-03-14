@@ -3024,3 +3024,122 @@ Rationale:
   - `x >= 1e15`: `AC_SEG=200000`, `AC_PAR_MIN=32`, `B_CHUNKS=4`, `D_CHUNKS=20`
   - `x >= 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=2`  (updated), `D_CHUNKS=12`
   - `x < 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=2`, `D_CHUNKS=24`
+
+## Continuation Pass: `1e14` Coverage Audit on the New `x >= 1e12` Row
+
+- After landing `x >= 1e12 B_CHUNKS=2`, I rechecked the actual row coverage and
+  confirmed that it also affects `1e14`, not just `1e12..1e13`.
+- That made an immediate `1e14` audit mandatory before treating the new row as
+  settled.
+
+### First safety check: does the new row regress `1e14`?
+
+Current row under audit:
+- `AC_SEG=200000`
+- `AC_PAR_MIN=64`
+- `B_CHUNKS=2`
+- `D_CHUNKS=12`
+
+80 runs per side total (40 candidate-first + 40 baseline-first):
+
+- current row vs `B_CHUNKS=4`, `D_CHUNKS=12`:
+  - candidate median `0.01686s`, mean `0.01697s`
+  - baseline median `0.01711s`, mean `0.01716s`
+- current row vs `B_CHUNKS=2`, `D_CHUNKS=24`:
+  - candidate median `0.01680s`, mean `0.01700s`
+  - baseline median `0.01707s`, mean `0.01722s`
+- current row vs `B_CHUNKS=4`, `D_CHUNKS=24`:
+  - candidate median `0.01707s`, mean `0.01716s`
+  - baseline median `0.01720s`, mean `0.01734s`
+
+Read:
+- The new row did not regress `1e14`; it actually held up against all three
+  nearby older combinations.
+
+### Re-opened `1e14` search on the new row (no retained change)
+
+Single-run sweeps on the new `1e14` baseline:
+
+`AC_SEG`:
+- `120000`: `0.01766s`
+- `160000`: `0.01746s`
+- `200000`: `0.01700s`
+- `240000`: `0.01651s`
+- `280000`: `0.01636s`
+- `320000`: `0.01697s`
+
+`AC_PAR_MIN`:
+- `0`: `0.01647s`
+- `16`: `0.01735s`
+- `32`: `0.01635s`
+- `48`: `0.01651s`
+- `64`: `0.01709s`
+- `96`: `0.01603s`
+- `128`: `0.01767s`
+
+`B_CHUNKS`:
+- `2`: `0.01808s`
+- `4`: `0.01734s`
+- `6`: `0.01753s`
+- `8`: `0.01999s`
+
+`D_CHUNKS`:
+- `8`: `0.01788s`
+- `12`: `0.01840s`
+- `16`: `0.01725s`
+- `20`: `0.01819s`
+- `24`: `0.01743s`
+
+80 runs per side total (40 candidate-first + 40 baseline-first):
+
+- `AC_SEG=280000` vs current `200000`:
+  - candidate median `0.01698s`, mean `0.01713s`
+  - baseline median `0.01691s`, mean `0.01705s`
+  - rejected
+- `AC_PAR_MIN=96` vs current `64`:
+  - candidate median `0.01685s`, mean `0.01701s`
+  - baseline median `0.01699s`, mean `0.01710s`
+  - plausible but not strong enough yet
+- `AC_PAR_MIN=32` vs current `64`:
+  - candidate median `0.01691s`, mean `0.01703s`
+  - baseline median `0.01695s`, mean `0.01705s`
+  - too small to keep
+- `D_CHUNKS=16` vs current `12`:
+  - candidate median `0.01726s`, mean `0.01731s`
+  - baseline median `0.01679s`, mean `0.01697s`
+  - rejected clearly
+
+Focused `AC_PAR_MIN` retest at `1e14`:
+
+Single-run sweep:
+- `32`: `0.01632s`
+- `48`: `0.01777s`
+- `64`: `0.01652s`
+- `80`: `0.01762s`
+- `96`: `0.01654s`
+- `112`: `0.01632s`
+- `128`: `0.01683s`
+
+100 runs per side total (50 candidate-first + 50 baseline-first):
+
+- `80` vs current `64`:
+  - candidate median `0.01688s`, mean `0.01704s`
+  - baseline median `0.01691s`, mean `0.01711s`
+- `96` vs current `64`:
+  - candidate median `0.01684s`, mean `0.01707s`
+  - baseline median `0.01686s`, mean `0.01697s`
+- `112` vs current `64`:
+  - candidate median `0.01686s`, mean `0.01700s`
+  - baseline median `0.01696s`, mean `0.01703s`
+- `96` vs `80`:
+  - candidate median `0.01706s`, mean `0.01709s`
+  - baseline median `0.01672s`, mean `0.01697s`
+- `96` vs `32`:
+  - candidate median `0.01698s`, mean `0.01718s`
+  - baseline median `0.01690s`, mean `0.01703s`
+
+Decision:
+- No retained `1e14` follow-up move from this continuation.
+- The important outcome was the coverage audit itself:
+  - the new `x >= 1e12` row is safe at `1e14`
+  - none of the tempting singles justified another split yet

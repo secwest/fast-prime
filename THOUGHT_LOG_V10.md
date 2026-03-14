@@ -1096,6 +1096,40 @@ This check-in closes a coherent D-focused optimization wave. The important story
 - Retained one more runtime-table change from this continuation:
   - `x >= 1e12 B_CHUNKS: 4 -> 2`
 - The low/mid-low B story is now:
-  - `1e14`: still on `4`
-  - `1e12..1e13`: now on `2`
+  - `1e12..1e14`: now on `2`
   - `1e11` and below: already on `2`
+
+## 2026-03-14 (`1e14` row-coverage audit)
+
+- After pushing the `x >= 1e12 B_CHUNKS=2` row, I re-read the table and caught a
+  scope issue in the mental model:
+  - that row also covers `1e14`
+  - not just `1e12..1e13`
+- That turned the next pass into a verification pass first, optimization pass
+  second.
+
+### What the audit showed
+
+- The new row held up at `1e14` against all of the nearby older combinations:
+  - `B4/D12`
+  - `B2/D24`
+  - `B4/D24`
+- So the pushed change did not need to be rolled back.
+
+### What was explored next
+
+- On the new `1e14` baseline, several fresh singles appeared:
+  - `AC_SEG=280000`
+  - `AC_PAR_MIN` in the `32..112` range
+  - `D_CHUNKS=16`
+- Long bidirectional checks killed most of them quickly.
+- `AC_PAR_MIN` stayed the only mildly interesting surface, but it never produced
+  a clean enough head-to-head to justify another row split.
+
+### Current state
+
+- No retained follow-up change from this continuation.
+- The useful outcome was certainty:
+  - the new `x >= 1e12` row is safe at `1e14`
+  - the next retained move, if any, will need stronger evidence than the noisy
+    `1e14` threshold surface produced here
