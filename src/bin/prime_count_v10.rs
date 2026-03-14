@@ -14,6 +14,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 #[derive(Copy, Clone)]
 struct RuntimeTuning {
     ac_seg: usize,
+    ac_par_min: usize,
     b_chunks: usize,
     d_chunks: usize,
     d_adapt_chunks: bool,
@@ -42,7 +43,7 @@ fn get_vm_stride() -> usize {
         std::env::var("VM_STRIDE").ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&v| v > 0)
-            .unwrap_or(24)
+            .unwrap_or(16)
     })
 }
 
@@ -91,13 +92,15 @@ fn estimate_chunk_objective(work_per_seg: &[usize], nthreads: usize, chunk_mult:
 fn choose_runtime_tuning(x: u64) -> RuntimeTuning {
     // Heuristic runtime controller for V10. Environment overrides still take priority.
     if x >= 1_000_000_000_000_000_000 {
-        RuntimeTuning { ac_seg: 170_000, b_chunks: 4, d_chunks: 24, d_adapt_chunks: false }
+        RuntimeTuning { ac_seg: 170_000, ac_par_min: 32, b_chunks: 6, d_chunks: 24, d_adapt_chunks: false }
     } else if x >= 100_000_000_000_000_000 {
-        RuntimeTuning { ac_seg: 190_000, b_chunks: 4, d_chunks: 24, d_adapt_chunks: false }
+        RuntimeTuning { ac_seg: 180_000, ac_par_min: 32, b_chunks: 6, d_chunks: 24, d_adapt_chunks: false }
     } else if x >= 1_000_000_000_000_000 {
-        RuntimeTuning { ac_seg: 200_000, b_chunks: 6, d_chunks: 20, d_adapt_chunks: false }
+        RuntimeTuning { ac_seg: 200_000, ac_par_min: 32, b_chunks: 4, d_chunks: 20, d_adapt_chunks: false }
+    } else if x >= 1_000_000_000_000 {
+        RuntimeTuning { ac_seg: 200_000, ac_par_min: 64, b_chunks: 4, d_chunks: 12, d_adapt_chunks: false }
     } else {
-        RuntimeTuning { ac_seg: 200_000, b_chunks: 8, d_chunks: 24, d_adapt_chunks: false }
+        RuntimeTuning { ac_seg: 200_000, ac_par_min: 64, b_chunks: 2, d_chunks: 24, d_adapt_chunks: false }
     }
 }
 
@@ -1146,7 +1149,8 @@ fn compute_ac(x: u64, y: usize, z: usize, k: usize, x_star: usize,
         let t_ac_loops = std::time::Instant::now();
         let ac_par_min: usize = std::env::var("AC_PAR_MIN").ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+            .or_else(|| get_runtime_tuning().map(|t| t.ac_par_min))
+            .unwrap_or(32);
 
         let mut combined_sum: i64 = 0;
         for seg in (0..num_segs).rev() {
@@ -2093,7 +2097,8 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                             if prime_u16 < v.lpf {
                                 let xpm = fast_div(x_div_prime, v.m as u64,
                                     v.recip_m) as usize;
-                                if xpm > low && xpm < high {
+                                // The vm window guarantees low <= xpm < high here.
+                                if xpm != low {
                                     let pos = num_to_wheel_pos(xpm, low);
                                     let count = match prev_pos {
                                         None => { running_count = sieve.count(pos); running_count }
@@ -2137,24 +2142,23 @@ fn compute_d(x: u64, y: usize, z: usize, k: usize, x_star: usize,
                     let mut running_count: i64 = 0;
                     while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
                         let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
-                        if xpq > low && xpq < high {
+                        // The l-window guarantees low <= xpq < high here.
+                        if xpq != low {
                             let pos = num_to_wheel_pos(xpq, low);
                             let count = match prev_pos {
+                                None => { running_count = sieve.count(pos); running_count }
                                 Some(pp) if pos == pp => running_count,
-                                Some(pp) if pos > pp => {
+                                Some(pp) => {
                                     running_count += sieve.count_delta(pp, pos);
                                     running_count
                                 }
-                                _ => { running_count = sieve.count(pos); running_count }
                             };
                             d_local += phi_b + count;
                             *coeff_b += 1;
                             prev_pos = Some(pos);
-                        } else if xpq == low {
+                        } else {
                             d_local += phi_b;
                             *coeff_b += 1;
-                        } else if xpq >= high {
-                            break; // xpq only increases as l decreases
                         }
                         l -= 1;
                     }
@@ -2245,7 +2249,7 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
                     if prime < v.lpf as u64 {
                         let xpm = fast_div(x_div_prime, v.m as u64,
                             v.recip_m) as usize;
-                        if xpm > low && xpm < high {
+                        if xpm != low {
                             let pos = num_to_wheel_pos(xpm, low);
                             let count = match prev_pos {
                                 None => { running_count = sieve.count(pos); running_count }
@@ -2283,22 +2287,20 @@ fn compute_d_serial(x: u64, y: usize, z: usize, k: usize, _x_star: usize, xz: us
             let mut running_count: i64 = 0;
             while l > 0 && l < nprimes && (primes[l] as usize) > min_m {
                 let xpq = fast_div(x_div_prime, primes[l] as u64, prime_recip[l]) as usize;
-                if xpq > low && xpq < high {
+                if xpq != low {
                     let pos = num_to_wheel_pos(xpq, low);
                     let count = match prev_pos {
+                        None => { running_count = sieve.count(pos); running_count }
                         Some(pp) if pos == pp => running_count,
-                        Some(pp) if pos > pp => {
+                        Some(pp) => {
                             running_count += sieve.count_delta(pp, pos);
                             running_count
                         }
-                        _ => { running_count = sieve.count(pos); running_count }
                     };
                     d += phi[b] + count;
                     prev_pos = Some(pos);
-                } else if xpq == low {
+                } else {
                     d += phi[b];
-                } else if xpq >= high {
-                    break; // xpq only increases as l decreases
                 }
                 l -= 1;
             }

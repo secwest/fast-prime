@@ -1902,3 +1902,960 @@ Decision:
   - `D_ADAPT_CHUNKS=0`
   - `D_AUTO_CHUNK_SELECT=0`
   - `POOL_MULT=3`
+
+## 2026-03-13 - D leaf interval-check pruning
+
+Hypothesis:
+- The D Type 1 and Type 2 leaf windows already guarantee `low <= x/p/m < high`
+  and monotonic nondecreasing wheel positions, so the hot loops were still paying
+  for interval/order branches that never carried real work.
+
+Change:
+- In both parallel and serial D paths:
+  - replaced `xpm > low && xpm < high` / `xpq > low && xpq < high` with the
+    cheaper `!= low` split
+  - removed the impossible `xpq >= high` break arm
+  - simplified Type 2 running-count dispatch to `None / same-pos / delta`
+
+Validation:
+- Rebuilt `prime_count_v10` with nightly + `-Zbuild-std=std,panic_abort`.
+- Full built-in correctness sweep still passed through `Max i64`.
+- Instrumented single-run check:
+  - baseline `D: 5.95s`
+  - candidate `D: 5.91s`
+
+12-run alternating A/B (`Max i64`, both orders, 6 candidate + 6 baseline):
+- candidate median `8.34409s`, mean `8.34551s`
+- baseline median `8.36555s`, mean `8.36550s`
+- delta `-0.257%` median, `-0.239%` mean
+
+Decision:
+- Retained.
+
+### Net
+
+- Retained one new code win from this continuation:
+  - prune redundant D leaf interval/order checks
+- Current retained defaults are unchanged:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=4`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=24`
+  - `VM_LOOKAHEAD=1`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
+
+## 2026-03-13 - post-pruning retune and helper recheck
+
+Starting point:
+- Continued from the retained D branch-pruning baseline.
+- Goal: verify whether the new baseline had shifted any local optima before
+  opening another larger D rewrite.
+
+### Rejected code experiment: unrolled `BitSieve` popcount helper
+
+Hypothesis:
+- Share a 4-way unrolled `popcnt_range()` helper between `count()` and
+  `count_delta()` to reduce word-scan loop overhead in the D leaf path.
+
+Result:
+- First full validation sweep regressed badly:
+  - `Max i64`: `9.22871s`
+
+Decision:
+- Reverted immediately.
+
+### Knob rechecks on the branch-pruned baseline
+
+#### `D_CHUNKS`
+
+Single-run sweep:
+- `24`: `8.33213s`
+- `20`: `8.37925s`
+- `28`: `8.34727s`
+- `16`: `8.37477s`
+- `32`: `8.39976s`
+- `12`: `8.44201s`
+
+Decision:
+- Keep `D_CHUNKS=24`.
+
+#### `B_CHUNKS`
+
+Single-run sweep:
+- `4`: `8.29420s`
+- `3`: `8.38515s`
+- `5`: `8.41830s`
+- `2`: `8.29829s`
+- `6`: `8.34366s`
+- `1`: `8.37014s`
+
+Decision:
+- Keep `B_CHUNKS=4`.
+
+#### `AC_SEG`
+
+Single-run sweep:
+- `170000`: `8.41417s`
+- `160000`: `8.37445s`
+- `180000`: `8.34739s`
+- `150000`: `8.25136s`
+- `190000`: `8.30056s`
+
+12 alternating (`150000` vs default `170000`), both orders:
+- candidate median `8.33961s`, mean `8.36056s`
+- baseline median `8.31212s`, mean `8.31991s`
+- delta `+0.331%` median, `+0.489%` mean
+
+Decision:
+- Keep `AC_SEG=170000`.
+
+#### `VM_LOOKAHEAD`
+
+Single-run sweep:
+- `1`: `8.35458s`
+- `2`: `8.34327s`
+- `3`: `8.33634s`
+- `4`: `8.36780s`
+- `6`: `8.42623s`
+- `8`: `8.46293s`
+
+12 alternating (`3` vs default `1`), both orders:
+- candidate median `8.33451s`, mean `8.34947s`
+- baseline median `8.31745s`, mean `8.32553s`
+- delta `+0.205%` median, `+0.288%` mean
+
+Decision:
+- Keep `VM_LOOKAHEAD=1`.
+
+### Retained default retune: `VM_STRIDE` 24 -> 16
+
+Single-run sweep:
+- `24`: `8.36238s`
+- `20`: `8.43590s`
+- `28`: `8.35071s`
+- `32`: `8.31691s`
+- `16`: `8.30277s`
+- `40`: `8.33418s`
+
+12 alternating (`16` vs default `24`), both orders:
+- candidate median `8.35757s`, mean `8.37164s`
+- baseline median `8.41135s`, mean `8.40801s`
+- delta `-0.639%` median, `-0.433%` mean
+
+12 alternating (`16` vs `32`), both orders:
+- `16` median `8.34854s`, mean `8.34400s`
+- `32` median `8.36618s`, mean `8.37300s`
+- delta `-0.211%` median, `-0.346%` mean in favor of `16`
+
+Decision:
+- Update V10 default `VM_STRIDE` fallback from `24` to `16`.
+
+### Net
+
+- Retained one new default change from this continuation:
+  - `VM_STRIDE: 24 -> 16`
+- Current retained defaults are now:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=0`
+  - `B_CHUNKS=4`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=16`  (updated)
+  - `VM_LOOKAHEAD=1`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
+
+## 2026-03-13 - post-`VM_STRIDE` follow-up and AC threshold retune
+
+Starting point:
+- Continued from the retained `VM_STRIDE=16` baseline.
+- First goal was to see whether the stride change had also shifted the nearby
+  sparse-index tuning surface before touching another code path.
+
+### Sparse-index recheck (no retained change)
+
+`(VM_STRIDE, VM_LOOKAHEAD)` single-run matrix:
+- `(12,1)`: `8.25396s`
+- `(12,2)`: `8.34972s`
+- `(12,3)`: `8.62926s`
+- `(16,1)`: `8.36784s`
+- `(16,2)`: `8.37094s`
+- `(16,3)`: `8.40311s`
+- `(20,1)`: `8.37476s`
+- `(20,2)`: `8.40959s`
+- `(20,3)`: `8.39010s`
+- `(24,1)`: `8.33794s`
+- `(24,2)`: `8.35674s`
+- `(24,3)`: `8.36953s`
+- `(32,1)`: `8.31759s`
+- `(32,2)`: `8.41087s`
+- `(32,3)`: `8.35218s`
+
+Read:
+- The first matrix made `(12,1)` look unusually strong, but the follow-up
+  singles around `10/12/14/16` were noisy enough that another direct default
+  move was not justified yet.
+
+Round-robin at `VM_LOOKAHEAD=1` (`10/12/14/16`, mixed order, 4 runs each):
+- `10`: median `8.34921s`, mean `8.35482s`
+- `12`: median `8.34999s`, mean `8.35183s`
+- `14`: median `8.34133s`, mean `8.35084s`
+- `16`: median `8.34481s`, mean `8.34261s`
+
+Decision:
+- Keep `VM_STRIDE=16`, `VM_LOOKAHEAD=1`.
+
+### Retained default retune: `AC_PAR_MIN` 0 -> 32
+
+Why reopen it:
+- AC remained the longest phase in `SHOW_TIMING`, even after the recent D-side
+  wins.
+- `AC_PAR_MIN` is a local runtime threshold, so it is cheaper and safer to
+  retune than another AC structural rewrite.
+
+Initial recheck:
+- `0`: `8.31446s`
+- `64`: `8.28690s`
+- `128`: `8.34878s`
+- `256`: `8.34247s`
+- `512`: `8.39430s`
+
+Balanced 12 alternating (`64` vs default `0`):
+- candidate median `8.35089s`, mean `8.35881s`
+- baseline median `8.36044s`, mean `8.36578s`
+- small but real edge for `64`
+
+Nearby recheck:
+- `0`: `8.31514s`
+- `32`: `8.29343s`
+- `48`: `8.35175s`
+- `64`: `8.43150s`
+- `96`: `8.30300s`
+- `128`: `8.33690s`
+
+Balanced 12 alternating (`32` vs default `0`):
+- candidate median `8.32017s`, mean `8.31956s`
+- baseline median `8.34767s`, mean `8.35889s`
+- delta `-0.329%` median, `-0.470%` mean
+
+Head-to-head (`32` vs `64`):
+- First 12 alternating:
+  - `32` median `8.33372s`, mean `8.35545s`
+  - `64` median `8.35318s`, mean `8.34542s`
+- Extra 8 alternating:
+  - `32` median `8.33790s`, mean `8.35099s`
+  - `64` median `8.35612s`, mean `8.35930s`
+
+Decision:
+- Update V10 default `AC_PAR_MIN` fallback from `0` to `32`.
+- Rationale:
+  - `32` showed the stronger direct win against the actual retained default `0`
+  - `32` kept the cleaner median story in the head-to-head with `64`
+  - `64` remained plausible, but not strong enough to displace `32`
+
+### Net
+
+- Retained one new default change from this continuation:
+  - `AC_PAR_MIN: 0 -> 32`
+- Current retained defaults are now:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=32`  (updated)
+  - `B_CHUNKS=4`
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=16`
+  - `VM_LOOKAHEAD=1`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
+
+## 2026-03-13 - post-`AC_PAR_MIN` retune continuation
+
+Starting point:
+- Continued from the retained `AC_PAR_MIN=32` baseline.
+- AC was still the longest phase in timing, but the first recheck was `AC_SEG`
+  because the AC threshold change could have shifted its old optimum.
+
+### `AC_SEG` recheck (no retained change)
+
+Single-run sweep on the `AC_PAR_MIN=32` baseline:
+- `170000`: `8.27986s`
+- `160000`: `8.35089s`
+- `180000`: `8.36476s`
+- `150000`: `8.37660s`
+- `190000`: `8.37423s`
+- `200000`: `8.42730s`
+
+Decision:
+- Keep `AC_SEG=170000`.
+
+### Retained high-end retune: `B_CHUNKS` 4 -> 6
+
+Why reopen it:
+- The AC threshold retune changes the AC/B contention balance.
+- That made the high-end `B_CHUNKS` setting worth rechecking before touching any
+  new source path.
+
+Single-run sweep on the `AC_PAR_MIN=32` baseline:
+- `4`: `8.35611s`
+- `2`: `8.40007s`
+- `6`: `8.31756s`
+- `8`: `8.34181s`
+- `1`: `8.35109s`
+- `3`: `8.42139s`
+- `5`: `8.37249s`
+
+12 alternating (`6` vs default `4`), both orders:
+- candidate median `8.34913s`, mean `8.36963s`
+- baseline median `8.36519s`, mean `8.37505s`
+- delta `-0.192%` median, `-0.065%` mean
+
+Cross-scale spot checks:
+- `1e18`:
+  - `4`: `2.21913s`
+  - `6`: `2.21923s`
+  - effectively neutral
+- `1e17`:
+  - `4`: `0.59136s`
+  - `6`: `0.58953s`
+  - slight edge for `6`
+
+Decision:
+- Update the top two runtime tiers to `b_chunks=6`:
+  - `x >= 1e18`
+  - `x >= 1e17`
+
+### Net
+
+- Retained one new runtime-tuning change from this continuation:
+  - `B_CHUNKS: 4 -> 6` for the top two scale tiers
+- Current retained high-end defaults are now:
+  - `AC_SEG=170000`
+  - `AC_PAR_MIN=32`
+  - `B_CHUNKS=6`  (updated for `x >= 1e17`)
+  - `D_SEG_CAP=20`
+  - `D_SEG_MIN_CAP=14`
+  - `D_CHUNKS=24`
+  - `VM_STRIDE=16`
+  - `VM_LOOKAHEAD=1`
+  - `D_ADAPT_CHUNKS=0`
+  - `D_AUTO_CHUNK_SELECT=0`
+  - `POOL_MULT=3`
+
+## 2026-03-13 - high-end tier retune follow-up
+
+Starting point:
+- Continued from the high-end baseline with:
+  - `AC_PAR_MIN=32`
+  - top-end `B_CHUNKS=6`
+- This pass focused on the explicit runtime table entries for `1e17` and `1e18`
+  rather than global defaults.
+
+### Retained `1e17` retune: `AC_SEG` 190000 -> 180000
+
+Single-run sweep at `1e17` (`AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`):
+- `170000`: `0.59956s`
+- `180000`: `0.58226s`
+- `190000`: `0.58887s`
+- `200000`: `0.58537s`
+- `210000`: `0.58693s`
+- `220000`: `0.59182s`
+
+20 alternating at `1e17` (`180000` vs current `190000`), both orders:
+- candidate median `0.59028s`, mean `0.59307s`
+- baseline median `0.59196s`, mean `0.59418s`
+- delta `-0.284%` median, `-0.187%` mean
+
+Decision:
+- Update the `1e17` runtime tier from `ac_seg=190000` to `ac_seg=180000`.
+
+### `1e18` `AC_SEG` recheck (no retained change)
+
+Single-run sweep at `1e18` (`AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`):
+- `150000`: `2.21505s`
+- `160000`: `2.24179s`
+- `170000`: `2.25706s`
+- `180000`: `2.22683s`
+- `190000`: `2.22640s`
+
+20 alternating at `1e18` (`150000` vs current `170000`), both orders:
+- candidate median `2.23245s`, mean `2.23144s`
+- baseline median `2.22201s`, mean `2.22482s`
+- delta `+0.470%` median, `+0.298%` mean
+
+Decision:
+- Keep the `1e18` runtime tier at `ac_seg=170000`.
+
+### `1e17` `D_CHUNKS` recheck on the new `AC_SEG=180000` candidate (no retained change)
+
+Single-run sweep at `1e17`:
+- `16`: `0.58306s`
+- `20`: `0.58909s`
+- `24`: `0.58895s`
+- `28`: `0.62053s`
+- `32`: `0.58789s`
+
+20 alternating at `1e17` (`16` vs current `24`), both orders:
+- candidate median `0.59134s`, mean `0.59560s`
+- baseline median `0.59057s`, mean `0.59096s`
+- delta `+0.130%` median, `+0.785%` mean
+
+Decision:
+- Keep `d_chunks=24` for the `1e17` tier.
+
+### Net
+
+- Retained one new runtime-table change from this continuation:
+  - `1e17 AC_SEG: 190000 -> 180000`
+- Current retained high-end runtime tiers are now:
+  - `x >= 1e18`: `AC_SEG=170000`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e17`: `AC_SEG=180000`  (updated), `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e15`: `AC_SEG=200000`, `B_CHUNKS=6`, `D_CHUNKS=20`
+
+## 2026-03-14 - tier split follow-up
+
+Starting point:
+- Continued from the runtime table after the `1e17 AC_SEG` retune.
+- This pass checked two ideas:
+  1. whether `AC_PAR_MIN` should become scale-aware
+  2. whether the `1e15..1e16` row wanted a different `B_CHUNKS` value than the
+     higher-end tiers
+
+### Scale-aware `AC_PAR_MIN` recheck (no retained change)
+
+Single-run sweep at `1e17` (`AC_SEG=180000`, `B_CHUNKS=6`, `D_CHUNKS=24`):
+- `0`: `0.58646s`
+- `16`: `0.59386s`
+- `32`: `0.59438s`
+- `48`: `0.58736s`
+- `64`: `0.58836s`
+- `96`: `0.58816s`
+
+Single-run sweep at `1e18` (`AC_SEG=170000`, `B_CHUNKS=6`, `D_CHUNKS=24`):
+- `0`: `2.25328s`
+- `16`: `2.20233s`
+- `32`: `2.20096s`
+- `48`: `2.23108s`
+- `64`: `2.22184s`
+- `96`: `2.22231s`
+
+20 alternating at `1e17` (`0` vs current `32`), both orders:
+- candidate median `0.59231s`, mean `0.59658s`
+- baseline median `0.59158s`, mean `0.59533s`
+- delta `+0.123%` median, `+0.210%` mean
+
+Decision:
+- Keep global `AC_PAR_MIN=32`.
+
+### `1e17` `B_CHUNKS` recheck on the new `AC_SEG=180000` tier (no retained change)
+
+Single-run sweep:
+- `4`: `0.58532s`
+- `6`: `0.58841s`
+- `8`: `0.60555s`
+- `10`: `0.58405s`
+- `12`: `0.58853s`
+
+20 alternating (`10` vs current `6`), both orders:
+- candidate median `0.58781s`, mean `0.59559s`
+- baseline median `0.58881s`, mean `0.58989s`
+- rejected due unstable long-tail regressions in the candidate mean
+
+20 alternating (`4` vs current `6`), both orders:
+- candidate median `0.59691s`, mean `0.60148s`
+- baseline median `0.59028s`, mean `0.59332s`
+
+Decision:
+- Keep `B_CHUNKS=6` for the `1e17` tier.
+
+### Retained `1e15..1e16` row retune: `B_CHUNKS` 6 -> 4
+
+Exploration at `1e16` (`AC_SEG=200000`, `AC_PAR_MIN=32`, current `D_CHUNKS=20`):
+
+`AC_SEG` single-run sweep:
+- `160000`: `0.16615s`
+- `180000`: `0.16443s`
+- `200000`: `0.16209s`
+- `220000`: `0.15912s`
+- `240000`: `0.16487s`
+
+`D_CHUNKS` recheck on the `AC_SEG=220000` candidate:
+- `12`: `0.15823s`
+- `16`: `0.16452s`
+- `20`: `0.16902s`
+- `24`: `0.16089s`
+- `28`: `0.18732s`
+
+`B_CHUNKS` recheck on the same aggressive candidate:
+- `4`: `0.15895s`
+- `6`: `0.16626s`
+- `8`: `0.16734s`
+- `10`: `0.16338s`
+- `12`: `0.15570s`
+
+20 alternating full-row package (`220000/12/12` vs current `200000/6/20`):
+- candidate median `0.16518s`, mean `0.16350s`
+- baseline median `0.16073s`, mean `0.16473s`
+- rejected on median
+
+20 alternating `AC_SEG=220000` alone vs current `200000`:
+- candidate median `0.16242s`, mean `0.16225s`
+- baseline median `0.15814s`, mean `0.15888s`
+
+Read:
+- The row did not want a broad package move; the aggressive candidate only
+  looked good in singles.
+
+Current-row rechecks at `1e16` (`AC_SEG=200000`, `D_CHUNKS=20`):
+
+`D_CHUNKS` sweep:
+- `12`: `0.16667s`
+- `16`: `0.16307s`
+- `20`: `0.16234s`
+- `24`: `0.16429s`
+- `28`: `0.17388s`
+
+`B_CHUNKS` sweep:
+- `4`: `0.15919s`
+- `6`: `0.16651s`
+- `8`: `0.16343s`
+- `10`: `0.16830s`
+- `12`: `0.16264s`
+
+40 alternating at `1e16` (`4` vs current `6`), both orders:
+- candidate median `0.15892s`, mean `0.16041s`
+- baseline median `0.16134s`, mean `0.16141s`
+- delta `-1.500%` median, `-0.620%` mean
+
+20 alternating spot check at `1e15` (`4` vs current `6`):
+- candidate median `0.04666s`, mean `0.04652s`
+- baseline median `0.04679s`, mean `0.04724s`
+
+Decision:
+- Update the `x >= 1e15` runtime row from `b_chunks=6` to `b_chunks=4`.
+
+### Net
+
+- Retained one new runtime-table change from this continuation:
+  - `1e15..1e16 B_CHUNKS: 6 -> 4`
+- Current retained runtime tiers are now:
+  - `x >= 1e18`: `AC_SEG=170000`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e17`: `AC_SEG=180000`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e15`: `AC_SEG=200000`, `B_CHUNKS=4`  (updated), `D_CHUNKS=20`
+
+## 2026-03-14 - low-tier runtime retune
+
+Starting point:
+- Continued from the runtime table after the `1e15..1e16 B_CHUNKS` split.
+- First rechecked the updated `1e15..1e16` row to see whether that new balance
+  had shifted `AC_PAR_MIN`, `AC_SEG`, or `D_CHUNKS`.
+
+### `1e15..1e16` row recheck (no retained change)
+
+At `1e16` on the current row (`AC_SEG=200000`, `B_CHUNKS=4`, `D_CHUNKS=20`):
+
+`AC_PAR_MIN` single-run sweep:
+- `0`: `0.16332s`
+- `16`: `0.28508s`
+- `32`: `0.29408s`
+- `48`: `0.29922s`
+- `64`: `0.15339s`
+- `96`: `0.29937s`
+
+20 alternating (`64` vs current `32`):
+- candidate median `0.16171s`, mean `0.16173s`
+- baseline median `0.15962s`, mean `0.16128s`
+
+20 alternating (`0` vs current `32`):
+- candidate median `0.15983s`, mean `0.16079s`
+- baseline median `0.15937s`, mean `0.15960s`
+
+Decision:
+- Keep global `AC_PAR_MIN=32`.
+
+`AC_SEG` single-run sweep:
+- `160000`: `0.22960s`
+- `180000`: `0.28483s`
+- `200000`: `0.29249s`
+- `220000`: `0.15824s`
+- `240000`: `0.29964s`
+
+20 alternating (`220000` vs current `200000`):
+- candidate median `0.16215s`, mean `0.16216s`
+- baseline median `0.16059s`, mean `0.16050s`
+
+Decision:
+- Keep `AC_SEG=200000` for the `1e15..1e16` row.
+
+`D_CHUNKS` single-run sweep:
+- `12`: `0.29626s`
+- `16`: `0.16454s`
+- `20`: `0.15978s`
+- `24`: `0.16117s`
+- `28`: `0.18281s`
+
+Decision:
+- Keep `D_CHUNKS=20`.
+
+### Retained low-tier split: `x < 1e15` `B_CHUNKS` 8 -> 4
+
+Motivation:
+- The lower row still carried the older `B_CHUNKS=8` fallback.
+- A quick `1e14` sweep showed an obvious gap between `4` and `8`, making this
+  the most credible remaining runtime-table move.
+
+At `1e14` (`AC_SEG=200000`, `AC_PAR_MIN=32`, `D_CHUNKS=24`):
+
+Single-run sweeps:
+
+`B_CHUNKS`:
+- `2`: `0.01878s`
+- `4`: `0.01735s`
+- `6`: `0.01765s`
+- `8`: `0.02023s`
+- `10`: `0.02066s`
+- `12`: `0.02228s`
+
+`AC_SEG`:
+- `120000`: `0.01838s`
+- `160000`: `0.01932s`
+- `200000`: `0.01881s`
+- `240000`: `0.01813s`
+- `280000`: `0.01791s`
+
+`D_CHUNKS`:
+- `12`: `0.01935s`
+- `16`: `0.01995s`
+- `20`: `0.01917s`
+- `24`: `0.01722s`
+- `28`: `0.01903s`
+- `32`: `0.01829s`
+
+40 alternating at `1e14` (`4` vs current `8`):
+- candidate median `0.01745s`, mean `0.01740s`
+- baseline median `0.01927s`, mean `0.01924s`
+- delta `-9.44%` median, `-9.56%` mean
+
+40 alternating at `1e13` (`4` vs current `8`):
+- candidate median `0.00956s`, mean `0.00962s`
+- baseline median `0.01073s`, mean `0.01076s`
+- delta `-10.90%` median, `-10.59%` mean
+
+40 alternating at `1e12` (`4` vs current `8`):
+- candidate median `0.00627s`, mean `0.00636s`
+- baseline median `0.00639s`, mean `0.00642s`
+- delta `-1.88%` median, `-0.93%` mean
+
+Decision:
+- Update the `x < 1e15` runtime row from `b_chunks=8` to `b_chunks=4`.
+
+### Net
+
+- Retained one new runtime-table change from this continuation:
+  - `x < 1e15 B_CHUNKS: 8 -> 4`
+- Current retained runtime tiers are now:
+  - `x >= 1e18`: `AC_SEG=170000`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e17`: `AC_SEG=180000`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e15`: `AC_SEG=200000`, `B_CHUNKS=4`, `D_CHUNKS=20`
+  - `x < 1e15`: `AC_SEG=200000`, `B_CHUNKS=4`  (updated), `D_CHUNKS=24`
+
+## 2026-03-14 - low-tier AC threshold split
+
+Starting point:
+- Continued from the low-tier `B_CHUNKS=4` row.
+- The next question was whether `AC_PAR_MIN` should also split by scale instead
+  of staying at the same global `32` everywhere.
+
+### `1e15..1e16` row recheck (no retained change)
+
+At `1e16` on the current row (`AC_SEG=200000`, `B_CHUNKS=4`, `D_CHUNKS=20`):
+
+20 alternating (`64` vs current `32`):
+- candidate median `0.16171s`, mean `0.16173s`
+- baseline median `0.15962s`, mean `0.16128s`
+
+20 alternating (`220000` vs current `200000`):
+- candidate median `0.16215s`, mean `0.16216s`
+- baseline median `0.16059s`, mean `0.16050s`
+
+20 alternating (`0` vs current `32`):
+- candidate median `0.15983s`, mean `0.16079s`
+- baseline median `0.15937s`, mean `0.15960s`
+
+Decision:
+- Keep the `1e15..1e16` row unchanged.
+
+### Retained low-tier split: `x < 1e15` `AC_PAR_MIN` 32 -> 64
+
+Low-tier single-run sweeps on the retained low row (`AC_SEG=200000`,
+`B_CHUNKS=4`, `D_CHUNKS=24`):
+
+At `1e14`:
+- `0`: `0.02133s`
+- `8`: `0.02266s`
+- `16`: `0.02106s`
+- `32`: `0.02244s`
+- `48`: `0.01788s`
+- `64`: `0.01723s`
+
+At `1e13`:
+- `0`: `0.02003s`
+- `8`: `0.01533s`
+- `16`: `0.02122s`
+- `32`: `0.00985s`
+- `48`: `0.00965s`
+- `64`: `0.00950s`
+
+40 alternating at `1e14` (`64` vs current `32`):
+- candidate median `0.01713s`, mean `0.01777s`
+- baseline median `0.01715s`, mean `0.01778s`
+
+40 alternating at `1e13` (`64` vs current `32`):
+- candidate median `0.00965s`, mean `0.01194s`
+- baseline median `0.00975s`, mean `0.01215s`
+
+40 alternating at `1e12` (`64` vs current `32`):
+- candidate median `0.00626s`, mean `0.00628s`
+- baseline median `0.00628s`, mean `0.00632s`
+
+Decision:
+- Add `ac_par_min` to `RuntimeTuning`.
+- Keep `AC_PAR_MIN=32` for `x >= 1e15`.
+- Set the `x < 1e15` row to `ac_par_min=64`.
+
+### Net
+
+- Retained one new runtime-table change from this continuation:
+  - `x < 1e15 AC_PAR_MIN: 32 -> 64`
+- Current retained runtime tiers are now:
+  - `x >= 1e18`: `AC_SEG=170000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e17`: `AC_SEG=180000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e15`: `AC_SEG=200000`, `AC_PAR_MIN=32`, `B_CHUNKS=4`, `D_CHUNKS=20`
+  - `x < 1e15`: `AC_SEG=200000`, `AC_PAR_MIN=64`  (updated), `B_CHUNKS=4`, `D_CHUNKS=24`
+
+## 2026-03-14 - low-tier D split
+
+Starting point:
+- Continued from the low-tier row after the `AC_PAR_MIN=64` split.
+- Goal: see whether that new low-row balance had shifted `AC_SEG` or `D_CHUNKS`
+  enough to justify a deeper split below `1e14`.
+
+### `1e14` low-row recheck (no retained change)
+
+Current low row at `1e14`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=4`,
+`D_CHUNKS=24`.
+
+Single-run sweeps:
+
+`AC_SEG`:
+- `120000`: `0.03685s`
+- `160000`: `0.02255s`
+- `200000`: `0.01682s`
+- `240000`: `0.01737s`
+- `280000`: `0.01667s`
+- `320000`: `0.02649s`
+
+`D_CHUNKS`:
+- `12`: `0.04219s`
+- `16`: `0.01628s`
+- `20`: `0.01731s`
+- `24`: `0.01693s`
+- `28`: `0.01632s`
+- `32`: `0.01680s`
+
+`B_CHUNKS`:
+- `2`: `0.03468s`
+- `4`: `0.02897s`
+- `6`: `0.03065s`
+- `8`: `0.01996s`
+
+Longer checks:
+- `AC_SEG=280000` vs current `200000`:
+  - candidate median `0.01693s`, mean `0.01748s`
+  - baseline median `0.01683s`, mean `0.01754s`
+- `D_CHUNKS=16` vs current `24`:
+  - candidate median `0.01690s`, mean `0.01752s`
+  - baseline median `0.01686s`, mean `0.01722s`
+
+Decision:
+- Keep the `1e14` row unchanged.
+
+### `1e13` recheck
+
+Single-run sweeps at `1e13` on the same low row:
+
+`AC_SEG`:
+- `120000`: `0.00944s`
+- `160000`: `0.00980s`
+- `200000`: `0.00927s`
+- `240000`: `0.01119s`
+- `280000`: `0.00933s`
+- `320000`: `0.00938s`
+
+`D_CHUNKS`:
+- `12`: `0.00935s`
+- `16`: `0.01038s`
+- `20`: `0.01056s`
+- `24`: `0.00944s`
+- `28`: `0.00953s`
+- `32`: `0.00959s`
+
+`B_CHUNKS`:
+- `2`: `0.01362s`
+- `4`: `0.01355s`
+- `6`: `0.01505s`
+- `8`: `0.01093s`
+
+Longer checks:
+- `B_CHUNKS=8` vs current `4`:
+  - candidate median `0.01071s`, mean `0.01076s`
+  - baseline median `0.00965s`, mean `0.00968s`
+  - rejected immediately as another single-run false positive
+- `D_CHUNKS=12` vs current `24`:
+  - candidate median `0.00963s`, mean `0.00969s`
+  - baseline median `0.00966s`, mean `0.00972s`
+
+### Retained sub-tier split: `1e12..1e13` `D_CHUNKS` 24 -> 12
+
+Why split instead of changing the whole low tier:
+- `1e14` did not want smaller `D_CHUNKS`.
+- `1e11` also failed to support it.
+- The evidence pointed specifically at the middle of the low tier.
+
+Supporting checks:
+- `1e12` (`12` vs current `24`):
+  - candidate median `0.00633s`, mean `0.00635s`
+  - baseline median `0.00641s`, mean `0.00640s`
+- `1e11` (`12` vs current `24`):
+  - candidate median `0.00547s`, mean `0.00557s`
+  - baseline median `0.00536s`, mean `0.00550s`
+  - rejected for the lower decade
+
+Decision:
+- Add a new runtime tier:
+  - `x >= 1e12`: `D_CHUNKS=12`
+- Keep the lower row (`x < 1e12`) at `D_CHUNKS=24`.
+
+### Net
+
+- Retained one new runtime-table change from this continuation:
+  - `1e12..1e13 D_CHUNKS: 24 -> 12`
+- Current retained runtime tiers are now:
+  - `x >= 1e18`: `AC_SEG=170000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e17`: `AC_SEG=180000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e15`: `AC_SEG=200000`, `AC_PAR_MIN=32`, `B_CHUNKS=4`, `D_CHUNKS=20`
+  - `x >= 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=4`, `D_CHUNKS=12`  (updated)
+  - `x < 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=4`, `D_CHUNKS=24`
+
+## Continuation Pass: Bottom-Row B Re-Tune Below 1e12
+
+- Continued from the new `x >= 1e12` split and re-opened the remaining bottom row
+  at `1e11`.
+- Goal: determine whether `x < 1e12` wanted a different `AC_SEG`, `B_CHUNKS`, or
+  `D_CHUNKS` balance now that `1e12..1e13` had moved off onto `D_CHUNKS=12`.
+
+### `1e11` exploratory sweep on the retained bottom row
+
+Current row before this pass: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=4`,
+`D_CHUNKS=24`.
+
+`AC_PAR_MIN`:
+- `0`: `0.00612s`
+- `16`: `0.00605s`
+- `32`: `0.00532s`
+- `64`: `0.00523s`
+- `96`: `0.00557s`
+- `128`: `0.00545s`
+
+`AC_SEG`:
+- `120000`: `0.00548s`
+- `160000`: `0.00498s`
+- `200000`: `0.00560s`
+- `240000`: `0.00562s`
+- `280000`: `0.00531s`
+- `320000`: `0.00528s`
+
+`B_CHUNKS`:
+- `2`: `0.00502s`
+- `4`: `0.00522s`
+- `6`: `0.00517s`
+- `8`: `0.00665s`
+
+`D_CHUNKS`:
+- `8`: `0.00534s`
+- `12`: `0.00546s`
+- `16`: `0.00533s`
+- `24`: `0.00564s`
+- `32`: `0.00570s`
+
+### Bidirectional validation at `1e11`
+
+100 runs per side total (50 candidate-first + 50 baseline-first):
+
+- `AC_SEG=160000` vs current `200000`:
+  - candidate median `0.00541s`, mean `0.00552s`
+  - baseline median `0.00541s`, mean `0.00547s`
+  - rejected; single-run signal disappeared
+- `B_CHUNKS=2` vs current `4`:
+  - candidate median `0.00534s`, mean `0.00542s`
+  - baseline median `0.00537s`, mean `0.00549s`
+- `D_CHUNKS=8` vs current `24`:
+  - candidate median `0.00544s`, mean `0.00555s`
+  - baseline median `0.00547s`, mean `0.00557s`
+  - plausible, but weaker than the B retune
+
+### Interaction check
+
+- The combined candidate (`B_CHUNKS=2`, `D_CHUNKS=8`) beat the old bottom row:
+  - `1e11`: candidate median `0.00532s`, mean `0.00539s`
+  - `1e11`: baseline median `0.00541s`, mean `0.00551s`
+  - `1e10`: candidate median `0.00477s`, mean `0.00487s`
+  - `1e10`: baseline median `0.00494s`, mean `0.00501s`
+- But direct A/B showed that package was not the true optimum:
+  - `1e11 combo` vs `B_CHUNKS=2` only:
+    - candidate median `0.00541s`, mean `0.00550s`
+    - baseline median `0.00530s`, mean `0.00543s`
+  - `1e11 combo` vs `D_CHUNKS=8` only:
+    - candidate median `0.00539s`, mean `0.00547s`
+    - baseline median `0.00530s`, mean `0.00545s`
+- So the combined row was rejected as another low-end false positive.
+
+### Direct B vs D choice
+
+- `1e11`, `B_CHUNKS=2` vs `D_CHUNKS=8`:
+  - candidate median `0.00523s`, mean `0.00537s`
+  - baseline median `0.00536s`, mean `0.00548s`
+- `1e10`, `B_CHUNKS=2` vs current `4`:
+  - candidate median `0.00483s`, mean `0.00493s`
+  - baseline median `0.00485s`, mean `0.00494s`
+- `1e10`, `B_CHUNKS=2` vs `D_CHUNKS=8`:
+  - candidate median `0.00487s`, mean `0.00490s`
+  - baseline median `0.00491s`, mean `0.00499s`
+
+### Retained bottom-row retune: `x < 1e12` `B_CHUNKS` 4 -> 2
+
+Decision:
+- Keep the remaining bottom row on:
+  - `AC_SEG=200000`
+  - `AC_PAR_MIN=64`
+  - `B_CHUNKS=2`  (updated)
+  - `D_CHUNKS=24`
+
+### Net
+
+- Retained one new low-end runtime-table change from this continuation:
+  - `x < 1e12 B_CHUNKS: 4 -> 2`
+- Current retained runtime tiers are now:
+  - `x >= 1e18`: `AC_SEG=170000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e17`: `AC_SEG=180000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e15`: `AC_SEG=200000`, `AC_PAR_MIN=32`, `B_CHUNKS=4`, `D_CHUNKS=20`
+  - `x >= 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=4`, `D_CHUNKS=12`
+  - `x < 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=2`  (updated), `D_CHUNKS=24`

@@ -694,3 +694,375 @@ This check-in closes a coherent D-focused optimization wave. The important story
 - The pushed baseline has now moved again, this time by a retuned `B_CHUNKS` default from `2` to `4`.
 - The D-side code win from the previous continuation still stands unchanged.
 - The most obvious cheap post-hoist D and AC source rewrites from this continuation have now been tested and rejected.
+
+## 2026-03-13 (D branch-pruning continuation)
+
+- Continued from the pushed `B_CHUNKS=4` baseline and rechecked the current D stats first.
+- The stats still pointed at leaf work, not lookup-boundary work:
+  - same-bucket queries were still about `71%`, but cross-bucket ranges were much
+    heavier with about `297.5` result items on average
+  - that made another tiny boundary-search rewrite hard to justify
+
+### Retained change
+
+- Removed interval/order branches that the existing leaf windows already prove away:
+  - `xpm` / `xpq` are already constrained to `[low, high)`
+  - Type 2 wheel positions remain monotone in the existing reverse walk
+- The code change stayed deliberately small:
+  - no change to update timing
+  - no change to chunk correction semantics
+  - mirrored in the serial fallback so the two D paths stay behaviorally aligned
+
+### Validation
+
+- Full built-in correctness sweep still passed through `Max i64`.
+- A quick instrumented sanity check improved D from about `5.95s` to `5.91s`.
+- A 12-run alternating A/B on `Max i64` (both orders, 6 candidate + 6 baseline)
+  was strong enough to keep:
+  - candidate median `8.34409s`, mean `8.34551s`
+  - baseline median `8.36555s`, mean `8.36550s`
+  - about `-0.26%` median and `-0.24%` mean
+
+### Current read
+
+- This is another small but real D-side leaf-loop win, not a new scheduling or
+  tuning change.
+- The remaining space still looks like "leaf-body cost under heavy cross-bucket
+  spans," but the bar for keeping future source rewrites should stay high unless
+  they beat this result under balanced A/B.
+
+## 2026-03-13 (post-pruning retune continuation)
+
+- After landing the branch-pruning win, the next question was whether the new
+  D baseline had shifted any of the older scheduler or sparse-index optima.
+- A small helper-level code try was tested first:
+  - 4-way unrolled shared popcount-range helper for `BitSieve::count()` and
+    `count_delta()`
+  - it immediately regressed to `9.22871s` on the first full `Max i64` sweep
+  - reverted without further spending
+
+### What was rechecked and rejected
+
+1. `D_CHUNKS`
+- Fresh single-run sweep put `24` back on top.
+- No reason to reopen the chunking default.
+
+2. `B_CHUNKS`
+- `4` and `2` were again very close in singles.
+- `4` still held the edge, so there was no new retune there.
+
+3. `AC_SEG=150000`
+- Looked excellent in a short single-run sweep.
+- Lost clearly in a 12-run alternating A/B against the retained `170000`.
+- This was another example of a tempting short-window result collapsing under
+  balanced order control.
+
+4. `VM_LOOKAHEAD=3`
+- Same pattern as `AC_SEG=150000`:
+  - short sweep looked promising
+  - 12-run alternating comparison lost to the retained default `1`
+
+### Retained change
+
+- `VM_STRIDE` finally moved again on the new baseline.
+- Fresh singles made `16` the most credible candidate, with `32` the only
+  nearby alternative still worth checking.
+- Validation came out clean:
+  - 12-run alternating (`16` vs `24`) favored `16` on both median and mean
+  - 12-run alternating (`16` vs `32`) also favored `16`
+
+### Current state
+
+- The continuation retained one new default:
+  - `VM_STRIDE: 24 -> 16`
+- This is consistent with the current read that the remaining wins are still
+  buried in the D leaf path, but also shows that the branch-pruned baseline did
+  move at least one previously settled sparse-index tuning point.
+
+## 2026-03-13 (post-`VM_STRIDE` continuation)
+
+- The next question after landing `VM_STRIDE=16` was whether the nearby
+  sparse-index surface had shifted again.
+- A small matrix over `(VM_STRIDE, VM_LOOKAHEAD)` produced one suspiciously good
+  short-run outlier at `(12,1)`, but the follow-up round-robin over
+  `10/12/14/16` flattened that back into noise.
+- No further sparse-index default moved in this pass.
+
+### Why the search moved to AC
+
+- `SHOW_TIMING` still had AC as the longest phase after the recent D wins.
+- That made `AC_PAR_MIN` the next cheapest credible lever:
+  - purely a runtime threshold
+  - no structural change to AC loops
+  - easy to validate under alternating A/B
+
+### What was found
+
+- `AC_PAR_MIN=64` first looked like a small improvement over `0`, and a
+  balanced 12-run check did keep a narrow edge.
+- But the nearby sweep reopened the question and made `32` the stronger
+  candidate against the actual default.
+- The important comparison was not just `32` vs `64`; it was:
+  1. does the candidate beat `0` cleanly?
+  2. does it still look acceptable head-to-head against the other plausible
+     candidate?
+
+- `32` answered that better than `64`:
+  - stronger win vs `0`
+  - better median story in the direct `32` vs `64` checks
+
+### Current state
+
+- Retained one new AC-side default from this continuation:
+  - `AC_PAR_MIN: 0 -> 32`
+- This is not an AC algorithm rewrite; it is a small scheduling-threshold retune.
+- The broader pattern still holds:
+  - most apparent single-run wins collapse under balanced order control
+  - the surviving gains continue to come from narrow, well-validated runtime or
+    hot-loop changes rather than broad rewrites
+
+## 2026-03-13 (post-`AC_PAR_MIN` continuation)
+
+- After landing `AC_PAR_MIN=32`, the next obvious check was whether the AC-side
+  segmentation or the AC/B contention balance had shifted.
+
+### What was rechecked
+
+1. `AC_SEG`
+- Fresh singles on the new baseline put `170000` back on top.
+- No reason to reopen the AC segmentation default.
+
+2. `B_CHUNKS`
+- This one did move again.
+- The important context is that the AC threshold retune changed how much
+  concurrency pressure AC and B place on each other at the top end.
+- A fresh sweep made `6` the strongest high-end candidate, and a 12-run
+  alternating check against the retained `4` kept a small but consistent edge.
+
+### Why it was kept
+
+- The `Max i64` A/B win was modest, but it went the right direction on both
+  median and mean.
+- The extra spot checks did not reveal a downside at smaller nearby scales:
+  - `1e18` was effectively flat
+  - `1e17` leaned slightly toward `6`
+- That made this a reasonable top-tier heuristic retune rather than a
+  scale-specific fluke.
+
+### Current state
+
+- Retained one new runtime-tuning change from this continuation:
+  - top-end `B_CHUNKS: 4 -> 6`
+- At this point the recent optimization wave has now moved three live defaults:
+  - `VM_STRIDE: 24 -> 16`
+  - `AC_PAR_MIN: 0 -> 32`
+  - high-end `B_CHUNKS: 4 -> 6`
+
+## 2026-03-13 (high-end tier follow-up)
+
+- After the top-end `B_CHUNKS` retune, the next sensible target was the runtime
+  table itself rather than another global default.
+- The key distinction in this pass was scale:
+  - `Max i64` and `1e18` still wanted the same `AC_SEG`
+  - `1e17` did not
+
+### What moved
+
+- The `1e17` AC segment size finally moved from `190000` to `180000`.
+- The win was small, but it survived a longer balanced A/B at that scale.
+
+### What did not move
+
+1. `1e18 AC_SEG`
+- A short single-run sweep made `150000` look promising.
+- The longer alternating check reversed that and kept `170000`.
+
+2. `1e17 D_CHUNKS`
+- `16` looked good in singles once `AC_SEG=180000` was in place.
+- Balanced A/B said no and kept `24`.
+
+### Current state
+
+- Retained one new table-level runtime change from this continuation:
+  - `1e17 AC_SEG: 190000 -> 180000`
+- The recent optimization wave has now changed four live runtime choices:
+  - `VM_STRIDE: 24 -> 16`
+  - `AC_PAR_MIN: 0 -> 32`
+  - high-end `B_CHUNKS: 4 -> 6`
+  - `1e17 AC_SEG: 190000 -> 180000`
+
+## 2026-03-14 (tier split follow-up)
+
+- The next pass stayed in the runtime table instead of going back to source
+  rewrites.
+- Two questions were tested:
+  1. does `AC_PAR_MIN` want to split by scale?
+  2. does the `1e15..1e16` row really want the same `B_CHUNKS=6` as the
+     higher-end tiers?
+
+### What did not move
+
+1. Scale-aware `AC_PAR_MIN`
+- `1e17` singles briefly suggested `0` might beat the new global `32`.
+- The longer 20-run alternating check said no and kept `32`.
+
+2. `1e17 B_CHUNKS`
+- `10` looked attractive in singles after the `1e17 AC_SEG` retune.
+- It was too unstable under A/B and was dropped.
+- `4` was also checked directly and lost clearly.
+
+3. Aggressive `1e16` row package
+- A combined `AC_SEG=220000`, `B_CHUNKS=12`, `D_CHUNKS=12` row looked fast in
+  singles.
+- The package lost on median against the current row, and even the `AC_SEG`
+  piece by itself failed in a direct A/B.
+
+### Retained change
+
+- The surviving move was smaller and cleaner:
+  - the `1e15..1e16` row wants `B_CHUNKS=4`, not `6`
+- It held at both scales that share the row:
+  - strong enough at `1e16`
+  - still favorable in a direct `1e15` spot check
+
+### Current state
+
+- Retained one new table-level runtime change from this continuation:
+  - `1e15..1e16 B_CHUNKS: 6 -> 4`
+- The runtime table has now split in a more coherent way by scale:
+  - top end keeps `B_CHUNKS=6`
+  - the `1e15..1e16` row moves back to `4`
+
+## 2026-03-14 (low-tier continuation)
+
+- After splitting the `1e15..1e16` row, the next check was whether that row had
+  shifted enough to justify more local retunes.
+- It had not:
+  - `AC_PAR_MIN` did not beat the retained global `32`
+  - `AC_SEG=220000` again looked tempting in singles and again lost in A/B
+  - `D_CHUNKS=20` stayed put
+
+### Why the search moved lower
+
+- The updated `1e15..1e16` row no longer looked like the best place to spend.
+- The `x < 1e15` row still carried the older `B_CHUNKS=8` default, which was
+  now out of line with the rest of the runtime table.
+
+### What was found
+
+- `1e14` immediately showed `B_CHUNKS=4` beating `8` by a large margin.
+- The result held at `1e13` and remained favorable at `1e12`.
+- The other row knobs did not show a case for change:
+  - `D_CHUNKS=24` stayed best at `1e14`
+  - `AC_SEG` singles were too noisy and not needed once the B result was so clear
+
+### Current state
+
+- Retained one new low-tier runtime change from this continuation:
+  - `x < 1e15 B_CHUNKS: 8 -> 4`
+- The runtime table now has a much cleaner B-chunk story by scale:
+  - low and mid tiers use `4`
+  - the top two tiers use `6`
+
+## 2026-03-14 (low-tier AC threshold continuation)
+
+- After the low-tier `B_CHUNKS` split, the next likely question was whether the
+  AC threshold should split there too.
+- The first stop was the `1e15..1e16` row:
+  - `AC_PAR_MIN=64` did not beat the retained `32`
+  - `AC_SEG=220000` still failed again
+  - `AC_PAR_MIN=0` also lost
+- That ruled out another change in the mid row.
+
+### Why the search moved lower again
+
+- The low tier had already shown that it does not always want the same B-side
+  settings as the rows above.
+- That made it plausible that the AC threshold might also want a low-tier split.
+
+### What was found
+
+- The low-tier sweeps at `1e14` and `1e13` both pushed the best-looking values
+  upward into the `48..64` range.
+- Balanced checks against the retained `32` showed only small gains, but they
+  stayed directionally consistent at:
+  - `1e14`
+  - `1e13`
+  - `1e12`
+
+### Current state
+
+- Retained one new low-tier runtime change from this continuation:
+  - `x < 1e15 AC_PAR_MIN: 32 -> 64`
+- `RuntimeTuning` now carries `ac_par_min` explicitly instead of relying on one
+  global fallback for every scale.
+
+## 2026-03-14 (low-tier D continuation)
+
+- After landing the low-tier `AC_PAR_MIN=64` split, the next question was
+  whether that row had shifted enough to justify further tuning.
+- `1e14` said "not really":
+  - `AC_SEG=280000` did not beat `200000`
+  - `D_CHUNKS=16` did not beat `24`
+
+### Why the search moved to `1e13`
+
+- The `1e14` row looked stable, but the low tier still spans several decades.
+- That made a deeper split more plausible than another whole-row retune.
+
+### What was found
+
+- `1e13` singles suggested two things:
+  - `B_CHUNKS=8` looked better than `4`
+  - `D_CHUNKS=12` looked slightly better than `24`
+- The first one was another false positive:
+  - long A/B put `B_CHUNKS=4` clearly back in front
+- The second one held, but only barely.
+
+- The deciding extra checks were:
+  - `1e12`: still favored `D_CHUNKS=12`
+  - `1e11`: pushed back toward `24`
+
+### Current state
+
+- Retained one new sub-tier runtime change from this continuation:
+  - `1e12..1e13 D_CHUNKS: 24 -> 12`
+- The low end is now split more precisely:
+  - `1e14` stays on the broader low-tier row
+  - `1e12..1e13` gets a smaller D chunk count
+  - `1e11` and below stay on the original low-tier D setting
+
+## 2026-03-14 (bottom-row B continuation)
+
+- Continued from the new `1e12..1e13` D split and re-opened the remaining
+  `x < 1e12` row at `1e11`.
+- The first singles looked like a classic low-end trap again:
+  - `AC_SEG=160000`
+  - `B_CHUNKS=2`
+  - `D_CHUNKS=8`
+  all appeared attractive in one-shot runs.
+
+### What held up
+
+- Balanced bidirectional checks pushed `AC_SEG=160000` back out immediately.
+- Both `B_CHUNKS=2` and `D_CHUNKS=8` survived against the old bottom row, but
+  the B-side move was the cleaner one.
+- A combined (`B=2`, `D=8`) package looked even better against the old row, but
+  direct A/B showed it was not actually the best setting.
+
+### How it was resolved
+
+- Direct `B_CHUNKS=2` vs `D_CHUNKS=8` checks at both:
+  - `1e11`
+  - `1e10`
+  put `B_CHUNKS=2` clearly in front.
+- That narrowed the retained move to the B scheduler only; the lower-row
+  `D_CHUNKS=24` setting stays put.
+
+### Current state
+
+- Retained one more low-end runtime change from this continuation:
+  - `x < 1e12 B_CHUNKS: 4 -> 2`
+- The low end now resolves as:
+  - `1e12..1e13`: `B_CHUNKS=4`, `D_CHUNKS=12`
+  - `1e11` and below: `B_CHUNKS=2`, `D_CHUNKS=24`
