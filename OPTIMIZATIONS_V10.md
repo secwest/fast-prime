@@ -3143,3 +3143,298 @@ Decision:
 - The important outcome was the coverage audit itself:
   - the new `x >= 1e12` row is safe at `1e14`
   - none of the tempting singles justified another split yet
+
+## Continuation Pass: Re-opened `x >= 1e15` Row and High-End Follow-Up
+
+- After the low/mid-low rows were cleaned up, the next search reopened the still
+  broad `x >= 1e15` row and then moved upward again into the `1e17`/`1e18`
+  tiers.
+
+### `1e15..1e16` split search (no retained change)
+
+Current shared row at the start of this pass:
+- `AC_SEG=200000`
+- `AC_PAR_MIN=32`
+- `B_CHUNKS=4`
+- `D_CHUNKS=20`
+
+Single-run sweeps at `1e16` (`10 Quadrillion`):
+
+`AC_SEG`:
+- `160000`: `0.15690s`
+- `180000`: `0.16013s`
+- `200000`: `0.16606s`
+- `220000`: `0.15922s`
+- `240000`: `0.15216s`
+- `260000`: `0.16207s`
+
+`AC_PAR_MIN`:
+- `0`: `0.15618s`
+- `16`: `0.15836s`
+- `32`: `0.15986s`
+- `48`: `0.16206s`
+- `64`: `0.16170s`
+- `96`: `0.16035s`
+- `128`: `0.15426s`
+
+`B_CHUNKS`:
+- `2`: `0.16462s`
+- `4`: `0.16785s`
+- `6`: `0.16499s`
+- `8`: `0.16572s`
+- `10`: `0.16419s`
+
+`D_CHUNKS`:
+- `12`: `0.15945s`
+- `16`: `0.15750s`
+- `20`: `0.15740s`
+- `24`: `0.16461s`
+- `28`: `0.16267s`
+
+Single-run sweeps at `1e15` (`1 Quadrillion`):
+
+`AC_SEG`:
+- `160000`: `0.05002s`
+- `180000`: `0.04767s`
+- `200000`: `0.04480s`
+- `220000`: `0.04607s`
+- `240000`: `0.04538s`
+- `260000`: `0.04775s`
+
+`AC_PAR_MIN`:
+- `0`: `0.04723s`
+- `16`: `0.05110s`
+- `32`: `0.05005s`
+- `48`: `0.04601s`
+- `64`: `0.04913s`
+- `96`: `0.04704s`
+- `128`: `0.04827s`
+
+`B_CHUNKS`:
+- `2`: `0.04967s`
+- `4`: `0.04675s`
+- `6`: `0.04562s`
+- `8`: `0.05086s`
+- `10`: `0.04593s`
+
+`D_CHUNKS`:
+- `12`: `0.04757s`
+- `16`: `0.04705s`
+- `20`: `0.04973s`
+- `24`: `0.04664s`
+- `28`: `0.04791s`
+
+Bidirectional checks:
+
+At `1e16`:
+- `AC_SEG=240000` vs current `200000`:
+  - short window: candidate median `0.18369s`, mean `0.18027s`
+  - short window: baseline median `0.18956s`, mean `0.18316s`
+  - looked worth pursuing
+- `AC_SEG=160000` vs current `200000`:
+  - candidate median `0.18237s`, mean `0.18313s`
+  - baseline median `0.17646s`, mean `0.17906s`
+  - rejected
+- `AC_PAR_MIN=0` vs current `32`:
+  - candidate median `0.18600s`, mean `0.18120s`
+  - baseline median `0.18302s`, mean `0.18274s`
+  - rejected
+- `AC_PAR_MIN=128` vs current `32`:
+  - candidate median `0.18272s`, mean `0.18570s`
+  - baseline median `0.18419s`, mean `0.18472s`
+  - mixed, not enough
+- `B_CHUNKS=2` vs current `4`:
+  - candidate median `0.16474s`, mean `0.17288s`
+  - baseline median `0.16816s`, mean `0.17402s`
+  - positive but smaller than the AC signal
+- `B_CHUNKS=10` vs current `4`:
+  - candidate median `0.16074s`, mean `0.16162s`
+  - baseline median `0.16226s`, mean `0.16190s`
+- `D_CHUNKS=16` vs current `20`:
+  - candidate median `0.16303s`, mean `0.16172s`
+  - baseline median `0.16099s`, mean `0.16064s`
+  - rejected
+
+At `1e15`:
+- `AC_PAR_MIN=48` vs current `32`:
+  - short window: candidate median `0.04835s`, mean `0.06553s`
+  - short window: baseline median `0.04915s`, mean `0.07540s`
+  - looked promising, but had obvious tail noise
+- `B_CHUNKS=6` vs current `4`:
+  - candidate median `0.04867s`, mean `0.06717s`
+  - baseline median `0.04855s`, mean `0.07078s`
+- `B_CHUNKS=10` vs current `4`:
+  - candidate median `0.04900s`, mean `0.06475s`
+  - baseline median `0.04994s`, mean `0.06603s`
+- `D_CHUNKS=24` vs current `20`:
+  - candidate median `0.04925s`, mean `0.07265s`
+  - baseline median `0.04952s`, mean `0.07193s`
+
+Follow-up combo screens:
+- `1e16 AC240 + B6` vs base:
+  - candidate median `0.16326s`, mean `0.16234s`
+  - baseline median `0.16048s`, mean `0.16127s`
+  - rejected
+- `1e16 AC240 + B8` vs base:
+  - candidate median `0.16170s`, mean `0.16208s`
+  - baseline median `0.15991s`, mean `0.16071s`
+  - rejected
+- `1e16 AC240 + AC_PAR_MIN=96` vs `AC240`:
+  - candidate median `0.15947s`, mean `0.15919s`
+  - baseline median `0.16164s`, mean `0.16293s`
+  - looked better than `AC240` alone
+- `1e15 AC_PAR_MIN=48 + D12` vs base:
+  - candidate median `0.04663s`, mean `0.04669s`
+  - baseline median `0.04734s`, mean `0.04697s`
+  - looked worth checking against `AC_PAR_MIN=48` alone
+- `1e15 AC_PAR_MIN=48 + B10` vs `AC_PAR_MIN=48`:
+  - candidate median `0.04730s`, mean `0.04771s`
+  - baseline median `0.04730s`, mean `0.04734s`
+  - no gain
+- `1e15 AC_PAR_MIN=48 + D12` vs `AC_PAR_MIN=48`:
+  - candidate median `0.04725s`, mean `0.04707s`
+  - baseline median `0.04652s`, mean `0.04654s`
+  - rejected
+
+Long confirmation that killed the split:
+- `1e16 AC240` vs base:
+  - candidate median `0.16059s`, mean `0.16126s`
+  - baseline median `0.16131s`, mean `0.16100s`
+  - median edge survived, mean did not
+- `1e16 AC240 + AC_PAR_MIN=96` vs base:
+  - candidate median `0.16220s`, mean `0.16255s`
+  - baseline median `0.16107s`, mean `0.16111s`
+  - rejected
+- `1e16 AC240 + AC_PAR_MIN=96` vs `AC240`:
+  - candidate median `0.16329s`, mean `0.16366s`
+  - baseline median `0.16211s`, mean `0.16301s`
+  - rejected
+- `1e15 AC_PAR_MIN=48` vs base:
+  - candidate median `0.04716s`, mean `0.04717s`
+  - baseline median `0.04691s`, mean `0.04711s`
+  - rejected
+
+Decision:
+- No retained `1e15`/`1e16` split from this continuation.
+- Too many mid-row candidates improved on one statistic and failed on the other
+  once the windows were long enough.
+
+### High-end recheck
+
+Single-run sweeps at `1e17` (`100 Quadrillion`, current row
+`AC_SEG=180000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`):
+
+`AC_SEG`:
+- `160000`: `0.58980s`
+- `170000`: `0.59331s`
+- `180000`: `0.58782s`
+- `190000`: `0.58911s`
+- `200000`: `0.58941s`
+- `220000`: `0.59329s`
+
+`AC_PAR_MIN`:
+- `0`: `0.58716s`
+- `16`: `0.58256s`
+- `32`: `0.59107s`
+- `48`: `0.58639s`
+- `64`: `0.59081s`
+- `96`: `0.58901s`
+
+`B_CHUNKS`:
+- `4`: `0.59087s`
+- `6`: `0.63348s`
+- `8`: `0.59360s`
+- `10`: `0.58787s`
+- `12`: `0.59792s`
+
+`D_CHUNKS`:
+- `16`: `0.59312s`
+- `20`: `0.59446s`
+- `24`: `0.58852s`
+- `28`: `0.59086s`
+- `32`: `0.58529s`
+
+Bidirectional validation at `1e17`:
+- `AC_PAR_MIN=16` vs current `32`:
+  - candidate median `0.58987s`, mean `0.59228s`
+  - baseline median `0.59128s`, mean `0.59978s`
+  - positive, but smaller than the B-side move
+- `B_CHUNKS=10` vs current `6`:
+  - first check: candidate median `0.58716s`, mean `0.59020s`
+  - first check: baseline median `0.59313s`, mean `0.59642s`
+- `D_CHUNKS=32` vs current `24`:
+  - candidate median `0.59165s`, mean `0.59331s`
+  - baseline median `0.59125s`, mean `0.59172s`
+  - rejected
+
+Long confirmation:
+- `B_CHUNKS=10` vs current `6`:
+  - candidate median `0.58783s`, mean `0.58902s`
+  - baseline median `0.59210s`, mean `0.59671s`
+  - delta `-0.723%` median, `-1.289%` mean
+- `B_CHUNKS=10` + `AC_PAR_MIN=16` vs `B_CHUNKS=10`:
+  - candidate median `0.58926s`, mean `0.59268s`
+  - baseline median `0.58742s`, mean `0.59189s`
+  - rejected
+
+### `1e18` spot recheck (no retained change)
+
+Single-run sweep at `1e18` (`1 Quintillion`, current row
+`AC_SEG=170000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`):
+
+`AC_SEG`:
+- `150000`: `2.20595s`
+- `160000`: `2.22023s`
+- `170000`: `2.20893s`
+- `180000`: `2.25847s`
+- `190000`: `2.26459s`
+
+`AC_PAR_MIN`:
+- `0`: `2.24496s`
+- `16`: `2.25494s`
+- `32`: `2.24498s`
+- `48`: `2.21811s`
+- `64`: `2.23935s`
+- `96`: `2.24626s`
+
+`B_CHUNKS`:
+- `4`: `2.23317s`
+- `6`: `2.22386s`
+- `8`: `2.21295s`
+- `10`: `2.22677s`
+
+`D_CHUNKS`:
+- `16`: `2.23214s`
+- `20`: `2.21173s`
+- `24`: `2.22171s`
+- `28`: `2.21778s`
+- `32`: `2.21495s`
+
+Serial A/B on the strongest threshold candidate:
+- `AC_PAR_MIN=48` vs current `32`:
+  - candidate median `2.21846s`, mean `2.21887s`
+  - baseline median `2.21812s`, mean `2.22038s`
+  - effectively flat
+
+### Retained high-end retune: `1e17` `B_CHUNKS` 6 -> 10
+
+Decision:
+- Update the `1e17` runtime row from:
+  - `B_CHUNKS=6`
+  to:
+  - `B_CHUNKS=10`
+- Keep:
+  - `1e17 AC_PAR_MIN=32`
+  - `1e17 D_CHUNKS=24`
+  - `1e18` row unchanged
+
+### Net
+
+- Retained one new runtime-table change from this continuation:
+  - `1e17 B_CHUNKS: 6 -> 10`
+- Current retained runtime tiers are now:
+  - `x >= 1e18`: `AC_SEG=170000`, `AC_PAR_MIN=32`, `B_CHUNKS=6`, `D_CHUNKS=24`
+  - `x >= 1e17`: `AC_SEG=180000`, `AC_PAR_MIN=32`, `B_CHUNKS=10`  (updated), `D_CHUNKS=24`
+  - `x >= 1e15`: `AC_SEG=200000`, `AC_PAR_MIN=32`, `B_CHUNKS=4`, `D_CHUNKS=20`
+  - `x >= 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=2`, `D_CHUNKS=12`
+  - `x < 1e12`: `AC_SEG=200000`, `AC_PAR_MIN=64`, `B_CHUNKS=2`, `D_CHUNKS=24`

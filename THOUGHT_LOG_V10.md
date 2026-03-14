@@ -1133,3 +1133,50 @@ This check-in closes a coherent D-focused optimization wave. The important story
   - the new `x >= 1e12` row is safe at `1e14`
   - the next retained move, if any, will need stronger evidence than the noisy
     `1e14` threshold surface produced here
+
+## 2026-03-14 (`x >= 1e15` re-open + high-end revisit)
+
+- With the low/mid-low table in better shape, the next pass reopened the
+  remaining broad `x >= 1e15` row and then moved back to the `1e17` and `1e18`
+  tiers.
+
+### What failed in the `1e15..1e16` row
+
+- `1e16` did produce a credible `AC_SEG=240000` screen win.
+- `1e15` did produce a credible `AC_PAR_MIN=48` screen win.
+- That looked like a strong case for splitting the row by decade, but the long
+  confirmation window killed both:
+  - `1e16 AC240` kept a tiny median edge but lost the clean mean story
+  - `1e15 AC_PAR_MIN=48` flipped and lost on median in the long rerun
+
+- Several combo tries were also tested and rejected:
+  - `1e16 AC240 + AC_PAR_MIN=96`
+  - `1e16 AC240 + B6/B8`
+  - `1e15 AC_PAR_MIN=48 + B10`
+  - `1e15 AC_PAR_MIN=48 + D12`
+
+- So the broad `x >= 1e15` row stays put for now.
+
+### What did hold up at the high end
+
+- `1e17` re-opened three plausible knobs:
+  - `AC_PAR_MIN=16`
+  - `B_CHUNKS=10`
+  - `D_CHUNKS=32`
+- Long A/B kept only one of them:
+  - `B_CHUNKS=10` beat the retained `6` cleanly on both median and mean
+- The obvious follow-up combination (`B10 + AC_PAR_MIN=16`) failed, so the win
+  is narrower than the first screen suggested.
+
+- `1e18` was also spot-checked again:
+  - `AC_PAR_MIN=48` was the strongest single-run threshold candidate
+  - serial A/B put it back into near-flat territory
+  - no `1e18` row change was kept
+
+### Current state
+
+- Retained one more high-end runtime change from this continuation:
+  - `1e17 B_CHUNKS: 6 -> 10`
+- The table now distinguishes the top two rows more clearly:
+  - `1e18` stays on `B_CHUNKS=6`
+  - `1e17` moves to `B_CHUNKS=10`

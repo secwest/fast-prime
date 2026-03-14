@@ -94,7 +94,7 @@ fn choose_runtime_tuning(x: u64) -> RuntimeTuning {
     if x >= 1_000_000_000_000_000_000 {
         RuntimeTuning { ac_seg: 170_000, ac_par_min: 32, b_chunks: 6, d_chunks: 24, d_adapt_chunks: false }
     } else if x >= 100_000_000_000_000_000 {
-        RuntimeTuning { ac_seg: 180_000, ac_par_min: 32, b_chunks: 6, d_chunks: 24, d_adapt_chunks: false }
+        RuntimeTuning { ac_seg: 180_000, ac_par_min: 32, b_chunks: 10, d_chunks: 24, d_adapt_chunks: false }
     } else if x >= 1_000_000_000_000_000 {
         RuntimeTuning { ac_seg: 200_000, ac_par_min: 32, b_chunks: 4, d_chunks: 20, d_adapt_chunks: false }
     } else if x >= 1_000_000_000_000 {
